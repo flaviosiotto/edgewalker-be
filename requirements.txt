@@ -8,3 +8,4 @@ python-multipart
 pydantic[email]
 pydantic-settings
 httpx
+psycopg2-binary
