@@ -7,6 +7,7 @@ from app.db.database import create_db_and_tables
 from app.api.auth import router as auth_router
 from app.api.users import router as users_router
 from app.api.healthcheck import router as system_router
+from app.api.agents import router as agents_router
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -52,3 +53,4 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(system_router)
+app.include_router(agents_router)
