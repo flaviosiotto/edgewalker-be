@@ -26,3 +26,8 @@ def create_user(session: Session, payload: UserCreate) -> User:
     session.commit()
     session.refresh(user)
     return user
+
+
+def list_users(session: Session) -> list[User]:
+    statement = select(User)
+    return list(session.exec(statement).all())
