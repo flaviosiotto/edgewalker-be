@@ -1,5 +1,4 @@
 from sqlmodel import SQLModel, Session, create_engine
-from sqlalchemy import text
 from app.core.config import settings
 
 
@@ -17,10 +16,6 @@ engine = create_engine(
 
 
 def create_db_and_tables():
-    if not DATABASE_URL.startswith("sqlite"):
-        with engine.begin() as conn:
-            conn.execute(text("CREATE SCHEMA IF NOT EXISTS operations"))
-
     from app.models.user import User  # noqa: F401
     from app.models.agent import Agent, Chat  # noqa: F401
     from app.models.n8n_chat_history import N8nChatHistory  # noqa: F401
