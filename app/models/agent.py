@@ -5,7 +5,8 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import Boolean, Column, Computed, Enum as SAEnum, ForeignKey, String
-from sqlmodel import Field, SQLModel
+from sqlalchemy.orm import relationship
+from sqlmodel import Field, Relationship, SQLModel
 
 
 def _enum_values_callable(enum_cls: type[enum.Enum]) -> list[str]:
@@ -21,6 +22,7 @@ class Agent(SQLModel, table=True):
 
 
 class Chat(SQLModel, table=True):
+    __allow_unmapped__ = True
     id: Optional[int] = Field(default=None, primary_key=True)
 
     user_id: Optional[int] = Field(
@@ -69,4 +71,15 @@ class Chat(SQLModel, table=True):
         ),
         description="ID chat in formato string (usato da n8n_chat_histories)",
     )
+
+    chat_histories: list["N8nChatHistory"] = Relationship(
+        sa_relationship=relationship(
+            "N8nChatHistory",
+            back_populates="chat",
+            cascade="all, delete-orphan",
+        )
+    )
+
+
+from app.models.n8n_chat_history import N8nChatHistory  # noqa: E402
 

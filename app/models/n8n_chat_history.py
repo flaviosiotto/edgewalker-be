@@ -1,23 +1,33 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Optional
+from typing import Any
 
 from sqlalchemy import Column, ForeignKey, String
-from sqlmodel import Field, SQLModel
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import relationship
+from sqlmodel import Field, Relationship, SQLModel
 
 
 class N8nChatHistory(SQLModel, table=True):
     __tablename__ = "n8n_chat_histories"
+    __allow_unmapped__ = True
 
-    id: Optional[int] = Field(default=None, primary_key=True)
-    chat_id: Optional[int] = Field(
-        default=None,
-        sa_column=Column(ForeignKey("chat.id", ondelete="CASCADE"), nullable=False),
-        description="FK alla chat",
+    id: int | None = Field(default=None, primary_key=True)
+
+    session_id: str = Field(
+        sa_column=Column(
+            String(255),
+            ForeignKey("chat.n8n_session_id", ondelete="CASCADE"),
+            index=True,
+            nullable=False,
+        )
+    )
+    message: Any = Field(sa_column=Column(JSONB, nullable=False))
+
+    chat: "Chat" | None = Relationship(
+        sa_relationship=relationship("Chat", back_populates="chat_histories")
     )
 
-    role: Optional[str] = Field(default=None, sa_column=Column(String(50), nullable=True))
-    content: Optional[str] = Field(default=None, sa_column=Column(String, nullable=True))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+from app.models.agent import Chat  # noqa: E402
 
