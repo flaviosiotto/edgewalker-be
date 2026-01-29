@@ -1,3 +1,6 @@
+from contextlib import contextmanager
+from typing import Generator
+
 from sqlmodel import SQLModel, Session, create_engine
 from app.core.config import settings
 
@@ -25,5 +28,16 @@ def create_db_and_tables():
 
 
 def get_session():
+    """Dependency for FastAPI endpoints."""
     with Session(engine) as session:
         yield session
+
+
+@contextmanager
+def get_session_context() -> Generator[Session, None, None]:
+    """Context manager for background tasks and non-FastAPI code."""
+    session = Session(engine)
+    try:
+        yield session
+    finally:
+        session.close()

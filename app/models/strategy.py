@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from datetime import datetime, date, timezone
+from enum import Enum
 from typing import Any, Optional
 
-from sqlalchemy import Column, ForeignKey, String, Date, DateTime, Integer, Numeric
+from sqlalchemy import Column, ForeignKey, String, Date, DateTime, Integer, Numeric, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
+
+
+class BacktestStatus(str, Enum):
+    """Status of a backtest execution."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class Strategy(SQLModel, table=True):
@@ -54,13 +63,49 @@ class BacktestResult(SQLModel, table=True):
         )
     )
 
+    # Agent that executes this backtest via n8n webhook
+    agent_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("agent.id_agent", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        )
+    )
+
+    # ── INPUT (immutable after creation) ──
     symbol: str = Field(sa_column=Column(String(32), nullable=False, index=True))
     start_date: date = Field(sa_column=Column(Date, nullable=False))
     end_date: date = Field(sa_column=Column(Date, nullable=False))
-
-    # Optional: store any run parameters, metrics, and report payloads
     parameters: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    # parameters: initial_capital, commission, slippage, config overrides, etc.
+
+    # ── STATUS ──
+    status: str = Field(
+        default=BacktestStatus.PENDING.value,
+        sa_column=Column(String(20), nullable=False, index=True),
+    )
+    started_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    completed_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    error_message: Optional[str] = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+    )
+
+    # ── OUTPUT (populated on completion) ──
     metrics: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    # metrics: Return%, Sharpe, MaxDD, WinRate, ProfitFactor, #Trades, EquityFinal, etc.
+    html_report_url: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(500), nullable=True),
+    )
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
@@ -69,6 +114,10 @@ class BacktestResult(SQLModel, table=True):
 
     strategy: Strategy | None = Relationship(
         sa_relationship=relationship("Strategy", back_populates="backtests")
+    )
+
+    agent: "Agent | None" = Relationship(
+        sa_relationship=relationship("Agent")
     )
 
     trades: list["BacktestTrade"] = Relationship(
@@ -122,3 +171,7 @@ class BacktestTrade(SQLModel, table=True):
     backtest: BacktestResult | None = Relationship(
         sa_relationship=relationship("BacktestResult", back_populates="trades")
     )
+
+
+# Import at end to avoid circular imports
+from app.models.agent import Agent  # noqa: E402, F401

@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
+import httpx
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
-from app.models.strategy import Strategy, BacktestResult, BacktestTrade
+from app.models.agent import Agent
+from app.models.strategy import Strategy, BacktestResult, BacktestTrade, BacktestStatus
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyUpdate,
     BacktestCreate,
+    BacktestUpdate,
     TradeCreate,
 )
+
+if TYPE_CHECKING:
+    from sqlmodel import Session
 
 
 def create_strategy(session: Session, payload: StrategyCreate) -> Strategy:
@@ -94,14 +101,26 @@ def delete_strategy(session: Session, strategy_id: int) -> None:
 
 
 def create_backtest(session: Session, strategy_id: int, payload: BacktestCreate) -> BacktestResult:
+    """Create a new backtest with status=pending."""
     _ = get_strategy(session, strategy_id)
+    
+    # Validate agent_id if provided
+    if payload.agent_id is not None:
+        agent = session.get(Agent, payload.agent_id)
+        if not agent:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Agent with id {payload.agent_id} not found",
+            )
+    
     backtest = BacktestResult(
         strategy_id=strategy_id,
+        agent_id=payload.agent_id,
         symbol=payload.symbol,
         start_date=payload.start_date,
         end_date=payload.end_date,
         parameters=payload.parameters,
-        metrics=payload.metrics,
+        status=BacktestStatus.PENDING.value,
     )
     session.add(backtest)
     session.commit()
@@ -125,6 +144,144 @@ def get_backtest(session: Session, backtest_id: int) -> BacktestResult:
     if not backtest:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest not found")
     return backtest
+
+
+def run_backtest(session: Session, backtest_id: int) -> BacktestResult:
+    """Start backtest execution via n8n webhook.
+    
+    Sends a minimal request to the agent's webhook with backtest_id and dates.
+    The n8n workflow fetches full details from DB and should:
+    1. Execute the backtest using edgewalker
+    2. Call PATCH /strategies/backtests/{id} with results
+    3. Call POST /strategies/backtests/{id}/trades/bulk with trades
+    """
+    backtest = get_backtest(session, backtest_id)
+    
+    if backtest.status != BacktestStatus.PENDING.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot run backtest with status '{backtest.status}'. Only 'pending' backtests can be run.",
+        )
+    
+    if backtest.agent_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Backtest has no agent assigned. Set agent_id when creating the backtest.",
+        )
+    
+    agent = session.get(Agent, backtest.agent_id)
+    if not agent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent with id {backtest.agent_id} not found",
+        )
+    
+    # Update status to running
+    backtest.status = BacktestStatus.RUNNING.value
+    backtest.started_at = datetime.now(timezone.utc)
+    session.add(backtest)
+    session.commit()
+    session.refresh(backtest)
+    
+    # Prepare payload for n8n webhook (minimal - workflow fetches details from DB)
+    webhook_payload = {
+        "action": "backtest",
+        "backtest_id": backtest.id,
+        "start_date": str(backtest.start_date),
+        "end_date": str(backtest.end_date),
+    }
+    
+    # Call n8n webhook (fire and forget - don't wait for backtest to complete)
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(agent.n8n_webhook, json=webhook_payload)
+            response.raise_for_status()
+    except httpx.ConnectError as e:
+        # Connection failed - n8n might be down or webhook URL is wrong
+        backtest.status = BacktestStatus.FAILED.value
+        backtest.completed_at = datetime.now(timezone.utc)
+        backtest.error_message = f"Cannot connect to n8n webhook: {agent.n8n_webhook}"
+        session.add(backtest)
+        session.commit()
+        session.refresh(backtest)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Cannot connect to n8n webhook at {agent.n8n_webhook}. Is n8n running?",
+        )
+    except httpx.HTTPStatusError as e:
+        # Webhook returned an error status
+        backtest.status = BacktestStatus.FAILED.value
+        backtest.completed_at = datetime.now(timezone.utc)
+        error_detail = f"Webhook returned {e.response.status_code}"
+        try:
+            error_body = e.response.text[:500]  # Limit error body size
+            error_detail += f": {error_body}"
+        except Exception:
+            pass
+        backtest.error_message = error_detail
+        session.add(backtest)
+        session.commit()
+        session.refresh(backtest)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"n8n webhook error: {error_detail}",
+        )
+    except httpx.HTTPError as e:
+        # Revert status on webhook failure
+        backtest.status = BacktestStatus.FAILED.value
+        backtest.completed_at = datetime.now(timezone.utc)
+        backtest.error_message = f"Failed to call n8n webhook: {str(e)}"
+        session.add(backtest)
+        session.commit()
+        session.refresh(backtest)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to trigger n8n workflow: {str(e)}",
+        )
+    
+    return backtest
+
+
+def update_backtest(
+    session: Session, backtest_id: int, payload: BacktestUpdate
+) -> BacktestResult:
+    """Update backtest status and results (callback from n8n)."""
+    backtest = get_backtest(session, backtest_id)
+    
+    if payload.status is not None:
+        # Validate status transition
+        valid_statuses = [s.value for s in BacktestStatus]
+        if payload.status not in valid_statuses:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status '{payload.status}'. Must be one of: {valid_statuses}",
+            )
+        backtest.status = payload.status
+        
+        # Set completed_at when transitioning to terminal state
+        if payload.status in [BacktestStatus.COMPLETED.value, BacktestStatus.FAILED.value]:
+            backtest.completed_at = datetime.now(timezone.utc)
+    
+    if payload.error_message is not None:
+        backtest.error_message = payload.error_message
+    
+    if payload.metrics is not None:
+        backtest.metrics = payload.metrics
+    
+    if payload.html_report_url is not None:
+        backtest.html_report_url = payload.html_report_url
+    
+    session.add(backtest)
+    session.commit()
+    session.refresh(backtest)
+    return backtest
+
+
+def delete_backtest(session: Session, backtest_id: int) -> None:
+    """Delete a backtest and all its trades."""
+    backtest = get_backtest(session, backtest_id)
+    session.delete(backtest)
+    session.commit()
 
 
 def create_trade(session: Session, backtest_id: int, payload: TradeCreate) -> BacktestTrade:
@@ -158,3 +315,34 @@ def list_trades(session: Session, backtest_id: int) -> list[BacktestTrade]:
             .order_by(BacktestTrade.id.asc())
         ).all()
     )
+
+
+def create_trades_bulk(
+    session: Session, backtest_id: int, trades: list[TradeCreate]
+) -> list[BacktestTrade]:
+    """Create multiple trades for a backtest in bulk."""
+    backtest = get_backtest(session, backtest_id)
+    
+    created_trades = []
+    for payload in trades:
+        trade = BacktestTrade(
+            backtest_id=backtest_id,
+            strategy_id=backtest.strategy_id,
+            ts_open=payload.ts_open,
+            ts_close=payload.ts_close,
+            side=payload.side,
+            quantity=payload.quantity,
+            entry_price=payload.entry_price,
+            exit_price=payload.exit_price,
+            pnl=payload.pnl,
+            fees=payload.fees,
+            meta=payload.meta,
+        )
+        session.add(trade)
+        created_trades.append(trade)
+    
+    session.commit()
+    for trade in created_trades:
+        session.refresh(trade)
+    
+    return created_trades

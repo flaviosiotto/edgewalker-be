@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, BackgroundTasks
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -8,6 +8,7 @@ from app.schemas.strategy import (
     StrategyUpdate,
     BacktestCreate,
     BacktestRead,
+    BacktestUpdate,
     TradeCreate,
     TradeRead,
 )
@@ -20,7 +21,11 @@ from app.services.strategy_service import (
     create_backtest,
     list_backtests,
     get_backtest,
+    run_backtest,
+    update_backtest,
+    delete_backtest,
     create_trade,
+    create_trades_bulk,
     list_trades,
 )
 
@@ -63,17 +68,50 @@ def create_backtest_endpoint(
     payload: BacktestCreate,
     session: Session = Depends(get_session),
 ):
+    """Create a new backtest with status=pending. Call /run to execute."""
     return create_backtest(session, strategy_id, payload)
 
 
 @router.get("/{strategy_id}/backtests", response_model=list[BacktestRead])
 def list_backtests_endpoint(strategy_id: int, session: Session = Depends(get_session)):
+    """List all backtests for a strategy."""
     return list_backtests(session, strategy_id)
 
 
 @router.get("/backtests/{backtest_id}", response_model=BacktestRead)
 def get_backtest_endpoint(backtest_id: int, session: Session = Depends(get_session)):
+    """Get backtest details including status and results if completed."""
     return get_backtest(session, backtest_id)
+
+
+@router.post("/backtests/{backtest_id}/run", response_model=BacktestRead)
+def run_backtest_endpoint(
+    backtest_id: int,
+    session: Session = Depends(get_session),
+):
+    """Start backtest execution via n8n webhook.
+    
+    Sets status to 'running' and calls the agent's webhook.
+    The agent_id must be set on the backtest.
+    """
+    return run_backtest(session, backtest_id)
+
+
+@router.patch("/backtests/{backtest_id}", response_model=BacktestRead)
+def update_backtest_endpoint(
+    backtest_id: int,
+    payload: BacktestUpdate,
+    session: Session = Depends(get_session),
+):
+    """Update backtest status and results (callback endpoint for n8n)."""
+    return update_backtest(session, backtest_id, payload)
+
+
+@router.delete("/backtests/{backtest_id}")
+def delete_backtest_endpoint(backtest_id: int, session: Session = Depends(get_session)):
+    """Delete a backtest and all its trades."""
+    delete_backtest(session, backtest_id)
+    return {"status": "ok"}
 
 
 @router.post("/backtests/{backtest_id}/trades", response_model=TradeRead)
@@ -82,9 +120,21 @@ def create_trade_endpoint(
     payload: TradeCreate,
     session: Session = Depends(get_session),
 ):
+    """Create a single trade record for a backtest."""
     return create_trade(session, backtest_id, payload)
+
+
+@router.post("/backtests/{backtest_id}/trades/bulk", response_model=list[TradeRead])
+def create_trades_bulk_endpoint(
+    backtest_id: int,
+    payload: list[TradeCreate],
+    session: Session = Depends(get_session),
+):
+    """Create multiple trade records for a backtest in bulk."""
+    return create_trades_bulk(session, backtest_id, payload)
 
 
 @router.get("/backtests/{backtest_id}/trades", response_model=list[TradeRead])
 def list_trades_endpoint(backtest_id: int, session: Session = Depends(get_session)):
+    """List all trades for a backtest."""
     return list_trades(session, backtest_id)
