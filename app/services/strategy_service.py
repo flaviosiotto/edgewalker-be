@@ -187,6 +187,7 @@ def run_backtest(session: Session, backtest_id: int) -> BacktestResult:
     webhook_payload = {
         "action": "backtest",
         "backtest_id": backtest.id,
+        "strategy_id": backtest.strategy_id,
         "start_date": str(backtest.start_date),
         "end_date": str(backtest.end_date),
     }
@@ -259,12 +260,31 @@ def update_backtest(
         backtest.status = payload.status
         
         # Set completed_at when transitioning to terminal state
-        if payload.status in [BacktestStatus.COMPLETED.value, BacktestStatus.FAILED.value]:
+        if payload.status in [BacktestStatus.COMPLETED.value, BacktestStatus.FAILED.value, BacktestStatus.ERROR.value]:
             backtest.completed_at = datetime.now(timezone.utc)
     
     if payload.error_message is not None:
         backtest.error_message = payload.error_message
     
+    # Update typed metrics
+    if payload.return_pct is not None:
+        backtest.return_pct = payload.return_pct
+    if payload.sharpe_ratio is not None:
+        backtest.sharpe_ratio = payload.sharpe_ratio
+    if payload.max_drawdown_pct is not None:
+        backtest.max_drawdown_pct = payload.max_drawdown_pct
+    if payload.win_rate_pct is not None:
+        backtest.win_rate_pct = payload.win_rate_pct
+    if payload.profit_factor is not None:
+        backtest.profit_factor = payload.profit_factor
+    if payload.total_trades is not None:
+        backtest.total_trades = payload.total_trades
+    if payload.equity_final is not None:
+        backtest.equity_final = payload.equity_final
+    if payload.equity_peak is not None:
+        backtest.equity_peak = payload.equity_peak
+    
+    # Extra metrics JSONB
     if payload.metrics is not None:
         backtest.metrics = payload.metrics
     
@@ -290,15 +310,17 @@ def create_trade(session: Session, backtest_id: int, payload: TradeCreate) -> Ba
     trade = BacktestTrade(
         backtest_id=backtest_id,
         strategy_id=backtest.strategy_id,
-        ts_open=payload.ts_open,
-        ts_close=payload.ts_close,
-        side=payload.side,
-        quantity=payload.quantity,
+        entry_time=payload.entry_time,
+        exit_time=payload.exit_time,
+        direction=payload.direction,
+        size=payload.size,
         entry_price=payload.entry_price,
         exit_price=payload.exit_price,
         pnl=payload.pnl,
-        fees=payload.fees,
-        meta=payload.meta,
+        pnl_pct=payload.pnl_pct,
+        session_date=payload.session_date,
+        exit_reason=payload.exit_reason,
+        extra=payload.extra,
     )
     session.add(trade)
     session.commit()
@@ -328,15 +350,17 @@ def create_trades_bulk(
         trade = BacktestTrade(
             backtest_id=backtest_id,
             strategy_id=backtest.strategy_id,
-            ts_open=payload.ts_open,
-            ts_close=payload.ts_close,
-            side=payload.side,
-            quantity=payload.quantity,
+            entry_time=payload.entry_time,
+            exit_time=payload.exit_time,
+            direction=payload.direction,
+            size=payload.size,
             entry_price=payload.entry_price,
             exit_price=payload.exit_price,
             pnl=payload.pnl,
-            fees=payload.fees,
-            meta=payload.meta,
+            pnl_pct=payload.pnl_pct,
+            session_date=payload.session_date,
+            exit_reason=payload.exit_reason,
+            extra=payload.extra,
         )
         session.add(trade)
         created_trades.append(trade)

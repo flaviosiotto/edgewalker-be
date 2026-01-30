@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 from datetime import datetime, date, timezone
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Optional
 
-from sqlalchemy import Column, ForeignKey, String, Date, DateTime, Integer, Numeric, Text
+from sqlalchemy import Column, ForeignKey, String, Date, DateTime, Integer, Numeric, Text, Float
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
 
 
 class BacktestStatus(str, Enum):
-    """Status of a backtest execution."""
+    """Status of a backtest execution.
+    
+    State transitions:
+    - pending: Initial state when backtest is created
+    - running: Set by n8n workflow when execution starts
+    - completed: Set by n8n workflow on successful completion
+    - failed: Set by n8n workflow on execution failure
+    - error: Set by backend if webhook call fails (cannot start workflow)
+    """
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    ERROR = "error"  # Backend error (webhook unreachable, etc.)
 
 
 class Strategy(SQLModel, table=True):
@@ -99,9 +109,21 @@ class BacktestResult(SQLModel, table=True):
         sa_column=Column(Text, nullable=True),
     )
 
-    # ── OUTPUT (populated on completion) ──
+    # ── OUTPUT (populated on completion by n8n workflow) ──
+    # Raw stats dict from edgewalker/backtesting.py
     metrics: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
-    # metrics: Return%, Sharpe, MaxDD, WinRate, ProfitFactor, #Trades, EquityFinal, etc.
+    
+    # Key metrics extracted for easy querying (from edgewalker BacktestResult.stats)
+    return_pct: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    sharpe_ratio: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    max_drawdown_pct: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    win_rate_pct: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    profit_factor: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    total_trades: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
+    equity_final: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    equity_peak: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    
+    # HTML report path/URL
     html_report_url: Optional[str] = Field(
         default=None,
         sa_column=Column(String(500), nullable=True),
@@ -130,6 +152,10 @@ class BacktestResult(SQLModel, table=True):
 
 
 class BacktestTrade(SQLModel, table=True):
+    """Trade record from backtest execution.
+    
+    Aligned with edgewalker's TradeRecord dataclass.
+    """
     __tablename__ = "strategy_backtest_trades"
     __allow_unmapped__ = True
 
@@ -154,19 +180,32 @@ class BacktestTrade(SQLModel, table=True):
         )
     )
 
-    ts_open: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False, index=True))
-    ts_close: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    # Trade timing (from edgewalker TradeRecord)
+    entry_time: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False, index=True))
+    exit_time: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    
+    # Trade direction: 'long' or 'short'
+    direction: str = Field(sa_column=Column(String(8), nullable=False))
+    
+    # Position size
+    size: float = Field(sa_column=Column(Numeric(20, 8), nullable=False))
 
-    side: str = Field(sa_column=Column(String(8), nullable=False))  # long|short
-    quantity: float = Field(sa_column=Column(Numeric(20, 8), nullable=False))
-
+    # Prices
     entry_price: float = Field(sa_column=Column(Numeric(20, 8), nullable=False))
     exit_price: Optional[float] = Field(default=None, sa_column=Column(Numeric(20, 8), nullable=True))
 
+    # P&L
     pnl: Optional[float] = Field(default=None, sa_column=Column(Numeric(20, 8), nullable=True))
-    fees: Optional[float] = Field(default=None, sa_column=Column(Numeric(20, 8), nullable=True))
-
-    meta: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    pnl_pct: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    
+    # Session context (for session-based strategies)
+    session_date: Optional[date] = Field(default=None, sa_column=Column(Date, nullable=True))
+    
+    # Exit reason (stop_loss, take_profit, end_of_session, etc.)
+    exit_reason: Optional[str] = Field(default=None, sa_column=Column(String(50), nullable=True))
+    
+    # Additional data as JSON (called 'extra' to avoid SQLAlchemy reserved 'metadata')
+    extra: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
 
     backtest: BacktestResult | None = Relationship(
         sa_relationship=relationship("BacktestResult", back_populates="trades")

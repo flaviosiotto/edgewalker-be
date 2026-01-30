@@ -50,30 +50,14 @@ class BacktestRead(BaseModel):
     end_date: date
     parameters: Optional[dict[str, Any]] = None
     
-    # Status
-    status: str  # pending | running | completed | failed
+    # Status (pending | running | completed | failed | error)
+    status: str
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
     
-    # Output (populated on completion)
-    metrics: Optional[dict[str, Any]] = None
-    html_report_url: Optional[str] = None
-    
-    created_at: datetime
-
-
-class BacktestUpdate(BaseModel):
-    """Schema for updating backtest status and results (used by n8n callback)."""
-    status: Optional[str] = None
-    error_message: Optional[str] = None
-    metrics: Optional[dict[str, Any]] = None
-    html_report_url: Optional[str] = None
-
-
-class BacktestMetrics(BaseModel):
-    """Typed metrics from edgewalker backtest results (for documentation/validation)."""
-    total_return_pct: Optional[float] = None
+    # Typed metrics from edgewalker (populated on completion)
+    return_pct: Optional[float] = None
     sharpe_ratio: Optional[float] = None
     max_drawdown_pct: Optional[float] = None
     win_rate_pct: Optional[float] = None
@@ -81,36 +65,67 @@ class BacktestMetrics(BaseModel):
     total_trades: Optional[int] = None
     equity_final: Optional[float] = None
     equity_peak: Optional[float] = None
-    exposure_pct: Optional[float] = None
-    # Additional fields can be added as needed
+    
+    # Extra metrics (JSONB for additional data)
+    metrics: Optional[dict[str, Any]] = None
+    html_report_url: Optional[str] = None
+    
+    created_at: datetime
+
+
+class BacktestUpdate(BaseModel):
+    """Schema for updating backtest status and results (used by n8n callback).
+    
+    The n8n workflow should populate typed metrics directly.
+    """
+    status: Optional[str] = None
+    error_message: Optional[str] = None
+    
+    # Typed metrics (preferred - populate these from edgewalker results)
+    return_pct: Optional[float] = None
+    sharpe_ratio: Optional[float] = None
+    max_drawdown_pct: Optional[float] = None
+    win_rate_pct: Optional[float] = None
+    profit_factor: Optional[float] = None
+    total_trades: Optional[int] = None
+    equity_final: Optional[float] = None
+    equity_peak: Optional[float] = None
+    
+    # Extra metrics JSONB (for any additional data)
+    metrics: Optional[dict[str, Any]] = None
+    html_report_url: Optional[str] = None
 
 
 # ─── TRADE SCHEMAS ───
 
 
 class TradeCreate(BaseModel):
-    """Input for creating a trade record."""
-    ts_open: datetime
-    ts_close: Optional[datetime] = None
-    side: str
-    quantity: float
+    """Input for creating a trade record (aligned with edgewalker TradeRecord)."""
+    entry_time: datetime
+    exit_time: Optional[datetime] = None
+    direction: str  # "long" or "short"
+    size: float  # Position size
     entry_price: float
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
-    fees: Optional[float] = None
-    meta: Optional[Any] = None
+    pnl_pct: Optional[float] = None  # Return percentage
+    session_date: Optional[date] = None  # Trading session date
+    exit_reason: Optional[str] = None  # e.g., "stop_loss", "take_profit", "eod"
+    extra: Optional[Any] = None  # Extra data
 
 
 class TradeRead(BaseModel):
     id: int
     backtest_id: int
     strategy_id: int
-    ts_open: datetime
-    ts_close: Optional[datetime] = None
-    side: str
-    quantity: float
+    entry_time: datetime
+    exit_time: Optional[datetime] = None
+    direction: str
+    size: float
     entry_price: float
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
-    fees: Optional[float] = None
-    meta: Optional[Any] = None
+    pnl_pct: Optional[float] = None
+    session_date: Optional[date] = None
+    exit_reason: Optional[str] = None
+    extra: Optional[Any] = None

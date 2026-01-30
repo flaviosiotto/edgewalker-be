@@ -9,6 +9,7 @@ from app.api.users import router as users_router
 from app.api.healthcheck import router as system_router
 from app.api.agents import router as agents_router
 from app.api.strategies import router as strategies_router
+from app.api.marketdata import router as marketdata_router
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -56,3 +57,4 @@ app.include_router(users_router)
 app.include_router(system_router)
 app.include_router(agents_router)
 app.include_router(strategies_router)
+app.include_router(marketdata_router)

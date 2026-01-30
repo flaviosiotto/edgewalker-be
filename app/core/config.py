@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     ]
 
     LOG_LEVEL: str = "INFO"
+    
+    # Market data directory (parquet files)
+    MARKETDATA_DIR: str = "/data/raw"
 
     class Config:
         case_sensitive = True
