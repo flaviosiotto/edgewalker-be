@@ -101,12 +101,32 @@ def _find_parquet_file(
         if any(pat in name_lower for pat in patterns):
             tf_matches.append(path)
     
-    def _file_covers_date_range(path: Path) -> bool:
-        """Check if file's date range covers the requested range."""
+    def _file_covers_date_range(path: Path, check_actual_content: bool = False) -> bool:
+        """Check if file's date range covers the requested range.
+        
+        Args:
+            path: Path to the parquet file
+            check_actual_content: If True and filename doesn't have date info,
+                                  read the file to check actual date range
+        """
         if start_date is None and end_date is None:
             return True  # No date filter, any file is ok
         
         file_start, file_end = _extract_date_range_from_filename(path.name)
+        
+        # If can't determine from filename and check_actual_content is True,
+        # read the file to get actual date range
+        if (file_start is None or file_end is None) and check_actual_content:
+            try:
+                df = pd.read_parquet(path, columns=["ts"])
+                df["ts"] = pd.to_datetime(df["ts"], utc=True)
+                file_start = df["ts"].min().date()
+                file_end = df["ts"].max().date()
+                logger.debug(f"Read actual date range from {path.name}: {file_start} to {file_end}")
+            except Exception as e:
+                logger.warning(f"Could not read date range from {path.name}: {e}")
+                return True  # Can't determine, assume it might work
+        
         if file_start is None or file_end is None:
             return True  # Can't determine, assume it might work
         
@@ -146,12 +166,52 @@ def _find_parquet_file(
     one_min_matches = [p for p in all_matches if any(pat in p.name.lower() for pat in one_min_patterns)]
     
     if one_min_matches:
-        # Also filter by date range
+        # Also filter by date range (from filename)
         date_filtered = [p for p in one_min_matches if _file_covers_date_range(p)]
-        candidates = date_filtered if date_filtered else one_min_matches
-        best = max(candidates, key=lambda p: p.stat().st_size)
-        logger.info(f"Selected 1min file for resampling: {best.name}")
-        return best
+        
+        if date_filtered:
+            # Check if the best candidate actually has data for the end date
+            # If not, we'll try other files
+            def score_file_1min(p: Path) -> tuple:
+                file_start, file_end = _extract_date_range_from_filename(p.name)
+                end_score = file_end.toordinal() if file_end else 0
+                size_score = p.stat().st_size
+                return (end_score, size_score)
+            
+            best_1min = max(date_filtered, key=score_file_1min)
+            best_start, best_end = _extract_date_range_from_filename(best_1min.name)
+            
+            # Check if this file actually covers the requested end date
+            if end_date and best_end and best_end >= end_date:
+                logger.info(f"Selected 1min file for resampling: {best_1min.name}")
+                return best_1min
+            else:
+                # The 1min files don't cover the requested end date
+                # Check if other files (without timeframe pattern) might have newer data
+                logger.info(f"Best 1min file {best_1min.name} ends at {best_end}, need data until {end_date}")
+        else:
+            best_1min = max(one_min_matches, key=lambda p: p.stat().st_size)
+    else:
+        best_1min = None
+    
+    # Check remaining files (without explicit timeframe pattern) for actual date coverage
+    # This handles files like "QQQ_live.parquet" that don't have date/timeframe in name
+    all_tf_patterns = ["_1min", "_1m_", "_1m.", "_5min", "_5m_", "_5m.", "_15min", "_15m", 
+                       "_30min", "_30m", "_60min", "_1h", "_1d", "_daily"]
+    remaining_files = [p for p in all_matches 
+                       if not any(pat in p.name.lower() for pat in all_tf_patterns)]
+    if remaining_files and (start_date or end_date):
+        # Check actual content for date coverage
+        covering_files = [p for p in remaining_files if _file_covers_date_range(p, check_actual_content=True)]
+        if covering_files:
+            best = max(covering_files, key=lambda p: p.stat().st_size)
+            logger.info(f"Selected file by actual content date range: {best.name}")
+            return best
+    
+    # If we had a 1min candidate, use it as final fallback
+    if best_1min:
+        logger.info(f"Falling back to 1min file: {best_1min.name}")
+        return best_1min
     
     # Final fallback: largest file (most data)
     best = max(all_matches, key=lambda p: p.stat().st_size)

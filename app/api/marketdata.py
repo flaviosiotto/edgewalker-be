@@ -193,6 +193,7 @@ def list_available_indicators():
                 "name": "Bollinger Bands",
                 "description": "Volatility bands around moving average",
                 "overlay": True,
+                "outputs": ["upper", "middle", "lower"],
                 "parameters": [
                     {
                         "name": "period",
@@ -220,6 +221,7 @@ def list_available_indicators():
                 "name": "MACD",
                 "description": "Moving Average Convergence Divergence",
                 "overlay": False,
+                "outputs": ["macd", "signal", "histogram"],
                 "parameters": [
                     {
                         "name": "fast_period",
@@ -279,6 +281,7 @@ def list_available_indicators():
                 "name": "Stochastic Oscillator",
                 "description": "Momentum oscillator comparing close to high-low range",
                 "overlay": False,
+                "outputs": ["k", "d"],
                 "parameters": [
                     {
                         "name": "k_period",
