@@ -14,3 +14,5 @@ pandas
 numpy
 pyarrow
 TA-Lib
+ib_async
+yfinance

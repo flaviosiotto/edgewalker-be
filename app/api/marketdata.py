@@ -32,10 +32,6 @@ from app.services.indicator_registry import (
     get_indicator_by_name,
     get_indicator_groups,
 )
-from app.services.symbol_search import (
-    search_symbols,
-    SymbolSearchError,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +143,9 @@ def search_symbols_endpoint(
         ...,
         description="Search query - symbol pattern or company name (e.g., 'QQQ', 'Apple', 'NQ')"
     ),
-    source: DataSourceType = Query(
-        DataSourceType.YAHOO,
-        description="Data source to search: ibkr or yahoo"
+    source: Optional[DataSourceType] = Query(
+        None,
+        description="Filter by data source: ibkr or yahoo (default: search all)"
     ),
     asset_type: Optional[AssetType] = Query(
         None,
@@ -158,35 +154,39 @@ def search_symbols_endpoint(
     limit: int = Query(50, ge=1, le=500, description="Maximum number of results"),
 ):
     """
-    Search for available symbols from a data source.
+    Search for available symbols.
+    
+    Searches the local symbol cache, which is automatically synchronized
+    in the background from configured data sources.
     
     **Sources:**
-    - `yahoo`: Search Yahoo Finance symbols
-    - `ibkr`: Search Interactive Brokers contracts (requires connection)
+    - `yahoo`: Yahoo Finance symbols
+    - `ibkr`: Interactive Brokers contracts
+    - `None`: Search all sources
     
     **Examples:**
-    - `/marketdata/symbols?query=QQQ&source=yahoo` - Search for QQQ
-    - `/marketdata/symbols?query=Apple&source=yahoo&asset_type=stock` - Search Apple stocks
-    - `/marketdata/symbols?query=NQ&source=ibkr&asset_type=futures` - Search NQ futures
+    - `/marketdata/symbols?query=QQQ` - Search QQQ
+    - `/marketdata/symbols?query=Apple&asset_type=stock` - Search Apple stocks
+    - `/marketdata/symbols?query=NQ&source=ibkr` - Search NQ in IBKR source
+    
+    **Note:** The cache is kept up-to-date automatically. New symbols may take
+    up to the configured sync interval to appear.
     """
     try:
-        symbols = search_symbols(
+        from app.services.symbol_sync_handler import search_cached_symbols
+        
+        results = search_cached_symbols(
             query=query,
-            source=source.value,
+            source_name=source.value if source else None,
             asset_type=asset_type.value if asset_type else None,
             limit=limit,
         )
         
         return AvailableSymbolsResponse(
-            symbols=symbols,
-            source=source.value,
+            symbols=results,
+            source=source.value if source else "all",
             asset_type=asset_type.value if asset_type else "all",
-            count=len(symbols),
-        )
-    except SymbolSearchError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            count=len(results),
         )
     except Exception as e:
         logger.exception(f"Error searching symbols for '{query}'")

@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     
     # Market data directory (parquet files)
     MARKETDATA_DIR: str = "/data/raw"
+    
+    # Sync settings
+    SYNC_POLL_INTERVAL_SECONDS: int = 60  # How often to check if sources need sync
+    SYNC_STARTUP_ENABLED: bool = True      # Run sync at startup
 
     class Config:
         case_sensitive = True
