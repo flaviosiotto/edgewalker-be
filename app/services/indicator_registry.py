@@ -1,0 +1,362 @@
+"""
+Indicator Registry Service - Dynamic listing of all available indicators.
+
+Uses TA-Lib's abstract API to dynamically list all available indicators
+with their parameters, input types, and output names.
+Also includes custom indicators from edgewalker library.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import talib
+from talib import abstract
+
+logger = logging.getLogger(__name__)
+
+
+# Custom indicators from edgewalker (not in TA-Lib)
+CUSTOM_INDICATORS = {
+    "vwap": {
+        "name": "VWAP",
+        "display_name": "Volume Weighted Average Price",
+        "group": "Custom",
+        "description": "Volume Weighted Average Price (resets daily)",
+        "overlay": True,
+        "inputs": {"ohlcv": ["open", "high", "low", "close", "volume"]},
+        "parameters": {},
+        "outputs": ["value"],
+    },
+    "pivot": {
+        "name": "PIVOT",
+        "display_name": "Pivot Points",
+        "group": "Custom",
+        "description": "Pivot points calculated from previous bar's HLC",
+        "overlay": True,
+        "inputs": {"ohlc": ["high", "low", "close"]},
+        "parameters": {
+            "kind": {
+                "type": "string",
+                "default": "classic",
+                "options": ["classic", "fibonacci", "woodie", "camarilla"],
+                "description": "Pivot point calculation method",
+            },
+            "line": {
+                "type": "string",
+                "default": "pivot",
+                "options": ["pivot", "r1", "r2", "r3", "s1", "s2", "s3"],
+                "description": "Which line to return",
+            },
+        },
+        "outputs": ["value"],
+    },
+    "session_high": {
+        "name": "SESSION_HIGH",
+        "display_name": "Running Session High",
+        "group": "Custom",
+        "description": "Running high price within the session",
+        "overlay": True,
+        "inputs": {"high": ["high"]},
+        "parameters": {},
+        "outputs": ["value"],
+    },
+    "session_low": {
+        "name": "SESSION_LOW",
+        "display_name": "Running Session Low",
+        "group": "Custom",
+        "description": "Running low price within the session",
+        "overlay": True,
+        "inputs": {"low": ["low"]},
+        "parameters": {},
+        "outputs": ["value"],
+    },
+}
+
+
+# Groups that should overlay on price chart (vs separate panel)
+OVERLAY_GROUPS = {"Overlap Studies", "Price Transform", "Custom"}
+
+# Map TA-Lib output types to chart-friendly flags
+OUTPUT_TYPE_MAP = {
+    "Line": "line",
+    "Dashed Line": "dashed_line",
+    "Histogram": "histogram",
+    "Dotted Line": "dotted_line",
+}
+
+
+def _get_talib_indicator_info(func_name: str) -> dict[str, Any] | None:
+    """Get detailed info about a TA-Lib indicator using the abstract API."""
+    try:
+        func = abstract.Function(func_name)
+        info = func.info
+        
+        # Parse input names
+        inputs = {}
+        for input_name, price_type in info.get("input_names", {}).items():
+            if isinstance(price_type, str):
+                inputs[input_name] = [price_type]
+            elif isinstance(price_type, (list, tuple)):
+                inputs[input_name] = list(price_type)
+            else:
+                inputs[input_name] = ["close"]
+        
+        # Parse parameters with their defaults
+        parameters = {}
+        for param_name, default_value in info.get("parameters", {}).items():
+            param_info = {
+                "type": "integer" if isinstance(default_value, int) else "number",
+                "default": default_value,
+            }
+            # Add typical min/max constraints
+            if "period" in param_name.lower():
+                param_info["min"] = 1
+                param_info["max"] = 1000
+            parameters[param_name] = param_info
+        
+        # Parse outputs
+        output_flags = info.get("output_flags", {})
+        outputs = []
+        output_types = {}
+        for output_name, flags in output_flags.items():
+            outputs.append(output_name)
+            if flags:
+                output_types[output_name] = OUTPUT_TYPE_MAP.get(flags[0], "line")
+            else:
+                output_types[output_name] = "line"
+        
+        if not outputs:
+            outputs = info.get("output_names", ["value"])
+        
+        # Determine if this overlays on price
+        group = info.get("group", "Other")
+        overlay = group in OVERLAY_GROUPS
+        
+        return {
+            "name": func_name.upper(),
+            "display_name": info.get("display_name", func_name),
+            "group": group,
+            "description": info.get("display_name", func_name),
+            "overlay": overlay,
+            "inputs": inputs,
+            "parameters": parameters,
+            "outputs": outputs,
+            "output_types": output_types,
+        }
+    except Exception as e:
+        logger.warning(f"Failed to get info for TA-Lib function {func_name}: {e}")
+        return None
+
+
+def get_all_indicators() -> list[dict[str, Any]]:
+    """Get information about all available indicators.
+    
+    Returns a list of indicator definitions including:
+    - name: Technical name (e.g., 'SMA', 'MACD')
+    - display_name: Human-readable name
+    - group: Category (e.g., 'Overlap Studies', 'Momentum Indicators')
+    - description: Brief description
+    - overlay: Whether it overlays on price chart
+    - inputs: Required input data (e.g., {'price': ['close']})
+    - parameters: Configurable parameters with types and defaults
+    - outputs: List of output names
+    """
+    indicators = []
+    
+    # Get all TA-Lib indicators by group
+    groups = talib.get_function_groups()
+    
+    for group_name, func_names in groups.items():
+        for func_name in func_names:
+            info = _get_talib_indicator_info(func_name)
+            if info:
+                indicators.append(info)
+    
+    # Add custom indicators from edgewalker
+    for key, info in CUSTOM_INDICATORS.items():
+        indicators.append(info)
+    
+    # Sort by group, then by name
+    indicators.sort(key=lambda x: (x.get("group", ""), x.get("name", "")))
+    
+    return indicators
+
+
+def get_indicator_by_name(name: str) -> dict[str, Any] | None:
+    """Get info for a specific indicator by name.
+    
+    Args:
+        name: Indicator name (e.g., 'SMA', 'MACD', 'vwap')
+    
+    Returns:
+        Indicator info dict or None if not found.
+    """
+    name_upper = name.upper()
+    name_lower = name.lower()
+    
+    # Check custom indicators first
+    if name_lower in CUSTOM_INDICATORS:
+        return CUSTOM_INDICATORS[name_lower]
+    
+    # Try TA-Lib
+    try:
+        return _get_talib_indicator_info(name_upper)
+    except Exception:
+        return None
+
+
+def get_indicator_groups() -> dict[str, list[str]]:
+    """Get all indicator groups with their function names.
+    
+    Returns:
+        Dictionary mapping group name to list of indicator names.
+    """
+    groups = dict(talib.get_function_groups())
+    
+    # Add custom indicators group
+    groups["Custom"] = list(CUSTOM_INDICATORS.keys())
+    
+    return groups
+
+
+def compute_indicator(
+    indicator_type: str,
+    params: dict[str, Any],
+    data: dict[str, Any],
+) -> dict[str, list[float]] | list[float]:
+    """Compute an indicator on OHLCV data.
+    
+    This uses the same logic as edgewalker to ensure consistency.
+    
+    Args:
+        indicator_type: Indicator type (e.g., 'SMA', 'MACD', 'vwap')
+        params: Parameters dict (e.g., {'timeperiod': 20})
+        data: OHLCV data dict with keys: open, high, low, close, volume
+    
+    Returns:
+        Computed indicator values (single array or dict of arrays for multi-output)
+    """
+    import numpy as np
+    
+    # Normalize common param names: period -> timeperiod (ta-lib convention)
+    params = dict(params)
+    if "period" in params and "timeperiod" not in params:
+        params["timeperiod"] = params.pop("period")
+    
+    # Normalize std_dev -> nbdevup/nbdevdn for BBANDS
+    if "std_dev" in params:
+        std_dev = params.pop("std_dev")
+        if "nbdevup" not in params:
+            params["nbdevup"] = std_dev
+        if "nbdevdn" not in params:
+            params["nbdevdn"] = std_dev
+    
+    type_lower = indicator_type.lower()
+    type_upper = indicator_type.upper()
+    
+    # Handle custom indicators
+    if type_lower == "vwap":
+        typical_price = (np.array(data["high"]) + np.array(data["low"]) + np.array(data["close"])) / 3
+        volume = np.array(data["volume"])
+        cum_tp_vol = np.cumsum(typical_price * volume)
+        cum_vol = np.cumsum(volume)
+        return cum_tp_vol / np.where(cum_vol > 0, cum_vol, 1)
+    
+    if type_lower == "pivot":
+        # Pivot points from previous bar
+        kind = params.get("kind", "classic")
+        line = params.get("line", "pivot")
+        h = np.array(data["high"])
+        l = np.array(data["low"])
+        c = np.array(data["close"])
+        result = np.full(len(c), np.nan)
+        
+        for i in range(1, len(c)):
+            prev_h, prev_l, prev_c = h[i-1], l[i-1], c[i-1]
+            pivot = (prev_h + prev_l + prev_c) / 3
+            
+            if kind == "classic":
+                r1 = 2 * pivot - prev_l
+                s1 = 2 * pivot - prev_h
+                r2 = pivot + (prev_h - prev_l)
+                s2 = pivot - (prev_h - prev_l)
+                r3 = prev_h + 2 * (pivot - prev_l)
+                s3 = prev_l - 2 * (prev_h - pivot)
+            elif kind == "fibonacci":
+                diff = prev_h - prev_l
+                r1 = pivot + 0.382 * diff
+                s1 = pivot - 0.382 * diff
+                r2 = pivot + 0.618 * diff
+                s2 = pivot - 0.618 * diff
+                r3 = pivot + diff
+                s3 = pivot - diff
+            elif kind == "woodie":
+                pivot = (prev_h + prev_l + 2 * prev_c) / 4
+                r1 = 2 * pivot - prev_l
+                s1 = 2 * pivot - prev_h
+                r2 = pivot + (prev_h - prev_l)
+                s2 = pivot - (prev_h - prev_l)
+                r3 = r1 + (prev_h - prev_l)
+                s3 = s1 - (prev_h - prev_l)
+            else:  # camarilla
+                r1 = prev_c + (prev_h - prev_l) * 1.1 / 12
+                s1 = prev_c - (prev_h - prev_l) * 1.1 / 12
+                r2 = prev_c + (prev_h - prev_l) * 1.1 / 6
+                s2 = prev_c - (prev_h - prev_l) * 1.1 / 6
+                r3 = prev_c + (prev_h - prev_l) * 1.1 / 4
+                s3 = prev_c - (prev_h - prev_l) * 1.1 / 4
+            
+            lines = {"pivot": pivot, "r1": r1, "r2": r2, "r3": r3, "s1": s1, "s2": s2, "s3": s3}
+            result[i] = lines.get(line, pivot)
+        
+        return result
+    
+    if type_lower == "session_high":
+        return np.maximum.accumulate(np.array(data["high"]))
+    
+    if type_lower == "session_low":
+        return np.minimum.accumulate(np.array(data["low"]))
+    
+    # Handle TA-Lib indicators
+    talib_fn = getattr(talib, type_upper, None)
+    if talib_fn is None:
+        raise ValueError(f"Unknown indicator type: {indicator_type}")
+    
+    # Get indicator info to understand inputs
+    info = _get_talib_indicator_info(type_upper)
+    if not info:
+        raise ValueError(f"Could not get info for indicator: {indicator_type}")
+    
+    # Prepare data arrays
+    close = np.array(data.get("close", []), dtype=float)
+    high = np.array(data.get("high", []), dtype=float)
+    low = np.array(data.get("low", []), dtype=float)
+    open_ = np.array(data.get("open", []), dtype=float)
+    volume = np.array(data.get("volume", []), dtype=float)
+    
+    # Try different argument signatures based on typical TA-Lib patterns
+    signatures = [
+        lambda: talib_fn(close, **params),
+        lambda: talib_fn(high, low, close, **params),
+        lambda: talib_fn(open_, high, low, close, **params),
+        lambda: talib_fn(close, volume, **params),
+        lambda: talib_fn(high, low, **params),
+        lambda: talib_fn(high, **params),
+        lambda: talib_fn(low, **params),
+    ]
+    
+    last_error = None
+    for sig in signatures:
+        try:
+            result = sig()
+            # Multi-output indicators return tuple
+            if isinstance(result, tuple):
+                output_names = info.get("outputs", [f"output_{i}" for i in range(len(result))])
+                return {name: arr.tolist() for name, arr in zip(output_names, result)}
+            return result.tolist() if hasattr(result, "tolist") else result
+        except (TypeError, Exception) as e:
+            last_error = e
+            continue
+    
+    raise ValueError(f"Could not compute talib.{type_upper}: {last_error}")

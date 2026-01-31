@@ -8,6 +8,7 @@ python-multipart
 pydantic[email]
 pydantic-settings
 httpx
+requests
 psycopg2-binary
 pandas
 numpy

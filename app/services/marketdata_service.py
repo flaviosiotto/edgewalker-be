@@ -678,23 +678,23 @@ def get_ohlc_history(
     start_date: date | None = None,
     end_date: date | None = None,
     timeframe: str = "1min",
-    indicators: list[str] | None = None,
+    indicators: list[dict[str, Any]] | list[str] | None = None,
 ) -> dict[str, Any]:
-    """Get OHLC history with optional indicators.
+    """Get OHLC history with optional indicators from cached files.
     
     Args:
         symbol: Trading symbol
         start_date: Start date filter
         end_date: End date filter
         timeframe: Bar timeframe (1min, 5min, 15min, 1h, 1d)
-        indicators: List of indicator specs to compute
+        indicators: List of indicator configs or legacy string specs
     
     Returns:
         {
             "symbol": "QQQ",
             "timeframe": "5min",
             "candles": [{"time": 1234567890, "open": 100, ...}, ...],
-            "indicators": {"sma_20": [...], ...}
+            "indicators": {"SMA_20": [...], ...}
         }
     """
     df = load_ohlcv(symbol, start_date, end_date, timeframe)
@@ -714,7 +714,7 @@ def get_ohlc_history(
     # Compute indicators if requested
     computed_indicators = {}
     if indicators:
-        computed_indicators = compute_indicators(df, indicators)
+        computed_indicators = compute_indicators_dynamic(df, indicators)
     
     return {
         "symbol": symbol.upper(),
@@ -723,3 +723,195 @@ def get_ohlc_history(
         "candles": candles,
         "indicators": computed_indicators,
     }
+
+
+def get_ohlc_history_with_fetch(
+    symbol: str,
+    source: str,
+    asset_type: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    timeframe: str = "5min",
+    indicators: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Fetch fresh OHLC data from source, then return with indicators.
+    
+    Uses the edgewalker library's fetch function to download data,
+    then returns in the same format as get_ohlc_history.
+    
+    Args:
+        symbol: Trading symbol
+        source: Data source ('yahoo' or 'ibkr')
+        asset_type: Asset type ('stock', 'futures', 'index', 'etf')
+        start_date: Start date
+        end_date: End date  
+        timeframe: Bar timeframe
+        indicators: List of indicator configs
+    
+    Returns:
+        Same format as get_ohlc_history
+    """
+    import sys
+    import os
+    
+    # Add edgewalker to path if needed
+    edgewalker_path = os.environ.get("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
+    if edgewalker_path not in sys.path:
+        sys.path.insert(0, edgewalker_path)
+    
+    try:
+        from edgewalker.marketdata.fetch import FetchRequest, fetch as edgewalker_fetch
+        
+        # Map timeframe to interval format
+        interval_map = {
+            "1min": "1m",
+            "5min": "5m", 
+            "15min": "15m",
+            "30min": "30m",
+            "1h": "60m",
+            "1d": "1d",
+        }
+        interval = interval_map.get(timeframe.lower(), timeframe)
+        
+        # Determine output path based on source and asset type
+        output_dir = EDGEWALKER_DATA_DIR
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Build filename with metadata
+        start_str = start_date.isoformat() if start_date else "auto"
+        end_str = end_date.isoformat() if end_date else "now"
+        filename = f"{symbol.upper()}_{interval}_{start_str}_{end_str}.parquet"
+        output_path = str(output_dir / filename)
+        
+        # Create fetch request
+        req = FetchRequest(
+            source=source,
+            symbol=symbol,
+            start=start_date.isoformat() if start_date else None,
+            end=end_date.isoformat() if end_date else None,
+            interval=interval,
+            output=output_path,
+            update=True,  # Allow incremental updates
+        )
+        
+        # Execute fetch
+        logger.info(f"Fetching {symbol} from {source} ({start_date} to {end_date})")
+        result = edgewalker_fetch(req)
+        
+        if not result.success:
+            raise MarketDataError(f"Fetch failed: {result.error}")
+        
+        logger.info(f"Fetched {result.rows_fetched} rows, total {result.rows_total}")
+        
+        # Now load the data and compute indicators
+        return get_ohlc_history(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            timeframe=timeframe,
+            indicators=indicators,
+        )
+        
+    except ImportError as e:
+        logger.error(f"Could not import edgewalker: {e}")
+        raise MarketDataError(
+            f"Fetching requires edgewalker library. Error: {e}"
+        )
+    except Exception as e:
+        logger.exception(f"Error fetching {symbol} from {source}")
+        raise MarketDataError(f"Fetch error: {e}")
+
+
+def compute_indicators_dynamic(
+    df: pd.DataFrame,
+    indicators: list[dict[str, Any]] | list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Compute technical indicators dynamically using indicator registry.
+    
+    Supports both new format (list of dicts) and legacy format (list of strings).
+    
+    Args:
+        df: DataFrame with ts, open, high, low, close, volume
+        indicators: List of {"type": str, "params": dict} or legacy strings
+    
+    Returns:
+        Dict mapping indicator name to time series data
+    """
+    from app.services.indicator_registry import compute_indicator
+    
+    result = {}
+    timestamps = df["ts"].values
+    
+    # Prepare data dict for indicator computation
+    data = {
+        "open": df["open"].values,
+        "high": df["high"].values,
+        "low": df["low"].values,
+        "close": df["close"].values,
+        "volume": df["volume"].values,
+    }
+    
+    for spec in indicators:
+        try:
+            # Handle legacy string format
+            if isinstance(spec, str):
+                name, values = _compute_single_indicator(df, spec)
+                result[name] = values
+                continue
+            
+            # New format: {"type": "SMA", "params": {"timeperiod": 20}}
+            ind_type = spec.get("type", "")
+            params = spec.get("params", {})
+            custom_name = spec.get("name")
+            
+            # Generate name from type and params
+            if custom_name:
+                name = custom_name
+            else:
+                param_str = "_".join(str(v) for v in params.values())
+                name = f"{ind_type}_{param_str}" if param_str else ind_type
+            
+            # Compute indicator
+            values = compute_indicator(ind_type, params, data)
+            
+            # Format for output
+            if isinstance(values, dict):
+                # Multi-output indicator (e.g., MACD, BBANDS)
+                formatted = _format_multi_output(timestamps, values)
+            else:
+                # Single-output indicator
+                formatted = _to_line_series(timestamps, np.array(values))
+            
+            result[name] = formatted
+            
+        except Exception as e:
+            logger.warning(f"Failed to compute indicator {spec}: {e}")
+            continue
+    
+    return result
+
+
+def _format_multi_output(
+    timestamps: np.ndarray,
+    values: dict[str, list],
+) -> list[dict[str, Any]]:
+    """Format multi-output indicator for API response."""
+    # Get length from first output
+    first_key = next(iter(values.keys()))
+    length = len(values[first_key])
+    
+    result = []
+    for i in range(length):
+        point = {"time": int(pd.Timestamp(timestamps[i]).timestamp())}
+        has_value = False
+        for key, arr in values.items():
+            val = arr[i] if i < len(arr) else None
+            if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                point[key] = float(val)
+                has_value = True
+            else:
+                point[key] = None
+        if has_value:
+            result.append(point)
+    
+    return result
