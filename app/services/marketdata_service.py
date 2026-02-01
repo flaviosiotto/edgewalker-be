@@ -849,6 +849,7 @@ def compute_indicators_dynamic(
         "low": df["low"].values,
         "close": df["close"].values,
         "volume": df["volume"].values,
+        "timestamps": timestamps,  # Pass timestamps for daily aggregations
     }
     
     for spec in indicators:

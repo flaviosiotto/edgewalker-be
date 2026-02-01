@@ -10,10 +10,106 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import numpy as np
 import talib
 from talib import abstract
 
 logger = logging.getLogger(__name__)
+
+
+def _calculate_pivot_levels(h: float, l: float, c: float, o: float, kind: str) -> dict[str, float]:
+    """Calculate pivot levels based on the specified method.
+    
+    Based on TradingView's Pivot Points Standard indicator formulas.
+    
+    Args:
+        h: Previous period high
+        l: Previous period low
+        c: Previous period close
+        o: Previous period open
+        kind: Method type (traditional, fibonacci, woodie, classic, dm, camarilla)
+    
+    Returns:
+        Dictionary with keys: p, r1, r2, r3, r4, r5, s1, s2, s3, s4, s5
+        (not all levels are set for all kinds)
+    """
+    levels = {}
+    
+    if kind == "traditional" or kind == "classic":
+        # Traditional (same as Classic in TradingView)
+        p = (h + l + c) / 3
+        levels["p"] = p
+        levels["r1"] = 2 * p - l
+        levels["s1"] = 2 * p - h
+        levels["r2"] = p + (h - l)
+        levels["s2"] = p - (h - l)
+        levels["r3"] = p + 2 * (h - l)
+        levels["s3"] = p - 2 * (h - l)
+        levels["r4"] = p + 3 * (h - l)
+        levels["s4"] = p - 3 * (h - l)
+        if kind == "traditional":
+            # Traditional has R5/S5
+            levels["r5"] = p + 4 * (h - l)
+            levels["s5"] = p - 4 * (h - l)
+            
+    elif kind == "fibonacci":
+        p = (h + l + c) / 3
+        diff = h - l
+        levels["p"] = p
+        levels["r1"] = p + 0.382 * diff
+        levels["s1"] = p - 0.382 * diff
+        levels["r2"] = p + 0.618 * diff
+        levels["s2"] = p - 0.618 * diff
+        levels["r3"] = p + 1.0 * diff
+        levels["s3"] = p - 1.0 * diff
+        
+    elif kind == "woodie":
+        p = (h + l + 2 * c) / 4
+        levels["p"] = p
+        levels["r1"] = 2 * p - l
+        levels["s1"] = 2 * p - h
+        levels["r2"] = p + (h - l)
+        levels["s2"] = p - (h - l)
+        levels["r3"] = h + 2 * (p - l)
+        levels["s3"] = l - 2 * (h - p)
+        levels["r4"] = levels["r3"] + (h - l)
+        levels["s4"] = levels["s3"] - (h - l)
+        
+    elif kind == "dm":
+        # Demark pivot points
+        if c < o:
+            x = h + 2 * l + c
+        elif c > o:
+            x = 2 * h + l + c
+        else:
+            x = h + l + 2 * c
+        p = x / 4
+        levels["p"] = p
+        levels["r1"] = x / 2 - l
+        levels["s1"] = x / 2 - h
+        
+    elif kind == "camarilla":
+        diff = h - l
+        levels["p"] = (h + l + c) / 3
+        levels["r1"] = c + diff * 1.1 / 12
+        levels["s1"] = c - diff * 1.1 / 12
+        levels["r2"] = c + diff * 1.1 / 6
+        levels["s2"] = c - diff * 1.1 / 6
+        levels["r3"] = c + diff * 1.1 / 4
+        levels["s3"] = c - diff * 1.1 / 4
+        levels["r4"] = c + diff * 1.1 / 2
+        levels["s4"] = c - diff * 1.1 / 2
+        levels["r5"] = (h / l) * c
+        levels["s5"] = c - (levels["r5"] - c)
+    
+    else:
+        # Default to traditional
+        p = (h + l + c) / 3
+        levels["p"] = p
+        levels["r1"] = 2 * p - l
+        levels["s1"] = 2 * p - h
+    
+    return levels
 
 
 # Custom indicators from edgewalker (not in TA-Lib)
@@ -30,26 +126,33 @@ CUSTOM_INDICATORS = {
     },
     "pivot": {
         "name": "PIVOT",
-        "display_name": "Pivot Points",
+        "display_name": "Pivot Points Standard",
         "group": "Custom",
-        "description": "Pivot points calculated from previous bar's HLC",
+        "description": "Pivot points calculated from previous day's HLC values (multi-output)",
         "overlay": True,
-        "inputs": {"ohlc": ["high", "low", "close"]},
+        "inputs": {"ohlc": ["open", "high", "low", "close"]},
         "parameters": {
             "kind": {
                 "type": "string",
-                "default": "classic",
-                "options": ["classic", "fibonacci", "woodie", "camarilla"],
+                "default": "traditional",
+                "options": ["traditional", "fibonacci", "woodie", "classic", "dm", "camarilla"],
                 "description": "Pivot point calculation method",
             },
-            "line": {
-                "type": "string",
-                "default": "pivot",
-                "options": ["pivot", "r1", "r2", "r3", "s1", "s2", "s3"],
-                "description": "Which line to return",
-            },
         },
-        "outputs": ["value"],
+        "outputs": ["p", "r1", "r2", "r3", "r4", "r5", "s1", "s2", "s3", "s4", "s5"],
+        "output_descriptions": {
+            "p": "Pivot Point",
+            "r1": "Resistance 1",
+            "r2": "Resistance 2",
+            "r3": "Resistance 3",
+            "r4": "Resistance 4",
+            "r5": "Resistance 5",
+            "s1": "Support 1",
+            "s2": "Support 2",
+            "s3": "Support 3",
+            "s4": "Support 4",
+            "s5": "Support 5",
+        },
     },
     "session_high": {
         "name": "SESSION_HIGH",
@@ -264,51 +367,81 @@ def compute_indicator(
         return cum_tp_vol / np.where(cum_vol > 0, cum_vol, 1)
     
     if type_lower == "pivot":
-        # Pivot points from previous bar
-        kind = params.get("kind", "classic")
-        line = params.get("line", "pivot")
+        # Pivot Points Standard - multi-output, daily-based calculation
+        # Uses previous DAY's H/L/C to calculate pivot levels for current day
+        kind = params.get("kind", "traditional").lower()
         h = np.array(data["high"])
         l = np.array(data["low"])
         c = np.array(data["close"])
-        result = np.full(len(c), np.nan)
+        o = np.array(data.get("open", c))
+        n = len(c)
         
-        for i in range(1, len(c)):
-            prev_h, prev_l, prev_c = h[i-1], l[i-1], c[i-1]
-            pivot = (prev_h + prev_l + prev_c) / 3
+        # Initialize all output arrays
+        output_keys = ["p", "r1", "r2", "r3", "r4", "r5", "s1", "s2", "s3", "s4", "s5"]
+        result = {key: np.full(n, np.nan).tolist() for key in output_keys}
+        
+        # Get timestamps if available for daily aggregation
+        timestamps = data.get("timestamps")
+        if timestamps is not None:
+            import pandas as pd
+            # Convert to dates for grouping
+            ts_series = pd.to_datetime(timestamps)
+            # Handle both DatetimeIndex and Series
+            if hasattr(ts_series, 'date'):
+                # DatetimeIndex has .date property
+                dates = ts_series.date
+            else:
+                # Series has .dt accessor
+                dates = ts_series.dt.date
+            dates = np.array(dates)  # Convert to numpy array for consistent indexing
+            unique_dates = sorted(set(dates))
             
-            if kind == "classic":
-                r1 = 2 * pivot - prev_l
-                s1 = 2 * pivot - prev_h
-                r2 = pivot + (prev_h - prev_l)
-                s2 = pivot - (prev_h - prev_l)
-                r3 = prev_h + 2 * (pivot - prev_l)
-                s3 = prev_l - 2 * (prev_h - pivot)
-            elif kind == "fibonacci":
-                diff = prev_h - prev_l
-                r1 = pivot + 0.382 * diff
-                s1 = pivot - 0.382 * diff
-                r2 = pivot + 0.618 * diff
-                s2 = pivot - 0.618 * diff
-                r3 = pivot + diff
-                s3 = pivot - diff
-            elif kind == "woodie":
-                pivot = (prev_h + prev_l + 2 * prev_c) / 4
-                r1 = 2 * pivot - prev_l
-                s1 = 2 * pivot - prev_h
-                r2 = pivot + (prev_h - prev_l)
-                s2 = pivot - (prev_h - prev_l)
-                r3 = r1 + (prev_h - prev_l)
-                s3 = s1 - (prev_h - prev_l)
-            else:  # camarilla
-                r1 = prev_c + (prev_h - prev_l) * 1.1 / 12
-                s1 = prev_c - (prev_h - prev_l) * 1.1 / 12
-                r2 = prev_c + (prev_h - prev_l) * 1.1 / 6
-                s2 = prev_c - (prev_h - prev_l) * 1.1 / 6
-                r3 = prev_c + (prev_h - prev_l) * 1.1 / 4
-                s3 = prev_c - (prev_h - prev_l) * 1.1 / 4
+            # Build daily H/L/C for each date
+            daily_hlc = {}
+            for date in unique_dates:
+                mask = dates == date
+                indices = np.where(mask)[0]
+                if len(indices) > 0:
+                    daily_hlc[date] = {
+                        "high": float(np.max(h[mask])),
+                        "low": float(np.min(l[mask])),
+                        "close": float(c[indices[-1]]),  # Last close of the day
+                        "open": float(o[indices[0]]),     # First open of the day
+                    }
             
-            lines = {"pivot": pivot, "r1": r1, "r2": r2, "r3": r3, "s1": s1, "s2": s2, "s3": s3}
-            result[i] = lines.get(line, pivot)
+            # Calculate pivots for each bar based on PREVIOUS day's HLC
+            prev_date = None
+            prev_hlc = None
+            
+            for i in range(n):
+                current_date = dates[i]  # Now always numpy array
+                
+                # Find previous trading day's HLC (only update on day change)
+                if current_date != prev_date:
+                    prev_dates = [d for d in unique_dates if d < current_date]
+                    if prev_dates:
+                        prev_trading_date = max(prev_dates)
+                        prev_hlc = daily_hlc.get(prev_trading_date)
+                    prev_date = current_date
+                
+                if prev_hlc is None:
+                    continue
+                
+                # Calculate pivot levels from previous day's data
+                levels = _calculate_pivot_levels(
+                    prev_hlc["high"], prev_hlc["low"], prev_hlc["close"], prev_hlc["open"], kind
+                )
+                
+                for key, value in levels.items():
+                    if key in result:
+                        result[key][i] = value
+        else:
+            # Fallback: bar-by-bar (for daily timeframe)
+            for i in range(1, n):
+                levels = _calculate_pivot_levels(h[i-1], l[i-1], c[i-1], o[i-1], kind)
+                for key, value in levels.items():
+                    if key in result:
+                        result[key][i] = value
         
         return result
     

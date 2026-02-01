@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlmodel import SQLModel, Field, Column, JSON
+from sqlalchemy import ForeignKey, Integer
 
 
 class DataSource(SQLModel, table=True):
@@ -53,8 +54,10 @@ class SymbolCache(SQLModel, table=True):
     
     id: int | None = Field(default=None, primary_key=True)
     
-    # Source reference
-    source_id: int = Field(foreign_key="data_sources.id", index=True)
+    # Source reference (cascade delete when data source is deleted)
+    source_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("data_sources.id", ondelete="CASCADE"), index=True)
+    )
     source_name: str = Field(index=True, description="Denormalized for faster queries")
     
     # Symbol identification
@@ -89,7 +92,10 @@ class SymbolSyncLog(SQLModel, table=True):
     
     id: int | None = Field(default=None, primary_key=True)
     
-    source_id: int = Field(foreign_key="data_sources.id", index=True)
+    # Source reference (cascade delete when data source is deleted)
+    source_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("data_sources.id", ondelete="CASCADE"), index=True)
+    )
     source_name: str = Field(index=True)
     
     started_at: datetime = Field(default_factory=datetime.utcnow)
