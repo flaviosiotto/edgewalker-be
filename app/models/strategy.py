@@ -88,8 +88,25 @@ class BacktestResult(SQLModel, table=True):
     symbol: str = Field(sa_column=Column(String(32), nullable=False, index=True))
     start_date: date = Field(sa_column=Column(Date, nullable=False))
     end_date: date = Field(sa_column=Column(Date, nullable=False))
+    
+    # Data source parameters (for fetch)
+    source: Optional[str] = Field(default="ibkr", sa_column=Column(String(20), nullable=True))
+    timeframe: Optional[str] = Field(default="5m", sa_column=Column(String(10), nullable=True))
+    asset: Optional[str] = Field(default="stock", sa_column=Column(String(20), nullable=True))
+    rth: Optional[bool] = Field(default=True, sa_column=Column(String(10), nullable=True))  # stored as string for simplicity
+    
+    # IBKR-specific parameters
+    ibkr_config: Optional[str] = Field(default=None, sa_column=Column(String(255), nullable=True))
+    exchange: Optional[str] = Field(default="SMART", sa_column=Column(String(20), nullable=True))
+    currency: Optional[str] = Field(default="USD", sa_column=Column(String(10), nullable=True))
+    expiry: Optional[str] = Field(default=None, sa_column=Column(String(20), nullable=True))
+    
+    # Backtest execution parameters
+    initial_capital: Optional[float] = Field(default=100000.0, sa_column=Column(Float, nullable=True))
+    commission: Optional[float] = Field(default=0.0, sa_column=Column(Float, nullable=True))
+    
+    # Additional config overrides (JSONB)
     parameters: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
-    # parameters: initial_capital, commission, slippage, config overrides, etc.
 
     # ── STATUS ──
     status: str = Field(

@@ -1,12 +1,20 @@
 """
 Market Data Service - OHLCV data provider with indicators.
 
-Loads historical bar data from parquet files and computes technical indicators.
+Loads historical bar data from partitioned parquet datasets and computes technical indicators.
+
+Partitioned dataset structure:
+    data/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet
+    
+Example:
+    data/ibkr-ohlcv/QQQ/5m/2026-01-26/part-0000.parquet
+    data/yahoo-ohlcv/SPY/5m/2026-01-26/part-0000.parquet
 """
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,220 +34,189 @@ class MarketDataError(Exception):
     pass
 
 
-import re
+# =============================================================================
+# PARTITIONED DATASET READER
+# =============================================================================
 
-def _extract_date_range_from_filename(filename: str) -> tuple[date | None, date | None]:
-    """Extract date range from filename patterns like:
-    - QQQ_STK_SMART_USD_1min_2024-01-01_2025-12-31.parquet
-    - QQQ_5m_2025-12-01_2025-12-10.parquet
-    
-    Returns (start_date, end_date) or (None, None) if not found.
-    """
-    # Pattern to find YYYY-MM-DD dates
-    date_pattern = r'(\d{4}-\d{2}-\d{2})'
-    dates = re.findall(date_pattern, filename)
-    
-    if len(dates) >= 2:
-        try:
-            start = date.fromisoformat(dates[0])
-            end = date.fromisoformat(dates[1])
-            return start, end
-        except ValueError:
-            return None, None
-    return None, None
+def _normalize_timeframe(tf: str) -> str:
+    """Normalize timeframe to canonical form for directory names."""
+    tf_lower = tf.strip().lower().replace(" ", "")
+    aliases = {
+        "1min": "1m", "2min": "2m", "5min": "5m", "15min": "15m", "30min": "30m",
+        "60min": "1h", "1hour": "1h", "1day": "1d",
+        "5mins": "5m", "1 min": "1m", "5 mins": "5m",
+    }
+    return aliases.get(tf_lower, tf_lower)
 
 
-def _find_parquet_file(
-    symbol: str, 
-    timeframe: str = "1min",
+def _is_monthly_timeframe(tf: str) -> bool:
+    """Determine if timeframe uses monthly partitions (tf >= 1h)."""
+    tf_lower = tf.strip().lower()
+    if re.match(r"^\d+[hdw]$", tf_lower):
+        return True
+    if re.match(r"^\d+\s*(hour|day|week)", tf_lower):
+        return True
+    m = re.match(r"^(\d+)m$", tf_lower)
+    if m and int(m.group(1)) >= 60:
+        return True
+    return False
+
+
+def _iter_partition_values(start_date: date, end_date: date, monthly: bool) -> list[str]:
+    """Generate partition values for a date range."""
+    values = []
+    if monthly:
+        current = date(start_date.year, start_date.month, 1)
+        while current <= end_date:
+            values.append(current.strftime("%Y-%m"))
+            if current.month == 12:
+                current = date(current.year + 1, 1, 1)
+            else:
+                current = date(current.year, current.month + 1, 1)
+    else:
+        current = start_date
+        while current <= end_date:
+            values.append(current.isoformat())
+            current += timedelta(days=1)
+    return values
+
+
+def _find_partitioned_data(
+    symbol: str,
+    timeframe: str,
     start_date: date | None = None,
     end_date: date | None = None,
-) -> Path:
-    """Find the parquet file for a given symbol, timeframe, and date range.
+    source: str | None = None,
+) -> list[Path]:
+    """Find partitioned parquet files for a symbol/timeframe/date range.
     
-    Selection priority:
-    1. Files with matching timeframe AND containing requested date range
-    2. Files with matching timeframe (largest by size)
-    3. Files with finer granularity (1min) that can be resampled up
-    4. Fallback to any matching symbol file
+    Directory structure: data/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet
     
     Args:
         symbol: Trading symbol (e.g., 'QQQ')
-        timeframe: Target timeframe (1min, 5min, 15min, 1h, 1d)
-        start_date: Start date of requested data
-        end_date: End date of requested data
+        timeframe: Target timeframe (1m, 5m, 15m, 1h, 1d)
+        start_date: Start date filter
+        end_date: End date filter
+        source: Data source (ibkr, yahoo). If None, searches all sources.
+        
+    Returns:
+        List of parquet file paths sorted by date
     """
     symbol_upper = symbol.upper()
+    tf_canonical = _normalize_timeframe(timeframe)
+    monthly = _is_monthly_timeframe(tf_canonical)
     
-    # Normalize timeframe patterns to search for
-    tf_patterns = {
-        "1min": ["_1min", "_1m_", "_1m."],
-        "1m": ["_1min", "_1m_", "_1m."],
-        "5min": ["_5min", "_5m_", "_5m.", "_5mins"],
-        "5m": ["_5min", "_5m_", "_5m.", "_5mins"],
-        "15min": ["_15min", "_15m_", "_15m."],
-        "15m": ["_15min", "_15m_", "_15m."],
-        "30min": ["_30min", "_30m_", "_30m."],
-        "30m": ["_30min", "_30m_", "_30m."],
-        "1h": ["_60min", "_60m", "_1h_", "_1h."],
-        "1hour": ["_60min", "_60m", "_1h_", "_1h."],
-        "1d": ["_1d_", "_1d.", "_daily"],
-        "1day": ["_1d_", "_1d.", "_daily"],
-        "daily": ["_1d_", "_1d.", "_daily"],
-    }
-    
-    # Get all matching symbol files
-    all_matches = list(EDGEWALKER_DATA_DIR.glob(f"{symbol_upper}*.parquet"))
-    if not all_matches:
-        raise MarketDataError(f"No parquet file found for symbol '{symbol}' in {EDGEWALKER_DATA_DIR}")
-    
-    # Try to find files matching the requested timeframe
-    patterns = tf_patterns.get(timeframe.lower(), [])
-    tf_matches = []
-    for path in all_matches:
-        name_lower = path.name.lower()
-        if any(pat in name_lower for pat in patterns):
-            tf_matches.append(path)
-    
-    def _file_covers_date_range(path: Path, check_actual_content: bool = False) -> bool:
-        """Check if file's date range covers the requested range.
-        
-        Args:
-            path: Path to the parquet file
-            check_actual_content: If True and filename doesn't have date info,
-                                  read the file to check actual date range
-        """
-        if start_date is None and end_date is None:
-            return True  # No date filter, any file is ok
-        
-        file_start, file_end = _extract_date_range_from_filename(path.name)
-        
-        # If can't determine from filename and check_actual_content is True,
-        # read the file to get actual date range
-        if (file_start is None or file_end is None) and check_actual_content:
-            try:
-                df = pd.read_parquet(path, columns=["ts"])
-                df["ts"] = pd.to_datetime(df["ts"], utc=True)
-                file_start = df["ts"].min().date()
-                file_end = df["ts"].max().date()
-                logger.debug(f"Read actual date range from {path.name}: {file_start} to {file_end}")
-            except Exception as e:
-                logger.warning(f"Could not read date range from {path.name}: {e}")
-                return True  # Can't determine, assume it might work
-        
-        if file_start is None or file_end is None:
-            return True  # Can't determine, assume it might work
-        
-        # Check if file range overlaps with requested range
-        req_start = start_date or date(1900, 1, 1)
-        req_end = end_date or date(2100, 12, 31)
-        
-        # File covers range if its range overlaps with requested range
-        return file_start <= req_end and file_end >= req_start
-    
-    if tf_matches:
-        # Filter by date range coverage
-        date_filtered = [p for p in tf_matches if _file_covers_date_range(p)]
-        
-        if date_filtered:
-            # Sort by:
-            # 1. Files whose end date is closest to/past the requested end date (more recent data)
-            # 2. Then by file size (more data is better)
-            def score_file(p: Path) -> tuple:
-                file_start, file_end = _extract_date_range_from_filename(p.name)
-                # Higher end date = higher score
-                end_score = file_end.toordinal() if file_end else 0
-                size_score = p.stat().st_size
-                return (end_score, size_score)
-            
-            best = max(date_filtered, key=score_file)
-            logger.info(f"Selected file by timeframe + date range: {best.name}")
-            return best
-        else:
-            # No date match, use largest by size
-            best = max(tf_matches, key=lambda p: p.stat().st_size)
-            logger.info(f"Selected file by timeframe (no date match): {best.name}")
-            return best
-    
-    # Fallback: prefer 1min files (can be resampled) over coarser files
-    one_min_patterns = ["_1min", "_1m_", "_1m."]
-    one_min_matches = [p for p in all_matches if any(pat in p.name.lower() for pat in one_min_patterns)]
-    
-    if one_min_matches:
-        # Also filter by date range (from filename)
-        date_filtered = [p for p in one_min_matches if _file_covers_date_range(p)]
-        
-        if date_filtered:
-            # Check if the best candidate actually has data for the end date
-            # If not, we'll try other files
-            def score_file_1min(p: Path) -> tuple:
-                file_start, file_end = _extract_date_range_from_filename(p.name)
-                end_score = file_end.toordinal() if file_end else 0
-                size_score = p.stat().st_size
-                return (end_score, size_score)
-            
-            best_1min = max(date_filtered, key=score_file_1min)
-            best_start, best_end = _extract_date_range_from_filename(best_1min.name)
-            
-            # Check if this file actually covers the requested end date
-            if end_date and best_end and best_end >= end_date:
-                logger.info(f"Selected 1min file for resampling: {best_1min.name}")
-                return best_1min
-            else:
-                # The 1min files don't cover the requested end date
-                # Check if other files (without timeframe pattern) might have newer data
-                logger.info(f"Best 1min file {best_1min.name} ends at {best_end}, need data until {end_date}")
-        else:
-            best_1min = max(one_min_matches, key=lambda p: p.stat().st_size)
+    # Find available sources
+    sources_to_check = []
+    if source:
+        sources_to_check = [source.lower()]
     else:
-        best_1min = None
+        # Auto-detect: check ibkr first, then yahoo
+        for src in ["ibkr", "yahoo"]:
+            src_dir = EDGEWALKER_DATA_DIR / f"{src}-ohlcv"
+            if src_dir.exists():
+                sources_to_check.append(src)
     
-    # Check remaining files (without explicit timeframe pattern) for actual date coverage
-    # This handles files like "QQQ_live.parquet" that don't have date/timeframe in name
-    all_tf_patterns = ["_1min", "_1m_", "_1m.", "_5min", "_5m_", "_5m.", "_15min", "_15m", 
-                       "_30min", "_30m", "_60min", "_1h", "_1d", "_daily"]
-    remaining_files = [p for p in all_matches 
-                       if not any(pat in p.name.lower() for pat in all_tf_patterns)]
-    if remaining_files and (start_date or end_date):
-        # Check actual content for date coverage
-        covering_files = [p for p in remaining_files if _file_covers_date_range(p, check_actual_content=True)]
-        if covering_files:
-            best = max(covering_files, key=lambda p: p.stat().st_size)
-            logger.info(f"Selected file by actual content date range: {best.name}")
-            return best
+    parquet_files = []
     
-    # If we had a 1min candidate, use it as final fallback
-    if best_1min:
-        logger.info(f"Falling back to 1min file: {best_1min.name}")
-        return best_1min
+    for src in sources_to_check:
+        tf_dir = EDGEWALKER_DATA_DIR / f"{src}-ohlcv" / symbol_upper / tf_canonical
+        
+        if not tf_dir.exists():
+            continue
+        
+        # List partition directories
+        for entry in tf_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            
+            partition_value = entry.name
+            
+            # Validate partition format and filter by date
+            if monthly:
+                if not re.match(r"^\d{4}-\d{2}$", partition_value):
+                    continue
+                partition_date = date(int(partition_value[:4]), int(partition_value[5:7]), 1)
+            else:
+                if not re.match(r"^\d{4}-\d{2}-\d{2}$", partition_value):
+                    continue
+                try:
+                    partition_date = date.fromisoformat(partition_value)
+                except ValueError:
+                    continue
+            
+            # Apply date filter
+            if start_date and partition_date < start_date:
+                if monthly:
+                    # For monthly, check if month end is before start
+                    if partition_date.month == 12:
+                        month_end = date(partition_date.year + 1, 1, 1) - timedelta(days=1)
+                    else:
+                        month_end = date(partition_date.year, partition_date.month + 1, 1) - timedelta(days=1)
+                    if month_end < start_date:
+                        continue
+                else:
+                    continue
+            
+            if end_date and partition_date > end_date:
+                continue
+            
+            # Find parquet file in partition
+            parquet_file = entry / "part-0000.parquet"
+            if parquet_file.exists():
+                parquet_files.append(parquet_file)
+        
+        # If we found data from this source, use it
+        if parquet_files:
+            break
     
-    # Final fallback: largest file (most data)
-    best = max(all_matches, key=lambda p: p.stat().st_size)
-    logger.warning(f"No timeframe match found, using largest file: {best.name}")
-    return best
+    return sorted(parquet_files)
 
 
-def load_ohlcv(
+def load_ohlcv_partitioned(
     symbol: str,
     start_date: date | None = None,
     end_date: date | None = None,
-    timeframe: str = "1min",
+    timeframe: str = "5m",
+    source: str | None = None,
 ) -> pd.DataFrame:
-    """Load OHLCV data from parquet file.
+    """Load OHLCV data from partitioned parquet files.
     
     Args:
         symbol: Trading symbol (e.g., 'QQQ', 'SPY')
         start_date: Start date filter (inclusive)
         end_date: End date filter (inclusive)
-        timeframe: Target timeframe for resampling (1min, 5min, 15min, 1h, 1d)
+        timeframe: Target timeframe (1m, 5m, 15m, 1h, 1d)
+        source: Data source (ibkr, yahoo). If None, auto-detects.
     
     Returns:
         DataFrame with columns: ts, open, high, low, close, volume
     """
-    parquet_path = _find_parquet_file(symbol, timeframe, start_date, end_date)
-    logger.info(f"Loading OHLCV from {parquet_path} for timeframe {timeframe}")
+    parquet_files = _find_partitioned_data(symbol, timeframe, start_date, end_date, source)
     
-    df = pd.read_parquet(parquet_path)
+    if not parquet_files:
+        raise MarketDataError(
+            f"No partitioned data found for symbol '{symbol}' timeframe '{timeframe}' "
+            f"in {EDGEWALKER_DATA_DIR}. "
+            f"Expected structure: <source>-ohlcv/{symbol.upper()}/{_normalize_timeframe(timeframe)}/<date>/part-0000.parquet"
+        )
+    
+    logger.info(f"Loading {len(parquet_files)} partition files for {symbol}/{timeframe}")
+    
+    # Read and concatenate all partitions
+    dfs = []
+    for pf in parquet_files:
+        try:
+            df = pd.read_parquet(pf)
+            dfs.append(df)
+        except Exception as e:
+            logger.warning(f"Failed to read {pf}: {e}")
+            continue
+    
+    if not dfs:
+        raise MarketDataError(f"Failed to read any partition files for {symbol}")
+    
+    df = pd.concat(dfs, ignore_index=True)
     
     # Normalize column names
     df.columns = [c.lower() for c in df.columns]
@@ -251,22 +228,18 @@ def load_ohlcv(
         elif "datetime" in df.columns:
             df = df.rename(columns={"datetime": "ts"})
         else:
-            raise MarketDataError(f"No timestamp column found in {parquet_path}")
+            raise MarketDataError(f"No timestamp column found in partition files")
     
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
-    df = df.sort_values("ts")
+    df = df.sort_values("ts").drop_duplicates(subset=["ts"])
     
-    # Filter by date range
+    # Filter by exact date range (partitions may include extra data)
     if start_date:
         start_dt = pd.Timestamp(start_date, tz="UTC")
         df = df[df["ts"] >= start_dt]
     if end_date:
-        # Include full end date
         end_dt = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
         df = df[df["ts"] < end_dt]
-    
-    # Resample if needed
-    df = _resample_ohlcv(df, timeframe)
     
     # Ensure required columns
     required = ["ts", "open", "high", "low", "close", "volume"]
@@ -677,27 +650,32 @@ def get_ohlc_history(
     symbol: str,
     start_date: date | None = None,
     end_date: date | None = None,
-    timeframe: str = "1min",
+    timeframe: str = "5m",
     indicators: list[dict[str, Any]] | list[str] | None = None,
+    source: str | None = None,
 ) -> dict[str, Any]:
-    """Get OHLC history with optional indicators from cached files.
+    """Get OHLC history with optional indicators from partitioned dataset.
+    
+    Reads from partitioned parquet structure:
+        data/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet
     
     Args:
         symbol: Trading symbol
         start_date: Start date filter
         end_date: End date filter
-        timeframe: Bar timeframe (1min, 5min, 15min, 1h, 1d)
+        timeframe: Bar timeframe (1m, 5m, 15m, 1h, 1d)
         indicators: List of indicator configs or legacy string specs
+        source: Data source (ibkr, yahoo). If None, auto-detects.
     
     Returns:
         {
             "symbol": "QQQ",
-            "timeframe": "5min",
+            "timeframe": "5m",
             "candles": [{"time": 1234567890, "open": 100, ...}, ...],
             "indicators": {"SMA_20": [...], ...}
         }
     """
-    df = load_ohlcv(symbol, start_date, end_date, timeframe)
+    df = load_ohlcv_partitioned(symbol, start_date, end_date, timeframe, source)
     
     # Convert to lightweight-charts candlestick format
     candles = []
@@ -762,36 +740,26 @@ def get_ohlc_history_with_fetch(
     try:
         from edgewalker.marketdata.fetch import FetchRequest, fetch as edgewalker_fetch
         
-        # Map timeframe to interval format
-        interval_map = {
-            "1min": "1m",
-            "5min": "5m", 
-            "15min": "15m",
-            "30min": "30m",
-            "1h": "60m",
-            "1d": "1d",
-        }
-        interval = interval_map.get(timeframe.lower(), timeframe)
+        # Normalize timeframe
+        tf_normalized = _normalize_timeframe(timeframe)
         
-        # Determine output path based on source and asset type
-        output_dir = EDGEWALKER_DATA_DIR
-        output_dir.mkdir(parents=True, exist_ok=True)
+        # Determine asset for IBKR
+        asset = "fut" if asset_type == "futures" else "stk"
         
-        # Build filename with metadata
-        start_str = start_date.isoformat() if start_date else "auto"
-        end_str = end_date.isoformat() if end_date else "now"
-        filename = f"{symbol.upper()}_{interval}_{start_str}_{end_str}.parquet"
-        output_path = str(output_dir / filename)
-        
-        # Create fetch request
+        # Create fetch request - all params required
         req = FetchRequest(
             source=source,
             symbol=symbol,
-            start=start_date.isoformat() if start_date else None,
-            end=end_date.isoformat() if end_date else None,
-            interval=interval,
-            output=output_path,
-            update=True,  # Allow incremental updates
+            start=start_date.isoformat() if start_date else datetime.now().date().isoformat(),
+            end=end_date.isoformat() if end_date else datetime.now().date().isoformat(),
+            timeframe=tf_normalized,
+            rth="true",  # Default to RTH
+            asset=asset,
+            ibkr_config="configs/ibkr.yaml",
+            expiry="auto",
+            exchange="SMART" if asset == "stk" else "CME",
+            currency="USD",
+            chunk_days=30,
         )
         
         # Execute fetch
@@ -810,6 +778,7 @@ def get_ohlc_history_with_fetch(
             end_date=end_date,
             timeframe=timeframe,
             indicators=indicators,
+            source=source,
         )
         
     except ImportError as e:

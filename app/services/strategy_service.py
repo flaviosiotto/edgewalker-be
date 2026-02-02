@@ -116,9 +116,24 @@ def create_backtest(session: Session, strategy_id: int, payload: BacktestCreate)
     backtest = BacktestResult(
         strategy_id=strategy_id,
         agent_id=payload.agent_id,
+        # Required parameters
         symbol=payload.symbol,
         start_date=payload.start_date,
         end_date=payload.end_date,
+        # Data source parameters
+        source=payload.source,
+        timeframe=payload.timeframe,
+        asset=payload.asset,
+        rth=payload.rth,
+        # IBKR-specific parameters
+        ibkr_config=payload.ibkr_config,
+        exchange=payload.exchange,
+        currency=payload.currency,
+        expiry=payload.expiry,
+        # Backtest execution parameters
+        initial_capital=payload.initial_capital,
+        commission=payload.commission,
+        # Additional config overrides
         parameters=payload.parameters,
         status=BacktestStatus.PENDING.value,
     )
@@ -183,13 +198,30 @@ def run_backtest(session: Session, backtest_id: int) -> BacktestResult:
     session.commit()
     session.refresh(backtest)
     
-    # Prepare payload for n8n webhook (minimal - workflow fetches details from DB)
+    # Prepare payload for n8n webhook with all parameters for fetch and backtest
     webhook_payload = {
         "action": "backtest",
         "backtest_id": backtest.id,
         "strategy_id": backtest.strategy_id,
+        # Required parameters
+        "symbol": backtest.symbol,
         "start_date": str(backtest.start_date),
         "end_date": str(backtest.end_date),
+        # Data source parameters (for fetch)
+        "source": backtest.source,
+        "timeframe": backtest.timeframe,
+        "asset": backtest.asset,
+        "rth": backtest.rth,
+        # IBKR-specific parameters
+        "ibkr_config": backtest.ibkr_config,
+        "exchange": backtest.exchange,
+        "currency": backtest.currency,
+        "expiry": backtest.expiry,
+        # Backtest execution parameters
+        "initial_capital": backtest.initial_capital,
+        "commission": backtest.commission,
+        # Additional config overrides
+        "parameters": backtest.parameters,
     }
     
     # Call n8n webhook (fire and forget - don't wait for backtest to complete)

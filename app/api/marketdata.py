@@ -115,13 +115,14 @@ def get_ohlc_history_endpoint(
                 indicators=indicator_list,
             )
         else:
-            # Use existing cached data
+            # Use existing partitioned data
             result = get_ohlc_history(
                 symbol=symbol,
                 start_date=start_date,
                 end_date=end_date,
                 timeframe=timeframe,
                 indicators=indicator_list,
+                source=source.value,
             )
         return result
     except MarketDataError as e:

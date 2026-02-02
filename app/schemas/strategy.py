@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -29,13 +29,38 @@ class StrategyUpdate(BaseModel):
 
 
 class BacktestCreate(BaseModel):
-    """Input parameters for creating a new backtest (status=pending)."""
+    """Input parameters for creating a new backtest (status=pending).
+    
+    Includes all parameters for both fetch and backtest operations.
+    """
+    # Required parameters
     symbol: str
     start_date: date
     end_date: date
-    agent_id: Optional[int] = None  # Agent to execute this backtest via n8n
+    
+    # Agent to execute this backtest via n8n
+    agent_id: Optional[int] = None
+    
+    # Data source parameters (for fetch)
+    source: Literal["ibkr", "yahoo"] = "ibkr"
+    timeframe: str = "5m"  # e.g., "1m", "5m", "15m", "1h", "1d"
+    asset: Literal["stock", "future"] = "stock"
+    rth: bool = True  # True = Regular Trading Hours only
+    
+    # IBKR-specific parameters
+    ibkr_config: Optional[str] = "configs/ibkr.yaml"
+    exchange: str = "SMART"
+    currency: str = "USD"
+    
+    # Futures-specific parameters
+    expiry: Optional[str] = None  # YYYYMM, YYYYMMDD, or "auto"
+    
+    # Backtest execution parameters
+    initial_capital: float = 100000.0
+    commission: float = 0.0
+    
+    # Additional config overrides (JSONB)
     parameters: Optional[dict[str, Any]] = None
-    # parameters can include: initial_capital, commission, slippage, config overrides...
 
 
 class BacktestRead(BaseModel):
@@ -44,10 +69,28 @@ class BacktestRead(BaseModel):
     strategy_id: int
     agent_id: Optional[int] = None
     
-    # Input
+    # Input parameters
     symbol: str
     start_date: date
     end_date: date
+    
+    # Data source parameters
+    source: Optional[str] = None
+    timeframe: Optional[str] = None
+    asset: Optional[str] = None
+    rth: Optional[bool] = None
+    
+    # IBKR-specific parameters
+    ibkr_config: Optional[str] = None
+    exchange: Optional[str] = None
+    currency: Optional[str] = None
+    expiry: Optional[str] = None
+    
+    # Backtest execution parameters
+    initial_capital: Optional[float] = None
+    commission: Optional[float] = None
+    
+    # Additional config overrides
     parameters: Optional[dict[str, Any]] = None
     
     # Status (pending | running | completed | failed | error)

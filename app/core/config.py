@@ -23,8 +23,9 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
     
-    # Market data directory (parquet files)
-    MARKETDATA_DIR: str = "/data/raw"
+    # Market data directory (base path for partitioned datasets)
+    # Structure: <MARKETDATA_DIR>/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet
+    MARKETDATA_DIR: str = "/data"
     
     # Sync settings
     SYNC_POLL_INTERVAL_SECONDS: int = 60  # How often to check if sources need sync
