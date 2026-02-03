@@ -12,6 +12,7 @@ from app.schemas.strategy import (
     TradeCreate,
     TradeRead,
 )
+from app.schemas.chat import ChatCreate, ChatRead
 from app.services.strategy_service import (
     create_strategy,
     delete_strategy,
@@ -27,6 +28,11 @@ from app.services.strategy_service import (
     create_trade,
     create_trades_bulk,
     list_trades,
+    list_strategy_chats,
+    create_strategy_chat,
+    get_strategy_chat,
+    update_strategy_chat,
+    delete_strategy_chat,
 )
 
 router = APIRouter(prefix="/strategies", tags=["Strategies"])
@@ -138,3 +144,54 @@ def create_trades_bulk_endpoint(
 def list_trades_endpoint(backtest_id: int, session: Session = Depends(get_session)):
     """List all trades for a backtest."""
     return list_trades(session, backtest_id)
+
+
+# ─── CHAT ENDPOINTS ───
+
+
+@router.get("/{strategy_id}/chats", response_model=list[ChatRead])
+def list_strategy_chats_endpoint(strategy_id: int, session: Session = Depends(get_session)):
+    """List all chats for a strategy."""
+    return list_strategy_chats(session, strategy_id)
+
+
+@router.post("/{strategy_id}/chats", response_model=ChatRead)
+def create_strategy_chat_endpoint(
+    strategy_id: int,
+    payload: ChatCreate,
+    session: Session = Depends(get_session),
+):
+    """Create a new chat for a strategy."""
+    return create_strategy_chat(session, strategy_id, payload)
+
+
+@router.get("/{strategy_id}/chats/{chat_id}", response_model=ChatRead)
+def get_strategy_chat_endpoint(
+    strategy_id: int,
+    chat_id: int,
+    session: Session = Depends(get_session),
+):
+    """Get a specific chat for a strategy."""
+    return get_strategy_chat(session, strategy_id, chat_id)
+
+
+@router.patch("/{strategy_id}/chats/{chat_id}", response_model=ChatRead)
+def update_strategy_chat_endpoint(
+    strategy_id: int,
+    chat_id: int,
+    payload: ChatCreate,
+    session: Session = Depends(get_session),
+):
+    """Update a chat for a strategy."""
+    return update_strategy_chat(session, strategy_id, chat_id, payload)
+
+
+@router.delete("/{strategy_id}/chats/{chat_id}")
+def delete_strategy_chat_endpoint(
+    strategy_id: int,
+    chat_id: int,
+    session: Session = Depends(get_session),
+):
+    """Delete a chat from a strategy."""
+    delete_strategy_chat(session, strategy_id, chat_id)
+    return {"status": "ok"}

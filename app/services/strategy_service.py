@@ -5,9 +5,10 @@ from typing import TYPE_CHECKING
 
 import httpx
 from fastapi import HTTPException, status
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
-from app.models.agent import Agent
+from app.models.agent import Agent, Chat
 from app.models.strategy import Strategy, BacktestResult, BacktestTrade, BacktestStatus
 from app.schemas.strategy import (
     StrategyCreate,
@@ -16,6 +17,7 @@ from app.schemas.strategy import (
     BacktestUpdate,
     TradeCreate,
 )
+from app.schemas.chat import ChatCreate
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -51,11 +53,13 @@ def create_strategy(session: Session, payload: StrategyCreate) -> Strategy:
 
 
 def list_strategies(session: Session) -> list[Strategy]:
-    return list(session.exec(select(Strategy).order_by(Strategy.id.desc())).all())
+    stmt = select(Strategy).options(selectinload(Strategy.chats)).order_by(Strategy.id.desc())
+    return list(session.exec(stmt).all())
 
 
 def get_strategy(session: Session, strategy_id: int) -> Strategy:
-    strategy = session.get(Strategy, strategy_id)
+    stmt = select(Strategy).options(selectinload(Strategy.chats)).where(Strategy.id == strategy_id)
+    strategy = session.exec(stmt).first()
     if not strategy:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
     return strategy
@@ -402,3 +406,81 @@ def create_trades_bulk(
         session.refresh(trade)
     
     return created_trades
+
+
+# ─── CHAT FUNCTIONS ───
+
+
+def list_strategy_chats(session: Session, strategy_id: int) -> list[Chat]:
+    """List all chats for a strategy."""
+    _ = get_strategy(session, strategy_id)
+    return list(
+        session.exec(
+            select(Chat)
+            .where(Chat.strategy_id == strategy_id)
+            .order_by(Chat.created_at.desc())
+        ).all()
+    )
+
+
+def create_strategy_chat(
+    session: Session, strategy_id: int, payload: ChatCreate
+) -> Chat:
+    """Create a new chat for a strategy."""
+    _ = get_strategy(session, strategy_id)
+    
+    now = datetime.now(timezone.utc)
+    chat = Chat(
+        strategy_id=strategy_id,
+        id_agent=payload.id_agent,
+        user_id=payload.user_id,
+        nome=payload.nome,
+        descrizione=payload.descrizione,
+        chat_type=payload.chat_type or Chat.ChatType.GENERIC,
+        created_at=now,
+    )
+    session.add(chat)
+    session.commit()
+    session.refresh(chat)
+    return chat
+
+
+def get_strategy_chat(session: Session, strategy_id: int, chat_id: int) -> Chat:
+    """Get a specific chat for a strategy."""
+    _ = get_strategy(session, strategy_id)
+    chat = session.exec(
+        select(Chat)
+        .where(Chat.strategy_id == strategy_id)
+        .where(Chat.id == chat_id)
+    ).first()
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    return chat
+
+
+def update_strategy_chat(
+    session: Session, strategy_id: int, chat_id: int, payload: ChatCreate
+) -> Chat:
+    """Update a chat for a strategy."""
+    chat = get_strategy_chat(session, strategy_id, chat_id)
+    
+    if payload.nome is not None:
+        chat.nome = payload.nome
+    if payload.descrizione is not None:
+        chat.descrizione = payload.descrizione
+    if payload.id_agent is not None:
+        chat.id_agent = payload.id_agent
+    if payload.chat_type is not None:
+        chat.chat_type = payload.chat_type
+    
+    session.add(chat)
+    session.commit()
+    session.refresh(chat)
+    return chat
+
+
+def delete_strategy_chat(session: Session, strategy_id: int, chat_id: int) -> None:
+    """Delete a chat from a strategy."""
+    chat = get_strategy_chat(session, strategy_id, chat_id)
+    session.delete(chat)
+    session.commit()

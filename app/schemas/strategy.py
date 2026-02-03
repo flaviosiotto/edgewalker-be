@@ -3,6 +3,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
+from app.schemas.chat import ChatRead
+
 
 class StrategyCreate(BaseModel):
     name: str
@@ -17,6 +19,7 @@ class StrategyRead(BaseModel):
     definition: Any
     created_at: datetime
     updated_at: datetime
+    chats: list[ChatRead] = []
 
 
 class StrategyUpdate(BaseModel):

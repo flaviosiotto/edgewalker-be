@@ -3,12 +3,15 @@ from __future__ import annotations
 from datetime import datetime, date, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from sqlalchemy import Column, ForeignKey, String, Date, DateTime, Integer, Numeric, Text, Float
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
+
+if TYPE_CHECKING:
+    from app.models.agent import Chat
 
 
 class BacktestStatus(str, Enum):
@@ -52,6 +55,14 @@ class Strategy(SQLModel, table=True):
     backtests: list["BacktestResult"] = Relationship(
         sa_relationship=relationship(
             "BacktestResult",
+            back_populates="strategy",
+            cascade="all, delete-orphan",
+        )
+    )
+
+    chats: list["Chat"] = Relationship(
+        sa_relationship=relationship(
+            "Chat",
             back_populates="strategy",
             cascade="all, delete-orphan",
         )
