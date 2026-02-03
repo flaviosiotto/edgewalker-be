@@ -434,7 +434,7 @@ def _compute_single_indicator(
 
 
 def _to_line_series(timestamps: np.ndarray, values: np.ndarray) -> list[dict[str, Any]]:
-    """Convert to lightweight-charts line series format."""
+    """Convert to lightweight-charts line series format (UTC timestamps)."""
     result = []
     for ts, val in zip(timestamps, values):
         if pd.notna(val):
@@ -672,12 +672,13 @@ def get_ohlc_history(
             "symbol": "QQQ",
             "timeframe": "5m",
             "candles": [{"time": 1234567890, "open": 100, ...}, ...],
-            "indicators": {"SMA_20": [...], ...}
+            "indicators": {"SMA_20": [...], ...},
+            "indicator_meta": {"SMA_20": {...}, ...}
         }
     """
     df = load_ohlcv_partitioned(symbol, start_date, end_date, timeframe, source)
     
-    # Convert to lightweight-charts candlestick format
+    # Convert to lightweight-charts candlestick format (UTC timestamps)
     candles = []
     for _, row in df.iterrows():
         candles.append({
@@ -691,8 +692,9 @@ def get_ohlc_history(
     
     # Compute indicators if requested
     computed_indicators = {}
+    indicator_meta = {}
     if indicators:
-        computed_indicators = compute_indicators_dynamic(df, indicators)
+        computed_indicators, indicator_meta = compute_indicators_dynamic(df, indicators)
     
     return {
         "symbol": symbol.upper(),
@@ -700,6 +702,7 @@ def get_ohlc_history(
         "count": len(candles),
         "candles": candles,
         "indicators": computed_indicators,
+        "indicator_meta": indicator_meta,
     }
 
 
@@ -794,7 +797,7 @@ def get_ohlc_history_with_fetch(
 def compute_indicators_dynamic(
     df: pd.DataFrame,
     indicators: list[dict[str, Any]] | list[str],
-) -> dict[str, list[dict[str, Any]]]:
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
     """Compute technical indicators dynamically using indicator registry.
     
     Supports both new format (list of dicts) and legacy format (list of strings).
@@ -804,11 +807,14 @@ def compute_indicators_dynamic(
         indicators: List of {"type": str, "params": dict} or legacy strings
     
     Returns:
-        Dict mapping indicator name to time series data
+        Tuple of:
+        - Dict mapping indicator name to time series data
+        - Dict mapping indicator name to rendering metadata
     """
-    from app.services.indicator_registry import compute_indicator
+    from app.services.indicator_registry import compute_indicator, get_indicator_by_name
     
     result = {}
+    metadata = {}
     timestamps = df["ts"].values
     
     # Prepare data dict for indicator computation
@@ -827,6 +833,8 @@ def compute_indicators_dynamic(
             if isinstance(spec, str):
                 name, values = _compute_single_indicator(df, spec)
                 result[name] = values
+                # Generate basic metadata for legacy format
+                metadata[name] = _build_indicator_meta(name, name.split("_")[0], values)
                 continue
             
             # New format: {"type": "SMA", "params": {"timeperiod": 20}}
@@ -854,11 +862,101 @@ def compute_indicators_dynamic(
             
             result[name] = formatted
             
+            # Build rendering metadata from indicator registry
+            metadata[name] = _build_indicator_meta(name, ind_type, formatted, get_indicator_by_name(ind_type))
+            
         except Exception as e:
             logger.warning(f"Failed to compute indicator {spec}: {e}")
             continue
     
-    return result
+    return result, metadata
+
+
+def _build_indicator_meta(
+    name: str, 
+    ind_type: str, 
+    data: list[dict[str, Any]],
+    indicator_info: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Build rendering metadata for an indicator.
+    
+    Args:
+        name: Full indicator name (e.g., 'SMA_20', 'MACD_12_26_9')
+        ind_type: Indicator type (e.g., 'SMA', 'MACD')
+        data: Computed data points
+        indicator_info: Optional info from indicator registry
+    
+    Returns:
+        Metadata dict for rendering
+    """
+    # Get info from registry if available
+    if indicator_info:
+        overlay = indicator_info.get("overlay", True)
+        outputs = indicator_info.get("outputs", ["value"])
+        output_types = indicator_info.get("output_types", {})
+    else:
+        overlay = True  # Default to overlay
+        outputs = ["value"]
+        output_types = {}
+    
+    # Infer series from actual data fields
+    series = []
+    if data and len(data) > 0:
+        first_point = data[0]
+        fields = [k for k in first_point.keys() if k != "time"]
+        
+        for field in fields:
+            style = output_types.get(field, "line")
+            # Map to valid styles
+            if style == "histogram":
+                style = "histogram"
+            elif style in ("dashed_line", "Dashed Line"):
+                style = "dashed_line"
+            elif style in ("dotted_line", "Dotted Line"):
+                style = "dotted_line"
+            else:
+                style = "line"
+            
+            series.append({
+                "field": field,
+                "label": _format_series_label(name, field, outputs),
+                "style": style,
+            })
+    else:
+        # Fallback: use outputs from registry
+        for output in outputs:
+            style = output_types.get(output, "line")
+            series.append({
+                "field": output,
+                "label": _format_series_label(name, output, outputs),
+                "style": style,
+            })
+    
+    return {
+        "name": name,
+        "type": ind_type.upper(),
+        "overlay": overlay,
+        "series": series,
+    }
+
+
+def _format_series_label(indicator_name: str, field: str, outputs: list[str]) -> str:
+    """Format a human-readable label for a series.
+    
+    Args:
+        indicator_name: Full indicator name (e.g., 'MACD_12_26_9')
+        field: Field name (e.g., 'macd', 'signal', 'value')
+        outputs: List of all outputs for this indicator
+    
+    Returns:
+        Formatted label
+    """
+    # Single output indicator: just use indicator name
+    if len(outputs) == 1 or field == "value":
+        return indicator_name
+    
+    # Multi-output: append field name
+    return f"{indicator_name} ({field})"
 
 
 def _format_multi_output(

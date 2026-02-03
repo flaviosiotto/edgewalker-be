@@ -95,6 +95,36 @@ class MACDDataPoint(BaseModel):
     histogram: Optional[float] = None
 
 
+class IndicatorSeriesStyle(str, Enum):
+    """Style for rendering an indicator series."""
+    LINE = "line"
+    HISTOGRAM = "histogram"
+    DASHED_LINE = "dashed_line"
+    DOTTED_LINE = "dotted_line"
+
+
+class IndicatorSeriesMeta(BaseModel):
+    """Metadata for a single output series of an indicator."""
+    field: str = Field(..., description="Field name in data points (e.g., 'value', 'macd', 'upper')")
+    label: str = Field(..., description="Human-readable label for legend")
+    style: IndicatorSeriesStyle = Field(
+        IndicatorSeriesStyle.LINE,
+        description="Rendering style"
+    )
+    color: Optional[str] = Field(None, description="Suggested color (hex)")
+
+
+class IndicatorMeta(BaseModel):
+    """Metadata for rendering an indicator."""
+    name: str = Field(..., description="Indicator name (e.g., 'SMA_20', 'MACD_12_26_9')")
+    type: str = Field(..., description="Indicator type (e.g., 'SMA', 'MACD')")
+    overlay: bool = Field(..., description="True if should overlay on price chart, False for separate panel")
+    series: list[IndicatorSeriesMeta] = Field(
+        ..., 
+        description="List of series to render (e.g., MACD has 3: macd, signal, histogram)"
+    )
+
+
 class OHLCHistoryResponse(BaseModel):
     """Response from OHLC history endpoint."""
     symbol: str
@@ -104,6 +134,10 @@ class OHLCHistoryResponse(BaseModel):
     indicators: dict[str, list[Any]] = Field(
         default_factory=dict,
         description="Computed indicators keyed by name (e.g., 'sma_20')"
+    )
+    indicator_meta: dict[str, IndicatorMeta] = Field(
+        default_factory=dict,
+        description="Rendering metadata for each indicator"
     )
 
     class Config:
@@ -116,8 +150,26 @@ class OHLCHistoryResponse(BaseModel):
                     {"time": 1704067200, "open": 400.0, "high": 401.5, "low": 399.5, "close": 401.0, "volume": 10000}
                 ],
                 "indicators": {
-                    "sma_20": [{"time": 1704067200, "value": 400.5}],
-                    "rsi_14": [{"time": 1704067200, "value": 55.2}]
+                    "SMA_20": [{"time": 1704067200, "value": 400.5}],
+                    "MACD_12_26_9": [{"time": 1704067200, "macd": 1.5, "signal": 1.2, "histogram": 0.3}]
+                },
+                "indicator_meta": {
+                    "SMA_20": {
+                        "name": "SMA_20",
+                        "type": "SMA",
+                        "overlay": True,
+                        "series": [{"field": "value", "label": "SMA 20", "style": "line"}]
+                    },
+                    "MACD_12_26_9": {
+                        "name": "MACD_12_26_9",
+                        "type": "MACD",
+                        "overlay": False,
+                        "series": [
+                            {"field": "macd", "label": "MACD", "style": "line"},
+                            {"field": "signal", "label": "Signal", "style": "line"},
+                            {"field": "histogram", "label": "Histogram", "style": "histogram"}
+                        ]
+                    }
                 }
             }
         }

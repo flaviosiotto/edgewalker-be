@@ -9,12 +9,49 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
+import pandas as pd
 import talib
 from talib import abstract
 
 logger = logging.getLogger(__name__)
+
+# US Eastern timezone for trading session calculation
+ET_TZ = ZoneInfo("America/New_York")
+
+# CME futures session boundary: session starts at 18:00 ET
+# Data at/after 18:00 ET belongs to the NEXT calendar day's session
+CME_SESSION_START_HOUR = 18
+
+
+def _compute_trading_session_date(ts: pd.Timestamp) -> pd.Timestamp:
+    """Compute trading session date for a timestamp.
+    
+    CME futures have a daily session that starts at 18:00 ET the prior calendar day.
+    For example:
+    - Sunday 18:00 ET to Monday 17:00 ET = Monday's session
+    - Monday 18:00 ET to Tuesday 17:00 ET = Tuesday's session
+    
+    This aligns pivot calculations with TradingView behavior.
+    
+    Args:
+        ts: Timestamp (timezone-aware UTC or naive assumed UTC)
+        
+    Returns:
+        Date representing the trading session
+    """
+    # Convert to ET
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    ts_et = ts.tz_convert(ET_TZ)
+    
+    # If at or after 18:00 ET, it belongs to the next calendar day's session
+    if ts_et.hour >= CME_SESSION_START_HOUR:
+        return (ts_et + pd.Timedelta(days=1)).normalize()
+    else:
+        return ts_et.normalize()
 
 
 def _calculate_pivot_levels(h: float, l: float, c: float, o: float, kind: str) -> dict[str, float]:
@@ -367,8 +404,10 @@ def compute_indicator(
         return cum_tp_vol / np.where(cum_vol > 0, cum_vol, 1)
     
     if type_lower == "pivot":
-        # Pivot Points Standard - multi-output, daily-based calculation
-        # Uses previous DAY's H/L/C to calculate pivot levels for current day
+        # Pivot Points Standard - multi-output, session-based calculation
+        # Uses previous TRADING SESSION's H/L/C to calculate pivot levels for current session
+        # Trading session: 18:00 ET (prior day) to 17:00 ET (current day)
+        # This aligns with TradingView behavior for futures
         kind = params.get("kind", "traditional").lower()
         h = np.array(data["high"])
         l = np.array(data["low"])
@@ -380,54 +419,52 @@ def compute_indicator(
         output_keys = ["p", "r1", "r2", "r3", "r4", "r5", "s1", "s2", "s3", "s4", "s5"]
         result = {key: np.full(n, np.nan).tolist() for key in output_keys}
         
-        # Get timestamps if available for daily aggregation
+        # Get timestamps if available for session aggregation
         timestamps = data.get("timestamps")
         if timestamps is not None:
-            import pandas as pd
-            # Convert to dates for grouping
-            ts_series = pd.to_datetime(timestamps)
-            # Handle both DatetimeIndex and Series
-            if hasattr(ts_series, 'date'):
-                # DatetimeIndex has .date property
-                dates = ts_series.date
-            else:
-                # Series has .dt accessor
-                dates = ts_series.dt.date
-            dates = np.array(dates)  # Convert to numpy array for consistent indexing
-            unique_dates = sorted(set(dates))
+            # Convert to trading session dates (not calendar dates!)
+            # This ensures Sunday evening data belongs to Monday's session
+            ts_series = pd.to_datetime(timestamps, utc=True)
             
-            # Build daily H/L/C for each date
-            daily_hlc = {}
-            for date in unique_dates:
-                mask = dates == date
+            # Compute trading session date for each timestamp
+            session_dates = np.array([
+                _compute_trading_session_date(ts).date() 
+                for ts in ts_series
+            ])
+            unique_sessions = sorted(set(session_dates))
+            
+            # Build session H/L/C for each trading session
+            session_hlc = {}
+            for session_date in unique_sessions:
+                mask = session_dates == session_date
                 indices = np.where(mask)[0]
                 if len(indices) > 0:
-                    daily_hlc[date] = {
+                    session_hlc[session_date] = {
                         "high": float(np.max(h[mask])),
                         "low": float(np.min(l[mask])),
-                        "close": float(c[indices[-1]]),  # Last close of the day
-                        "open": float(o[indices[0]]),     # First open of the day
+                        "close": float(c[indices[-1]]),  # Last close of the session
+                        "open": float(o[indices[0]]),     # First open of the session
                     }
             
-            # Calculate pivots for each bar based on PREVIOUS day's HLC
-            prev_date = None
+            # Calculate pivots for each bar based on PREVIOUS SESSION's HLC
+            prev_session = None
             prev_hlc = None
             
             for i in range(n):
-                current_date = dates[i]  # Now always numpy array
+                current_session = session_dates[i]
                 
-                # Find previous trading day's HLC (only update on day change)
-                if current_date != prev_date:
-                    prev_dates = [d for d in unique_dates if d < current_date]
-                    if prev_dates:
-                        prev_trading_date = max(prev_dates)
-                        prev_hlc = daily_hlc.get(prev_trading_date)
-                    prev_date = current_date
+                # Find previous trading session's HLC (only update on session change)
+                if current_session != prev_session:
+                    prev_sessions = [s for s in unique_sessions if s < current_session]
+                    if prev_sessions:
+                        prev_trading_session = max(prev_sessions)
+                        prev_hlc = session_hlc.get(prev_trading_session)
+                    prev_session = current_session
                 
                 if prev_hlc is None:
                     continue
                 
-                # Calculate pivot levels from previous day's data
+                # Calculate pivot levels from previous session's data
                 levels = _calculate_pivot_levels(
                     prev_hlc["high"], prev_hlc["low"], prev_hlc["close"], prev_hlc["open"], kind
                 )
