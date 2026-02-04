@@ -175,3 +175,20 @@ class TradeRead(BaseModel):
     session_date: Optional[date] = None
     exit_reason: Optional[str] = None
     extra: Optional[Any] = None
+
+
+# ─── RULE TRIGGER SCHEMAS ───
+
+
+class RuleTriggerRequest(BaseModel):
+    """Request to trigger an agent from a rule during backtest."""
+    agent_id: int
+    chat_id: int
+    rule_context: dict[str, Any]
+    webhook_url: Optional[str] = None  # Optional override for backtest scenarios
+
+
+class RuleTriggerResponse(BaseModel):
+    """Response from agent webhook after rule trigger."""
+    status: str
+    agent_response: Optional[dict[str, Any]] = None

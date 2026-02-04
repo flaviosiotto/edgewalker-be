@@ -16,3 +16,4 @@ pyarrow
 TA-Lib
 ib_async
 yfinance
+redis>=5.0.0

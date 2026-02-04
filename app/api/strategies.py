@@ -11,6 +11,8 @@ from app.schemas.strategy import (
     BacktestUpdate,
     TradeCreate,
     TradeRead,
+    RuleTriggerRequest,
+    RuleTriggerResponse,
 )
 from app.schemas.chat import ChatCreate, ChatRead
 from app.services.strategy_service import (
@@ -33,6 +35,7 @@ from app.services.strategy_service import (
     get_strategy_chat,
     update_strategy_chat,
     delete_strategy_chat,
+    trigger_rule_agent,
 )
 
 router = APIRouter(prefix="/strategies", tags=["Strategies"])
@@ -195,3 +198,36 @@ def delete_strategy_chat_endpoint(
     """Delete a chat from a strategy."""
     delete_strategy_chat(session, strategy_id, chat_id)
     return {"status": "ok"}
+
+
+# ─── RULE TRIGGER ENDPOINTS ───
+
+
+@router.post("/trigger-agent", response_model=RuleTriggerResponse)
+def trigger_agent_endpoint(
+    payload: RuleTriggerRequest,
+    session: Session = Depends(get_session),
+):
+    """Trigger an agent webhook when an ask_agent rule is activated.
+    
+    This endpoint is called during backtest execution when a rule with
+    action='ask_agent' has its conditions satisfied (event-based or time-based).
+    
+    The rule_context should contain:
+    - rule_name: Name of the triggered rule
+    - trigger_type: 'event' | 'time' | 'both'
+    - timestamp: When the rule was triggered
+    - bar_data: Current bar OHLCV data
+    - indicators: Current indicator values
+    - position: Current position info
+    - conditions_matched: List of matched conditions (for event triggers)
+    - time_trigger: Time trigger info (for time-based triggers)
+    """
+    result = trigger_rule_agent(
+        session=session,
+        agent_id=payload.agent_id,
+        chat_id=payload.chat_id,
+        rule_context=payload.rule_context,
+        webhook_url=payload.webhook_url,
+    )
+    return RuleTriggerResponse(status="ok", agent_response=result)

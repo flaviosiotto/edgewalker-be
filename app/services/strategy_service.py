@@ -484,3 +484,92 @@ def delete_strategy_chat(session: Session, strategy_id: int, chat_id: int) -> No
     chat = get_strategy_chat(session, strategy_id, chat_id)
     session.delete(chat)
     session.commit()
+
+
+# ─── RULE AGENT TRIGGER ───
+
+
+def trigger_rule_agent(
+    session: Session,
+    agent_id: int,
+    chat_id: int,
+    rule_context: dict,
+    webhook_url: str | None = None,
+) -> dict:
+    """Trigger an agent webhook when an ask_agent rule is activated.
+    
+    This function is called during backtest execution when a rule with
+    action='ask_agent' has its conditions satisfied.
+    
+    Args:
+        session: Database session
+        agent_id: ID of the agent to trigger
+        chat_id: ID of the chat to use for the conversation
+        rule_context: Context data from the rule evaluation including:
+            - rule_name: Name of the triggered rule
+            - trigger_type: 'event' | 'time' | 'both'
+            - timestamp: When the rule was triggered
+            - bar_data: Current bar OHLCV data
+            - indicators: Current indicator values
+            - position: Current position info
+            - conditions_matched: List of matched conditions
+        webhook_url: Optional override for webhook URL (for backtest scenarios)
+    
+    Returns:
+        Response from the agent webhook
+    """
+    # Get agent
+    agent = session.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent with id {agent_id} not found",
+        )
+    
+    # Get chat and its session_id
+    chat = session.get(Chat, chat_id)
+    if not chat:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Chat with id {chat_id} not found",
+        )
+    
+    # Use provided webhook_url or fall back to agent's webhook
+    target_webhook = webhook_url or agent.n8n_webhook
+    
+    # Build payload for the agent
+    webhook_payload = {
+        "action": "rule_trigger",
+        "agent_id": agent_id,
+        "chat_id": chat_id,
+        "sessionId": chat.n8n_session_id,
+        "rule_context": rule_context,
+    }
+    
+    # Call agent webhook
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(target_webhook, json=webhook_payload)
+            response.raise_for_status()
+            return response.json() if response.text else {"status": "ok"}
+    except httpx.ConnectError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Cannot connect to agent webhook at {target_webhook}: {str(e)}",
+        )
+    except httpx.HTTPStatusError as e:
+        error_detail = f"Agent webhook returned {e.response.status_code}"
+        try:
+            error_body = e.response.text[:500]
+            error_detail += f": {error_body}"
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=error_detail,
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to call agent webhook: {str(e)}",
+        )

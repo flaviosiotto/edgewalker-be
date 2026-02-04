@@ -1,7 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import os
+from pathlib import Path
 
 from app.core.config import settings
 from app.db.database import create_db_and_tables
@@ -12,13 +14,20 @@ from app.api.agents import router as agents_router
 from app.api.strategies import router as strategies_router
 from app.api.marketdata import router as marketdata_router
 from app.api.datasources import router as datasources_router
+from app.api.ws_marketdata import router as ws_marketdata_router
+from app.api.ws_marketdata import startup_websocket_manager, shutdown_websocket_manager
 from app.services.sync_manager import start_sync_manager, stop_sync_manager
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.staticfiles import StaticFiles
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_db_and_tables()
+    
+    # Start WebSocket connection manager for real-time market data
+    await startup_websocket_manager()
     
     # Start background sync manager
     if settings.SYNC_STARTUP_ENABLED:
@@ -29,6 +38,7 @@ async def lifespan(app: FastAPI):
     
     # Cleanup
     await stop_sync_manager()
+    await shutdown_websocket_manager()
 
 
 _level_name = (settings.LOG_LEVEL or "INFO").upper().strip()
@@ -50,11 +60,40 @@ app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     root_path=settings.API_ROOT_PATH,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=None,
+    redoc_url=None,
     openapi_url="/openapi.json",
     lifespan=lifespan
 )
+
+_swagger_ui_dir = Path(os.environ.get("SWAGGER_UI_DIR", "/opt/swagger-ui"))
+_has_local_swagger_ui = _swagger_ui_dir.exists() and _swagger_ui_dir.is_dir()
+if _has_local_swagger_ui:
+    app.mount(
+        "/static/swagger-ui",
+        StaticFiles(directory=str(_swagger_ui_dir)),
+        name="swagger-ui",
+    )
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui_html(request: Request):
+    root_path = request.scope.get("root_path", "")
+    openapi_url = f"{root_path}{app.openapi_url}"
+    if _has_local_swagger_ui:
+        return get_swagger_ui_html(
+            openapi_url=openapi_url,
+            title=f"{app.title} - Swagger UI",
+            swagger_js_url=f"{root_path}/static/swagger-ui/swagger-ui-bundle.js",
+            swagger_css_url=f"{root_path}/static/swagger-ui/swagger-ui.css",
+            swagger_favicon_url=f"{root_path}/static/swagger-ui/favicon-32x32.png",
+        )
+
+    # Fallback to FastAPI defaults (Swagger UI v5 CDN). Useful for local dev.
+    return get_swagger_ui_html(
+        openapi_url=openapi_url,
+        title=f"{app.title} - Swagger UI",
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,3 +110,4 @@ app.include_router(agents_router)
 app.include_router(strategies_router)
 app.include_router(marketdata_router)
 app.include_router(datasources_router)
+app.include_router(ws_marketdata_router)
