@@ -121,10 +121,12 @@ class LiveRunnerService:
         
         # Traefik labels for routing
         # Route: /api/runners/{strategy_id}/* -> container:8080
+        # Priority must be higher than the backend's generic /api route
         labels = {
             "traefik.enable": "true",
             f"traefik.http.routers.runner-{strategy_id}.rule": f"PathPrefix(`/api/runners/{strategy_id}`)",
             f"traefik.http.routers.runner-{strategy_id}.entrypoints": "http",
+            f"traefik.http.routers.runner-{strategy_id}.priority": "200",
             f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": f"/api/runners/{strategy_id}",
             f"traefik.http.routers.runner-{strategy_id}.middlewares": f"runner-{strategy_id}-strip",
             f"traefik.http.services.runner-{strategy_id}.loadbalancer.server.port": "8080",
