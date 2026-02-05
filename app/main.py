@@ -16,6 +16,7 @@ from app.api.marketdata import router as marketdata_router
 from app.api.datasources import router as datasources_router
 from app.api.ws_marketdata import router as ws_marketdata_router
 from app.api.ws_marketdata import startup_websocket_manager, shutdown_websocket_manager
+from app.api.live import router as live_router
 from app.services.sync_manager import start_sync_manager, stop_sync_manager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -111,3 +112,4 @@ app.include_router(strategies_router)
 app.include_router(marketdata_router)
 app.include_router(datasources_router)
 app.include_router(ws_marketdata_router)
+app.include_router(live_router)

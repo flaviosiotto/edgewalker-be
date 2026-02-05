@@ -225,6 +225,18 @@ OUTPUT_TYPE_MAP = {
     "Dotted Line": "dotted_line",
 }
 
+# Map TA-Lib output names to standardized frontend-friendly names
+OUTPUT_NAME_MAP = {
+    # BBANDS
+    "upperband": "upper",
+    "middleband": "middle",
+    "lowerband": "lower",
+    # MACD
+    "macdsignal": "signal",
+    "macdhist": "histogram",
+    # STOCH - keep as-is (slowk, slowd)
+}
+
 
 def _get_talib_indicator_info(func_name: str) -> dict[str, Any] | None:
     """Get detailed info about a TA-Lib indicator using the abstract API."""
@@ -523,7 +535,9 @@ def compute_indicator(
             # Multi-output indicators return tuple
             if isinstance(result, tuple):
                 output_names = info.get("outputs", [f"output_{i}" for i in range(len(result))])
-                return {name: arr.tolist() for name, arr in zip(output_names, result)}
+                # Apply output name mapping for frontend consistency
+                mapped_names = [OUTPUT_NAME_MAP.get(name, name) for name in output_names]
+                return {name: arr.tolist() for name, arr in zip(mapped_names, result)}
             return result.tolist() if hasattr(result, "tolist") else result
         except (TypeError, Exception) as e:
             last_error = e

@@ -202,127 +202,69 @@ class RealtimeIndicatorCalculator:
         volumes: np.ndarray,
     ) -> dict[str, float]:
         """
-        Calculate a single indicator using TA-Lib.
+        Calculate a single indicator using TA-Lib dynamically.
+        
+        Uses the same approach as indicator_registry.compute_indicator()
+        for consistency between historical and real-time data.
         
         Returns:
             Dict mapping output names to last values.
         """
-        ind_type = config.type
+        from app.services.indicator_registry import (
+            compute_indicator as registry_compute,
+            OUTPUT_NAME_MAP,
+        )
+        
         name = config.name
-        params = config.params
+        ind_type = config.type.upper()
+        params = dict(config.params)
         
-        result = {}
+        # Normalize common param names to TA-Lib convention
+        if "period" in params and "timeperiod" not in params:
+            params["timeperiod"] = params.pop("period")
+        if "std_dev" in params:
+            std_dev = params.pop("std_dev")
+            params.setdefault("nbdevup", std_dev)
+            params.setdefault("nbdevdn", std_dev)
+        if "stdDev" in params:
+            std_dev = params.pop("stdDev")
+            params.setdefault("nbdevup", std_dev)
+            params.setdefault("nbdevdn", std_dev)
         
-        if ind_type == "SMA":
-            period = int(params.get("period", 20))
-            if len(closes) >= period:
-                values = talib.SMA(closes, timeperiod=period)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
+        # Build data dict for registry function
+        data = {
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes,
+        }
         
-        elif ind_type == "EMA":
-            period = int(params.get("period", 20))
-            if len(closes) >= period:
-                values = talib.EMA(closes, timeperiod=period)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
-        
-        elif ind_type == "RSI":
-            period = int(params.get("period", 14))
-            if len(closes) > period:
-                values = talib.RSI(closes, timeperiod=period)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
-        
-        elif ind_type == "MACD":
-            fast = int(params.get("fastPeriod", params.get("fast_period", 12)))
-            slow = int(params.get("slowPeriod", params.get("slow_period", 26)))
-            signal = int(params.get("signalPeriod", params.get("signal_period", 9)))
-            if len(closes) > slow + signal:
-                macd, macd_signal, macd_hist = talib.MACD(
-                    closes, fastperiod=fast, slowperiod=slow, signalperiod=signal
-                )
-                if not np.isnan(macd[-1]):
-                    result[f"{name}_macd"] = float(macd[-1])
-                    result[f"{name}_signal"] = float(macd_signal[-1])
-                    result[f"{name}_histogram"] = float(macd_hist[-1])
-        
-        elif ind_type in ("BBANDS", "BOLLINGER"):
-            period = int(params.get("period", 20))
-            nbdev = float(params.get("stdDev", params.get("std_dev", 2.0)))
-            if len(closes) >= period:
-                upper, middle, lower = talib.BBANDS(
-                    closes, timeperiod=period, nbdevup=nbdev, nbdevdn=nbdev
-                )
-                if not np.isnan(upper[-1]):
-                    result[f"{name}_upper"] = float(upper[-1])
-                    result[f"{name}_middle"] = float(middle[-1])
-                    result[f"{name}_lower"] = float(lower[-1])
-        
-        elif ind_type == "ATR":
-            period = int(params.get("period", 14))
-            if len(closes) > period:
-                values = talib.ATR(highs, lows, closes, timeperiod=period)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
-        
-        elif ind_type in ("STOCH", "STOCHASTIC"):
-            fastk = int(params.get("period", params.get("fastk_period", 14)))
-            slowk = int(params.get("slowk_period", 3))
-            slowd = int(params.get("signalPeriod", params.get("slowd_period", 3)))
-            if len(closes) > fastk + slowk + slowd:
-                slowk_vals, slowd_vals = talib.STOCH(
-                    highs, lows, closes,
-                    fastk_period=fastk,
-                    slowk_period=slowk,
-                    slowd_period=slowd,
-                )
-                if not np.isnan(slowk_vals[-1]):
-                    result[f"{name}_k"] = float(slowk_vals[-1])
-                    result[f"{name}_d"] = float(slowd_vals[-1])
-        
-        elif ind_type == "ADX":
-            period = int(params.get("period", 14))
-            if len(closes) > period * 2:
-                values = talib.ADX(highs, lows, closes, timeperiod=period)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
-        
-        elif ind_type == "WILLR":
-            period = int(params.get("period", 14))
-            if len(closes) >= period:
-                values = talib.WILLR(highs, lows, closes, timeperiod=period)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
-        
-        elif ind_type == "CCI":
-            period = int(params.get("period", 20))
-            if len(closes) >= period:
-                values = talib.CCI(highs, lows, closes, timeperiod=period)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
-        
-        elif ind_type == "MOM":
-            period = int(params.get("period", 10))
-            if len(closes) > period:
-                values = talib.MOM(closes, timeperiod=period)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
-        
-        elif ind_type == "ROC":
-            period = int(params.get("period", 10))
-            if len(closes) > period:
-                values = talib.ROC(closes, timeperiod=period)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
-        
-        elif ind_type == "OBV":
-            if len(closes) > 1:
-                values = talib.OBV(closes, volumes)
-                if not np.isnan(values[-1]):
-                    result[name] = float(values[-1])
-        
-        return result
+        try:
+            # Use the registry's compute function
+            values = registry_compute(ind_type, params, data)
+            
+            result = {}
+            
+            if isinstance(values, dict):
+                # Multi-output indicator (MACD, BBANDS, STOCH, etc.)
+                for output_key, arr in values.items():
+                    if arr and len(arr) > 0:
+                        last_val = arr[-1]
+                        if last_val is not None and not (isinstance(last_val, float) and np.isnan(last_val)):
+                            result[f"{name}_{output_key}"] = float(last_val)
+            else:
+                # Single-output indicator (SMA, EMA, RSI, etc.)
+                if values is not None and len(values) > 0:
+                    last_val = values[-1] if hasattr(values, '__getitem__') else values
+                    if last_val is not None and not (isinstance(last_val, float) and np.isnan(last_val)):
+                        result[name] = float(last_val)
+            
+            return result
+            
+        except Exception as e:
+            logger.debug(f"Failed to compute {ind_type} for {name}: {e}")
+            return {}
     
     def prefill_buffer(self, symbol: str, bars: list[dict[str, Any]]) -> None:
         """

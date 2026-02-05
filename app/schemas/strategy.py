@@ -6,6 +6,10 @@ from pydantic import BaseModel
 from app.schemas.chat import ChatRead
 
 
+# Live status enum values
+LiveStatus = Literal["stopped", "starting", "running", "stopping", "error"]
+
+
 class StrategyCreate(BaseModel):
     name: str
     description: Optional[str] = None
@@ -20,6 +24,16 @@ class StrategyRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     chats: list[ChatRead] = []
+    
+    # Live trading state
+    live_status: Optional[LiveStatus] = "stopped"
+    live_container_id: Optional[str] = None
+    live_symbol: Optional[str] = None
+    live_timeframe: Optional[str] = None
+    live_started_at: Optional[datetime] = None
+    live_stopped_at: Optional[datetime] = None
+    live_error_message: Optional[str] = None
+    live_metrics: Optional[dict[str, Any]] = None
 
 
 class StrategyUpdate(BaseModel):

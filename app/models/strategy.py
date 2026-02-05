@@ -31,6 +31,23 @@ class BacktestStatus(str, Enum):
     ERROR = "error"  # Backend error (webhook unreachable, etc.)
 
 
+class LiveStatus(str, Enum):
+    """Status of a live strategy execution.
+    
+    State transitions:
+    - stopped: Initial state / after manual stop
+    - starting: Container is being created
+    - running: Container is running and processing events
+    - stopping: Container stop requested
+    - error: Container failed or crashed
+    """
+    STOPPED = "stopped"
+    STARTING = "starting"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    ERROR = "error"
+
+
 class Strategy(SQLModel, table=True):
     __tablename__ = "strategies"
     __allow_unmapped__ = True
@@ -50,6 +67,41 @@ class Strategy(SQLModel, table=True):
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+    # ── LIVE TRADING STATE ──
+    live_status: str = Field(
+        default=LiveStatus.STOPPED.value,
+        sa_column=Column(String(20), nullable=False, index=True),
+    )
+    live_container_id: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(64), nullable=True),
+    )
+    live_symbol: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(32), nullable=True),
+    )
+    live_timeframe: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(10), nullable=True),
+    )
+    live_started_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    live_stopped_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    live_error_message: Optional[str] = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+    )
+    # Runtime metrics snapshot (updated periodically)
+    live_metrics: Optional[Any] = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
     )
 
     backtests: list["BacktestResult"] = Relationship(
