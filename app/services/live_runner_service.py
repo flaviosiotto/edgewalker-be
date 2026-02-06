@@ -75,6 +75,8 @@ class LiveRunnerService:
         timeframe: str = "5s",
         tick_eval: bool = True,
         debug_rules: bool = False,
+        account_config: dict[str, Any] | None = None,
+        broker_type: str | None = None,
     ) -> dict[str, Any]:
         """
         Start a live strategy runner container.
@@ -84,6 +86,10 @@ class LiveRunnerService:
             strategy_config: Strategy definition (YAML-like dict)
             symbol: Trading symbol to subscribe to
             timeframe: Bar timeframe for subscription (default: 5s)
+            tick_eval: Whether to evaluate rules on every tick
+            debug_rules: Enable detailed condition logging
+            account_config: Broker account config (host, port, account_id, etc.)
+            broker_type: Broker type identifier (e.g. 'ibkr')
             
         Returns:
             Dict with container info and status
@@ -122,6 +128,23 @@ class LiveRunnerService:
             "LOG_LEVEL": "DEBUG" if debug_rules else "INFO",
             "PYTHONPATH": "/app",
         }
+        
+        # Add broker / account configuration if provided
+        if broker_type:
+            env["BROKER_TYPE"] = broker_type
+        if account_config:
+            env["ACCOUNT_CONFIG_JSON"] = json.dumps(account_config)
+            # Also set individual vars for convenience
+            if "account_id" in account_config:
+                env["BROKER_ACCOUNT_ID"] = str(account_config["account_id"])
+            if "db_account_id" in account_config:
+                env["DB_ACCOUNT_ID"] = str(account_config["db_account_id"])
+            if "host" in account_config:
+                env["BROKER_HOST"] = str(account_config["host"])
+            if "port" in account_config:
+                env["BROKER_PORT"] = str(account_config["port"])
+            if "client_id" in account_config:
+                env["BROKER_CLIENT_ID"] = str(account_config["client_id"])
         
         # Traefik labels for routing
         # Route: /api/runners/{strategy_id}/* -> container:8080

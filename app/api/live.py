@@ -2,6 +2,7 @@
 Live Trading API Endpoints.
 
 Manages live strategy execution via Docker containers.
+Includes endpoints for orders, trades, positions, and reconciliation.
 """
 from __future__ import annotations
 
@@ -9,13 +10,38 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlmodel import Session
 
 from app.db.database import get_session
 from app.models.strategy import LiveStatus
+from app.schemas.live_trading import (
+    LiveOrderCreate,
+    LiveOrderRead,
+    LiveOrderUpdate,
+    LivePositionCreate,
+    LivePositionRead,
+    LivePositionUpdate,
+    LiveTradeCreate,
+    LiveTradeRead,
+    ReconciliationReport,
+)
 from app.services.live_runner_service import live_runner_service
+from app.services.live_trading_service import (
+    create_live_order,
+    create_live_trade,
+    get_live_order,
+    list_active_orders,
+    list_live_orders,
+    list_live_trades,
+    list_open_positions,
+    list_positions,
+    reconcile_on_startup,
+    update_live_order,
+    upsert_position,
+    validate_account_for_live,
+)
 from app.services.strategy_service import get_strategy
 
 logger = logging.getLogger(__name__)
@@ -121,6 +147,26 @@ def start_live_strategy(
             message="Strategy is already running",
         )
     
+    # Validate account if provided
+    account_config: dict[str, Any] | None = None
+    broker_type: str | None = None
+    if request.account_id is not None:
+        try:
+            account, connection = validate_account_for_live(session, request.account_id)
+            account_config = {
+                "account_id": account.account_id,  # broker-specific code (e.g. DU1234567)
+                "db_account_id": account.id,
+                "connection_id": connection.id,
+                "connection_name": connection.name,
+                **(connection.config or {}),
+            }
+            broker_type = connection.broker_type
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
+    
     try:
         # Update status to starting
         strategy.live_status = LiveStatus.STARTING.value
@@ -131,6 +177,19 @@ def start_live_strategy(
         session.add(strategy)
         session.commit()
         
+        # Run reconciliation before starting
+        if request.account_id is not None:
+            recon_report = reconcile_on_startup(
+                session,
+                strategy_id=strategy_id,
+                account_id=request.account_id,
+            )
+            if recon_report.items:
+                logger.info(
+                    "Pre-start reconciliation for strategy %s: %s",
+                    strategy_id, recon_report.summary,
+                )
+        
         result = live_runner_service.start_strategy(
             strategy_id=strategy_id,
             strategy_config=strategy.definition,
@@ -138,6 +197,8 @@ def start_live_strategy(
             timeframe=request.timeframe,
             tick_eval=request.tick_eval,
             debug_rules=request.debug_rules,
+            account_config=account_config,
+            broker_type=broker_type,
         )
         
         if result["status"] == "already_running":
@@ -342,3 +403,188 @@ def list_running_strategies():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
         )
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LIVE ORDERS
+# ═════════════════════════════════════════════════════════════════════
+
+
+@router.get("/strategies/{strategy_id}/orders", response_model=list[LiveOrderRead])
+def list_strategy_orders(
+    strategy_id: int,
+    status: str | None = Query(None, description="Filter by order status"),
+    limit: int = Query(100, ge=1, le=1000),
+    session: Session = Depends(get_session),
+):
+    """List live orders for a strategy."""
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    orders = list_live_orders(session, strategy_id, status=status, limit=limit)
+    return [LiveOrderRead.model_validate(o) for o in orders]
+
+
+@router.get("/strategies/{strategy_id}/orders/active", response_model=list[LiveOrderRead])
+def list_strategy_active_orders(
+    strategy_id: int,
+    session: Session = Depends(get_session),
+):
+    """List active (pending/submitted/partially_filled) orders for a strategy."""
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    orders = list_active_orders(session, strategy_id)
+    return [LiveOrderRead.model_validate(o) for o in orders]
+
+
+@router.post("/strategies/{strategy_id}/orders", response_model=LiveOrderRead, status_code=201)
+def create_strategy_order(
+    strategy_id: int,
+    payload: LiveOrderCreate,
+    session: Session = Depends(get_session),
+):
+    """Create a live order for a strategy (typically called by the runner)."""
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    order = create_live_order(session, strategy_id, strategy.live_account_id, payload)
+    return LiveOrderRead.model_validate(order)
+
+
+@router.patch("/orders/{order_id}", response_model=LiveOrderRead)
+def update_order(
+    order_id: int,
+    payload: LiveOrderUpdate,
+    session: Session = Depends(get_session),
+):
+    """Update a live order (status, fill info, etc.)."""
+    order = update_live_order(session, order_id, payload)
+    if order is None:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+    return LiveOrderRead.model_validate(order)
+
+
+@router.get("/orders/{order_id}", response_model=LiveOrderRead)
+def get_order(
+    order_id: int,
+    session: Session = Depends(get_session),
+):
+    """Get a single live order by ID."""
+    order = get_live_order(session, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+    return LiveOrderRead.model_validate(order)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LIVE TRADES
+# ═════════════════════════════════════════════════════════════════════
+
+
+@router.get("/strategies/{strategy_id}/trades", response_model=list[LiveTradeRead])
+def list_strategy_trades(
+    strategy_id: int,
+    limit: int = Query(200, ge=1, le=1000),
+    session: Session = Depends(get_session),
+):
+    """List live trades / fills for a strategy."""
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    trades = list_live_trades(session, strategy_id, limit=limit)
+    return [LiveTradeRead.model_validate(t) for t in trades]
+
+
+@router.post("/strategies/{strategy_id}/trades", response_model=LiveTradeRead, status_code=201)
+def create_strategy_trade(
+    strategy_id: int,
+    payload: LiveTradeCreate,
+    session: Session = Depends(get_session),
+):
+    """Record a live trade / fill (typically called by the runner)."""
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    trade = create_live_trade(session, strategy_id, strategy.live_account_id, payload)
+    return LiveTradeRead.model_validate(trade)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LIVE POSITIONS
+# ═════════════════════════════════════════════════════════════════════
+
+
+@router.get("/strategies/{strategy_id}/positions", response_model=list[LivePositionRead])
+def list_strategy_positions(
+    strategy_id: int,
+    status: str | None = Query(None, description="Filter by status: open/closed"),
+    limit: int = Query(100, ge=1, le=1000),
+    session: Session = Depends(get_session),
+):
+    """List live positions for a strategy."""
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    positions = list_positions(session, strategy_id, status=status, limit=limit)
+    return [LivePositionRead.model_validate(p) for p in positions]
+
+
+@router.get("/strategies/{strategy_id}/positions/open", response_model=list[LivePositionRead])
+def list_strategy_open_positions(
+    strategy_id: int,
+    session: Session = Depends(get_session),
+):
+    """List open positions for a strategy."""
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    positions = list_open_positions(session, strategy_id)
+    return [LivePositionRead.model_validate(p) for p in positions]
+
+
+@router.post("/strategies/{strategy_id}/positions", response_model=LivePositionRead, status_code=201)
+def upsert_strategy_position(
+    strategy_id: int,
+    payload: LivePositionCreate,
+    session: Session = Depends(get_session),
+):
+    """Create or update a position for a strategy (typically called by the runner)."""
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    position = upsert_position(session, strategy_id, strategy.live_account_id, payload)
+    return LivePositionRead.model_validate(position)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# RECONCILIATION
+# ═════════════════════════════════════════════════════════════════════
+
+
+@router.post("/strategies/{strategy_id}/reconcile", response_model=ReconciliationReport)
+def reconcile_strategy(
+    strategy_id: int,
+    broker_orders: list[dict[str, Any]] | None = None,
+    broker_positions: list[dict[str, Any]] | None = None,
+    session: Session = Depends(get_session),
+):
+    """
+    Run reconciliation between DB state and broker state for a strategy.
+
+    Can be called manually or automatically on startup.
+    Optionally accepts broker state; if not provided, reconciles
+    only local DB state (cancels stale orders, etc.).
+    """
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+
+    report = reconcile_on_startup(
+        session,
+        strategy_id=strategy_id,
+        account_id=strategy.live_account_id,
+        broker_orders=broker_orders,
+        broker_positions=broker_positions,
+    )
+    return report
