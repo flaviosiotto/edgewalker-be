@@ -17,7 +17,8 @@ from app.api.datasources import router as datasources_router
 from app.api.ws_marketdata import router as ws_marketdata_router
 from app.api.ws_marketdata import startup_websocket_manager, shutdown_websocket_manager
 from app.api.live import router as live_router
-from app.services.sync_manager import start_sync_manager, stop_sync_manager
+from app.api.connections import router as connections_router
+from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
@@ -30,15 +31,14 @@ async def lifespan(app: FastAPI):
     # Start WebSocket connection manager for real-time market data
     await startup_websocket_manager()
     
-    # Start background sync manager
-    if settings.SYNC_STARTUP_ENABLED:
-        await start_sync_manager()
-        logging.getLogger(__name__).info("Started background sync manager")
+    # Start connection manager (broker connect/disconnect lifecycle)
+    await start_connection_manager()
+    logging.getLogger(__name__).info("Started connection manager")
     
     yield
     
     # Cleanup
-    await stop_sync_manager()
+    await stop_connection_manager()
     await shutdown_websocket_manager()
 
 
@@ -113,3 +113,4 @@ app.include_router(marketdata_router)
 app.include_router(datasources_router)
 app.include_router(ws_marketdata_router)
 app.include_router(live_router)
+app.include_router(connections_router)

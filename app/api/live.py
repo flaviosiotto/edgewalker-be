@@ -30,6 +30,9 @@ class LiveStartRequest(BaseModel):
     """Request to start a live strategy."""
     symbol: str
     timeframe: str = "5s"  # Bar aggregation interval
+    tick_eval: bool = True  # Evaluate rules on every tick
+    debug_rules: bool = False  # Log per-condition evaluation detail
+    account_id: int | None = None  # Trading account to send orders to
 
 
 class LiveStartResponse(BaseModel):
@@ -123,6 +126,7 @@ def start_live_strategy(
         strategy.live_status = LiveStatus.STARTING.value
         strategy.live_symbol = request.symbol
         strategy.live_timeframe = request.timeframe
+        strategy.live_account_id = request.account_id
         strategy.live_error_message = None
         session.add(strategy)
         session.commit()
@@ -132,6 +136,8 @@ def start_live_strategy(
             strategy_config=strategy.definition,
             symbol=request.symbol,
             timeframe=request.timeframe,
+            tick_eval=request.tick_eval,
+            debug_rules=request.debug_rules,
         )
         
         if result["status"] == "already_running":

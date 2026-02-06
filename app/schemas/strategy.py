@@ -34,6 +34,7 @@ class StrategyRead(BaseModel):
     live_stopped_at: Optional[datetime] = None
     live_error_message: Optional[str] = None
     live_metrics: Optional[dict[str, Any]] = None
+    live_account_id: Optional[int] = None
 
 
 class StrategyUpdate(BaseModel):

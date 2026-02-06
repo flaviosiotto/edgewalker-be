@@ -41,6 +41,8 @@ class DataSourceCreate(BaseModel):
     
     config: dict[str, Any] = Field(default_factory=dict)
     
+    connection_id: int | None = Field(default=None, description="Linked broker connection (optional)")
+    
     supports_stocks: bool = True
     supports_futures: bool = False
     supports_indices: bool = False
@@ -59,6 +61,7 @@ class DataSourceUpdate(BaseModel):
     
     display_name: str | None = None
     config: dict[str, Any] | None = None
+    connection_id: int | None = None
     
     supports_stocks: bool | None = None
     supports_futures: bool | None = None
@@ -82,6 +85,8 @@ class DataSourceResponse(BaseModel):
     source_type: str
     
     config: dict[str, Any]
+    
+    connection_id: int | None = None
     
     supports_stocks: bool
     supports_futures: bool

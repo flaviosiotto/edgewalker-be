@@ -98,6 +98,16 @@ class Strategy(SQLModel, table=True):
         default=None,
         sa_column=Column(Text, nullable=True),
     )
+    # Trading account for live execution (nullable)
+    live_account_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("accounts.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
     # Runtime metrics snapshot (updated periodically)
     live_metrics: Optional[Any] = Field(
         default=None,

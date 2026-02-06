@@ -73,6 +73,8 @@ class LiveRunnerService:
         strategy_config: dict[str, Any],
         symbol: str,
         timeframe: str = "5s",
+        tick_eval: bool = True,
+        debug_rules: bool = False,
     ) -> dict[str, Any]:
         """
         Start a live strategy runner container.
@@ -115,7 +117,9 @@ class LiveRunnerService:
             "CONSUMER_ID": f"runner-{strategy_id}",
             # Strategy config as JSON (runner will persist if needed)
             "STRATEGY_CONFIG_JSON": json.dumps(strategy_config),
-            "LOG_LEVEL": "INFO",
+            "TICK_EVAL": str(tick_eval).lower(),
+            "DEBUG_RULES": str(debug_rules).lower(),
+            "LOG_LEVEL": "DEBUG" if debug_rules else "INFO",
             "PYTHONPATH": "/app",
         }
         

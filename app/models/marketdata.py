@@ -23,6 +23,12 @@ class DataSource(SQLModel, table=True):
     # Connection settings (JSON for flexibility)
     config: dict = Field(default_factory=dict, sa_column=Column(JSON))
     
+    # Optional link to a broker connection (nullable for free sources like Yahoo)
+    connection_id: int | None = Field(
+        default=None,
+        sa_column=Column(Integer, ForeignKey("connections.id", ondelete="SET NULL"), nullable=True, index=True),
+    )
+    
     # Supported features
     supports_stocks: bool = Field(default=True)
     supports_futures: bool = Field(default=False)
