@@ -82,11 +82,14 @@ class IBKRConnector(BrokerConnector):
 
     # ── is_connected ──────────────────────────────────────────────────
     def is_connected(self, config: dict[str, Any]) -> bool:
-        """Quick liveness probe — open / close a lightweight connection."""
+        """Quick liveness probe — open / close a lightweight connection.
+
+        Uses ``client_id + 1000`` to avoid kicking existing sessions.
+        """
         host = config.get("host", "127.0.0.1")
         port = config.get("port", 4001)
-        client_id = config.get("client_id", 101)
-        timeout = config.get("timeout_s", 5)
+        client_id = config.get("client_id", 101) + 1000  # probe-only id
+        timeout = config.get("timeout_s", 3)
 
         try:
             from ib_async import IB

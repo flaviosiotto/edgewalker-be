@@ -104,7 +104,12 @@ def _update_connection_status(
     status: ConnectionStatus,
     message: str | None = None,
 ) -> None:
-    """Persist connection status in DB."""
+    """Persist connection status in DB.
+
+    When transitioning away from *connected*, all associated accounts
+    are deactivated.  They will be re-activated on the next successful
+    connect via ``_sync_accounts``.
+    """
     conn = session.get(Connection, connection_id)
     if conn is None:
         return
@@ -114,6 +119,12 @@ def _update_connection_status(
     conn.updated_at = now
     if status == ConnectionStatus.CONNECTED:
         conn.last_connected_at = now
+    else:
+        # Deactivate accounts when connection is no longer alive
+        acct_stmt = select(Account).where(Account.connection_id == connection_id, Account.is_active == True)  # noqa: E712
+        for acct in session.exec(acct_stmt).all():
+            acct.is_active = False
+            acct.updated_at = now
     session.commit()
 
 
@@ -224,13 +235,121 @@ class ConnectionManager:
 
         return result
 
+    # ── Health check ─────────────────────────────────────────────────
+
+    async def check_connection_status(self, connection_id: int) -> str:
+        """Probe a connection's real status and update DB if changed.
+
+        Returns the actual status string.
+        """
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                return ConnectionStatus.DISCONNECTED.value
+
+            broker_type = conn.broker_type
+            config = dict(conn.config or {})
+            stored_status = conn.status
+
+        connector = _get_connector(broker_type)
+        if connector is None:
+            return stored_status
+
+        try:
+            is_alive = await asyncio.wait_for(
+                _run_blocking(self._executor, connector.is_connected, config),
+                timeout=10,
+            )
+        except Exception:
+            is_alive = False
+
+        actual = ConnectionStatus.CONNECTED if is_alive else ConnectionStatus.DISCONNECTED
+
+        if actual.value != stored_status:
+            with get_session_context() as session:
+                _update_connection_status(session, connection_id, actual)
+            logger.info(
+                "Connection %s status changed: %s → %s",
+                connection_id, stored_status, actual.value,
+            )
+
+        return actual.value
+
+    async def check_all_connected(self) -> None:
+        """Probe every connection currently marked as 'connected'."""
+        with get_session_context() as session:
+            stmt = select(Connection).where(
+                Connection.status == ConnectionStatus.CONNECTED.value
+            )
+            connected_ids = [c.id for c in session.exec(stmt).all()]
+
+        if not connected_ids:
+            return
+
+        tasks = [self.check_connection_status(cid) for cid in connected_ids]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
+    def _reset_connected_on_startup(self) -> None:
+        """Reset all 'connected' statuses to 'disconnected' on boot.
+
+        When the backend restarts, no broker connections are active.
+        Accounts are also deactivated — they will be re-discovered on
+        the next connect.
+        """
+        with get_session_context() as session:
+            now = datetime.now(timezone.utc)
+
+            # 1) Reset stale "connected" connections
+            stmt = select(Connection).where(
+                Connection.status == ConnectionStatus.CONNECTED.value
+            )
+            stale = list(session.exec(stmt).all())
+            for conn in stale:
+                conn.status = ConnectionStatus.DISCONNECTED.value
+                conn.status_message = "Reset on server restart"
+                conn.updated_at = now
+                for acct in conn.accounts:
+                    if acct.is_active:
+                        acct.is_active = False
+                        acct.updated_at = now
+                logger.info(
+                    "Reset stale connection %s (%s) from 'connected' to 'disconnected'",
+                    conn.id, conn.name,
+                )
+
+            # 2) Deactivate orphan active accounts on non-connected connections
+            orphan_stmt = (
+                select(Account)
+                .join(Connection, Account.connection_id == Connection.id)
+                .where(
+                    Account.is_active == True,  # noqa: E712
+                    Connection.status != ConnectionStatus.CONNECTED.value,
+                )
+            )
+            orphans = list(session.exec(orphan_stmt).all())
+            for acct in orphans:
+                acct.is_active = False
+                acct.updated_at = now
+            if orphans:
+                logger.info(
+                    "Deactivated %d orphan active account(s) on disconnected connections",
+                    len(orphans),
+                )
+
+            if stale or orphans:
+                session.commit()
+
     async def start(self) -> None:
-        """Start the connection manager (placeholder for future polling)."""
+        """Start the connection manager."""
         if self._running:
             return
         self._running = True
+
+        # On (re)start, no broker connections can be alive
+        self._reset_connected_on_startup()
+
         logger.info("Connection manager started")
 
     async def stop(self) -> None:

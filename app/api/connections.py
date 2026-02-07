@@ -42,11 +42,20 @@ router = APIRouter(prefix="/connections", tags=["Connections & Accounts"])
 
 
 @router.get("/", response_model=ConnectionListResponse)
-def list_connections_endpoint(
+async def list_connections_endpoint(
     active_only: bool = False,
     session: Session = Depends(get_session),
 ):
-    """List all broker connections."""
+    """List all broker connections.
+
+    Connections currently marked as *connected* are probed in real-time
+    against the broker so the returned status always reflects reality.
+    """
+    manager = get_connection_manager()
+    await manager.check_all_connected()
+    # Re-read after potential status updates
+    session.expire_all()
+
     conns = list_connections(session, active_only=active_only)
     return ConnectionListResponse(
         connections=[ConnectionRead.model_validate(c) for c in conns],
@@ -55,14 +64,24 @@ def list_connections_endpoint(
 
 
 @router.get("/{connection_id}", response_model=ConnectionRead)
-def get_connection_endpoint(
+async def get_connection_endpoint(
     connection_id: int,
     session: Session = Depends(get_session),
 ):
-    """Get a single connection with its accounts."""
+    """Get a single connection with its accounts.
+
+    If the connection is marked as *connected* it is probed against
+    the broker to verify its real status before returning.
+    """
     conn = get_connection(session, connection_id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
+
+    if conn.status == "connected":
+        manager = get_connection_manager()
+        await manager.check_connection_status(connection_id)
+        session.refresh(conn)
+
     return ConnectionRead.model_validate(conn)
 
 
