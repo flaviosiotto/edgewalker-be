@@ -36,11 +36,15 @@ class StrategyRead(BaseModel):
     live_metrics: Optional[dict[str, Any]] = None
     live_account_id: Optional[int] = None
 
+    # UI layout persistence
+    layout_config: Optional[dict[str, Any]] = None
+
 
 class StrategyUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     definition: Optional[Any] = None
+    layout_config: Optional[dict[str, Any]] = None
 
 
 # ─── BACKTEST SCHEMAS ───
@@ -136,6 +140,9 @@ class BacktestRead(BaseModel):
     # Extra metrics (JSONB for additional data)
     metrics: Optional[dict[str, Any]] = None
     html_report_url: Optional[str] = None
+
+    # UI layout persistence
+    layout_config: Optional[dict[str, Any]] = None
     
     created_at: datetime
 
@@ -161,6 +168,17 @@ class BacktestUpdate(BaseModel):
     # Extra metrics JSONB (for any additional data)
     metrics: Optional[dict[str, Any]] = None
     html_report_url: Optional[str] = None
+
+    # UI layout persistence
+    layout_config: Optional[dict[str, Any]] = None
+
+
+# ─── LAYOUT CONFIG SCHEMAS ───
+
+
+class LayoutConfigUpdate(BaseModel):
+    """Schema for updating only the layout_config field."""
+    layout_config: dict[str, Any]
 
 
 # ─── TRADE SCHEMAS ───

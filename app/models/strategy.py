@@ -114,6 +114,12 @@ class Strategy(SQLModel, table=True):
         sa_column=Column(JSONB, nullable=True),
     )
 
+    # UI layout persistence (grid positions, time range, timezone)
+    layout_config: Optional[Any] = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+
     backtests: list["BacktestResult"] = Relationship(
         sa_relationship=relationship(
             "BacktestResult",
@@ -220,6 +226,12 @@ class BacktestResult(SQLModel, table=True):
     html_report_url: Optional[str] = Field(
         default=None,
         sa_column=Column(String(500), nullable=True),
+    )
+
+    # UI layout persistence (grid positions, time range, timezone)
+    layout_config: Optional[Any] = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
     )
 
     created_at: datetime = Field(

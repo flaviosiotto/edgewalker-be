@@ -16,6 +16,7 @@ from app.schemas.strategy import (
     BacktestCreate,
     BacktestUpdate,
     TradeCreate,
+    LayoutConfigUpdate,
 )
 from app.schemas.chat import ChatCreate
 
@@ -89,6 +90,9 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate)
 
     if payload.definition is not None:
         strategy.definition = payload.definition
+
+    if payload.layout_config is not None:
+        strategy.layout_config = payload.layout_config
 
     strategy.updated_at = datetime.now(timezone.utc)
 
@@ -335,6 +339,9 @@ def update_backtest(
     if payload.html_report_url is not None:
         backtest.html_report_url = payload.html_report_url
     
+    if payload.layout_config is not None:
+        backtest.layout_config = payload.layout_config
+    
     session.add(backtest)
     session.commit()
     session.refresh(backtest)
@@ -346,6 +353,30 @@ def delete_backtest(session: Session, backtest_id: int) -> None:
     backtest = get_backtest(session, backtest_id)
     session.delete(backtest)
     session.commit()
+
+
+def update_strategy_layout(
+    session: Session, strategy_id: int, payload: LayoutConfigUpdate
+) -> Strategy:
+    """Update only the layout_config of a strategy."""
+    strategy = get_strategy(session, strategy_id)
+    strategy.layout_config = payload.layout_config
+    session.add(strategy)
+    session.commit()
+    session.refresh(strategy)
+    return strategy
+
+
+def update_backtest_layout(
+    session: Session, backtest_id: int, payload: LayoutConfigUpdate
+) -> BacktestResult:
+    """Update only the layout_config of a backtest."""
+    backtest = get_backtest(session, backtest_id)
+    backtest.layout_config = payload.layout_config
+    session.add(backtest)
+    session.commit()
+    session.refresh(backtest)
+    return backtest
 
 
 def create_trade(session: Session, backtest_id: int, payload: TradeCreate) -> BacktestTrade:

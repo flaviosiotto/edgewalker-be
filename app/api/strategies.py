@@ -13,6 +13,7 @@ from app.schemas.strategy import (
     TradeRead,
     RuleTriggerRequest,
     RuleTriggerResponse,
+    LayoutConfigUpdate,
 )
 from app.schemas.chat import ChatCreate, ChatRead
 from app.services.strategy_service import (
@@ -36,6 +37,8 @@ from app.services.strategy_service import (
     update_strategy_chat,
     delete_strategy_chat,
     trigger_rule_agent,
+    update_strategy_layout,
+    update_backtest_layout,
 )
 
 router = APIRouter(prefix="/strategies", tags=["Strategies"])
@@ -69,6 +72,16 @@ def update_strategy_endpoint(
 def delete_strategy_endpoint(strategy_id: int, session: Session = Depends(get_session)):
     delete_strategy(session, strategy_id)
     return {"status": "ok"}
+
+
+@router.patch("/{strategy_id}/layout", response_model=StrategyRead)
+def update_strategy_layout_endpoint(
+    strategy_id: int,
+    payload: LayoutConfigUpdate,
+    session: Session = Depends(get_session),
+):
+    """Update only the UI layout configuration for a strategy."""
+    return update_strategy_layout(session, strategy_id, payload)
 
 
 @router.post("/{strategy_id}/backtests", response_model=BacktestRead)
@@ -121,6 +134,16 @@ def delete_backtest_endpoint(backtest_id: int, session: Session = Depends(get_se
     """Delete a backtest and all its trades."""
     delete_backtest(session, backtest_id)
     return {"status": "ok"}
+
+
+@router.patch("/backtests/{backtest_id}/layout", response_model=BacktestRead)
+def update_backtest_layout_endpoint(
+    backtest_id: int,
+    payload: LayoutConfigUpdate,
+    session: Session = Depends(get_session),
+):
+    """Update only the UI layout configuration for a backtest."""
+    return update_backtest_layout(session, backtest_id, payload)
 
 
 @router.post("/backtests/{backtest_id}/trades", response_model=TradeRead)
