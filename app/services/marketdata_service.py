@@ -643,6 +643,27 @@ def _vwap(df: pd.DataFrame) -> np.ndarray:
 
 
 # =============================================================================
+# RTH FILTER
+# =============================================================================
+
+def _filter_rth(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter DataFrame to Regular Trading Hours (09:30-16:00 US/Eastern)."""
+    from zoneinfo import ZoneInfo
+    from datetime import time as dt_time
+
+    if df.empty:
+        return df
+
+    et = ZoneInfo("America/New_York")
+    ts_et = df["ts"].dt.tz_convert(et)
+    time_component = ts_et.dt.time
+    rth_start = dt_time(9, 30)
+    rth_end = dt_time(16, 0)
+    mask = (time_component >= rth_start) & (time_component < rth_end)
+    return df.loc[mask].reset_index(drop=True)
+
+
+# =============================================================================
 # HIGH-LEVEL API
 # =============================================================================
 
@@ -653,6 +674,7 @@ def get_ohlc_history(
     timeframe: str = "5m",
     indicators: list[dict[str, Any]] | list[str] | None = None,
     source: str | None = None,
+    extended_hours: bool = False,
 ) -> dict[str, Any]:
     """Get OHLC history with optional indicators from partitioned dataset.
     
@@ -666,6 +688,7 @@ def get_ohlc_history(
         timeframe: Bar timeframe (1m, 5m, 15m, 1h, 1d)
         indicators: List of indicator configs or legacy string specs
         source: Data source (ibkr, yahoo). If None, auto-detects.
+        extended_hours: If True, include pre/after-market bars.
     
     Returns:
         {
@@ -677,6 +700,11 @@ def get_ohlc_history(
         }
     """
     df = load_ohlcv_partitioned(symbol, start_date, end_date, timeframe, source)
+
+    # Filter to Regular Trading Hours unless extended_hours is requested
+    tf_norm = _normalize_timeframe(timeframe)
+    if not extended_hours and tf_norm not in ("1d", "1w"):
+        df = _filter_rth(df)
     
     # Convert to lightweight-charts candlestick format (UTC timestamps)
     candles = []
@@ -714,6 +742,7 @@ def get_ohlc_history_with_fetch(
     end_date: date | None = None,
     timeframe: str = "5min",
     indicators: list[dict[str, Any]] | None = None,
+    extended_hours: bool = False,
 ) -> dict[str, Any]:
     """Fetch fresh OHLC data from source, then return with indicators.
     
@@ -782,6 +811,7 @@ def get_ohlc_history_with_fetch(
             timeframe=timeframe,
             indicators=indicators,
             source=source,
+            extended_hours=extended_hours,
         )
         
     except ImportError as e:

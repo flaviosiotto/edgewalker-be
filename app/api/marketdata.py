@@ -64,6 +64,10 @@ def get_ohlc_history_endpoint(
         False,
         description="If true, fetch fresh data from source before returning. Otherwise use cached files."
     ),
+    extended_hours: bool = Query(
+        False,
+        description="Include pre/after-market data. False = RTH only (09:30-16:00 ET)."
+    ),
 ):
     """
     Get OHLC history with optional technical indicators.
@@ -113,6 +117,7 @@ def get_ohlc_history_endpoint(
                 end_date=end_date,
                 timeframe=timeframe,
                 indicators=indicator_list,
+                extended_hours=extended_hours,
             )
         else:
             # Use existing partitioned data
@@ -123,6 +128,7 @@ def get_ohlc_history_endpoint(
                 timeframe=timeframe,
                 indicators=indicator_list,
                 source=source.value,
+                extended_hours=extended_hours,
             )
         return result
     except MarketDataError as e:
