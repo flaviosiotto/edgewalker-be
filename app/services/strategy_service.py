@@ -105,8 +105,12 @@ def delete_strategy(session: Session, strategy_id: int) -> None:
 
 
 def create_backtest(session: Session, strategy_id: int, payload: BacktestCreate) -> BacktestResult:
-    """Create a new backtest with status=pending."""
-    _ = get_strategy(session, strategy_id)
+    """Create a new backtest with status=pending.
+    
+    Automatically snapshots the strategy definition into the config field
+    so the backtest retains the exact configuration used at creation time.
+    """
+    strategy = get_strategy(session, strategy_id)
     
     # Validate agent_id if provided
     if payload.agent_id is not None:
@@ -139,6 +143,8 @@ def create_backtest(session: Session, strategy_id: int, payload: BacktestCreate)
         commission=payload.commission,
         # Additional config overrides
         parameters=payload.parameters,
+        # Strategy configuration snapshot (explicit override or auto-capture)
+        config=payload.config if payload.config else strategy.definition,
         status=BacktestStatus.PENDING.value,
     )
     session.add(backtest)
@@ -226,6 +232,8 @@ def run_backtest(session: Session, backtest_id: int) -> BacktestResult:
         "commission": backtest.commission,
         # Additional config overrides
         "parameters": backtest.parameters,
+        # Full strategy configuration
+        "config": backtest.config,
     }
     
     # Call n8n webhook (fire and forget - don't wait for backtest to complete)

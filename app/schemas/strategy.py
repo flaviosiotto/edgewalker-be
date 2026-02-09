@@ -80,6 +80,9 @@ class BacktestCreate(BaseModel):
     # Additional config overrides (JSONB)
     parameters: Optional[dict[str, Any]] = None
 
+    # Full strategy configuration snapshot (auto-captured from strategy.definition)
+    config: Optional[dict[str, Any]] = None
+
 
 class BacktestRead(BaseModel):
     """Full backtest representation including status and results."""
@@ -110,6 +113,9 @@ class BacktestRead(BaseModel):
     
     # Additional config overrides
     parameters: Optional[dict[str, Any]] = None
+
+    # Full strategy configuration snapshot
+    config: Optional[dict[str, Any]] = None
     
     # Status (pending | running | completed | failed | error)
     status: str

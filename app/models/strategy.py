@@ -181,6 +181,9 @@ class BacktestResult(SQLModel, table=True):
     # Additional config overrides (JSONB)
     parameters: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
 
+    # Full strategy configuration snapshot at creation time (immutable)
+    config: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+
     # ── STATUS ──
     status: str = Field(
         default=BacktestStatus.PENDING.value,
