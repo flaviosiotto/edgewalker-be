@@ -87,10 +87,14 @@ def _find_partitioned_data(
     start_date: date | None = None,
     end_date: date | None = None,
     source: str | None = None,
+    extended_hours: bool = False,
 ) -> list[Path]:
     """Find partitioned parquet files for a symbol/timeframe/date range.
     
-    Directory structure: data/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet
+    Directory structure:
+        data/<source>-ohlcv/<symbol>/<timeframe>/<date>/rth.parquet   (RTH only)
+        data/<source>-ohlcv/<symbol>/<timeframe>/<date>/ext.parquet   (extended hours)
+        data/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet  (legacy)
     
     Args:
         symbol: Trading symbol (e.g., 'QQQ')
@@ -98,6 +102,7 @@ def _find_partitioned_data(
         start_date: Start date filter
         end_date: End date filter
         source: Data source (ibkr, yahoo). If None, searches all sources.
+        extended_hours: If True select ext.parquet, else rth.parquet.
         
     Returns:
         List of parquet file paths sorted by date
@@ -162,9 +167,13 @@ def _find_partitioned_data(
                 continue
             
             # Find parquet file in partition
-            parquet_file = entry / "part-0000.parquet"
-            if parquet_file.exists():
-                parquet_files.append(parquet_file)
+            # Prefer rth/ext convention, fall back to legacy part-0000
+            preferred = entry / ("ext.parquet" if extended_hours else "rth.parquet")
+            fallback = entry / "part-0000.parquet"
+            if preferred.exists():
+                parquet_files.append(preferred)
+            elif fallback.exists():
+                parquet_files.append(fallback)
         
         # If we found data from this source, use it
         if parquet_files:
@@ -179,6 +188,7 @@ def load_ohlcv_partitioned(
     end_date: date | None = None,
     timeframe: str = "5m",
     source: str | None = None,
+    extended_hours: bool = False,
 ) -> pd.DataFrame:
     """Load OHLCV data from partitioned parquet files.
     
@@ -188,17 +198,20 @@ def load_ohlcv_partitioned(
         end_date: End date filter (inclusive)
         timeframe: Target timeframe (1m, 5m, 15m, 1h, 1d)
         source: Data source (ibkr, yahoo). If None, auto-detects.
+        extended_hours: If True load ext.parquet, else rth.parquet.
     
     Returns:
         DataFrame with columns: ts, open, high, low, close, volume
     """
-    parquet_files = _find_partitioned_data(symbol, timeframe, start_date, end_date, source)
+    parquet_files = _find_partitioned_data(
+        symbol, timeframe, start_date, end_date, source, extended_hours
+    )
     
     if not parquet_files:
         raise MarketDataError(
             f"No partitioned data found for symbol '{symbol}' timeframe '{timeframe}' "
             f"in {EDGEWALKER_DATA_DIR}. "
-            f"Expected structure: <source>-ohlcv/{symbol.upper()}/{_normalize_timeframe(timeframe)}/<date>/part-0000.parquet"
+            f"Expected structure: <source>-ohlcv/{symbol.upper()}/{_normalize_timeframe(timeframe)}/<date>/{{rth|ext}}.parquet"
         )
     
     logger.info(f"Loading {len(parquet_files)} partition files for {symbol}/{timeframe}")
@@ -233,13 +246,24 @@ def load_ohlcv_partitioned(
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
     df = df.sort_values("ts").drop_duplicates(subset=["ts"])
     
-    # Filter by exact date range (partitions may include extra data)
-    if start_date:
-        start_dt = pd.Timestamp(start_date, tz="UTC")
-        df = df[df["ts"] >= start_dt]
-    if end_date:
-        end_dt = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
-        df = df[df["ts"] < end_dt]
+    # Session-based files (rth.parquet / ext.parquet) each contain exactly
+    # one trading session.  The partition selection already constrains the
+    # date range, so additional timestamp clipping would incorrectly trim
+    # evening-session bars that start on the previous calendar day (e.g.
+    # CME futures open at 23:00 UTC the night before the partition date).
+    #
+    # Legacy part-0000.parquet files may contain mixed or unpredictable
+    # data, so we still apply a timestamp filter for those.
+    uses_session_files = all(
+        pf.name in ("rth.parquet", "ext.parquet") for pf in parquet_files
+    )
+    if not uses_session_files:
+        if start_date:
+            start_dt = pd.Timestamp(start_date, tz="UTC")
+            df = df[df["ts"] >= start_dt]
+        if end_date:
+            end_dt = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+            df = df[df["ts"] < end_dt]
     
     # Ensure required columns
     required = ["ts", "open", "high", "low", "close", "volume"]
@@ -699,9 +723,13 @@ def get_ohlc_history(
             "indicator_meta": {"SMA_20": {...}, ...}
         }
     """
-    df = load_ohlcv_partitioned(symbol, start_date, end_date, timeframe, source)
+    df = load_ohlcv_partitioned(
+        symbol, start_date, end_date, timeframe, source, extended_hours
+    )
 
-    # Filter to Regular Trading Hours unless extended_hours is requested
+    # Filter to Regular Trading Hours unless extended_hours is requested.
+    # When rth.parquet was loaded this is a harmless no-op; it is still
+    # needed when falling back to legacy part-0000.parquet files.
     tf_norm = _normalize_timeframe(timeframe)
     if not extended_hours and tf_norm not in ("1d", "1w"):
         df = _filter_rth(df)
