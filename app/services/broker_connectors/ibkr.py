@@ -14,6 +14,8 @@ from app.services.broker_connectors.base import (
     BrokerConnector,
     ConnectorResult,
     DiscoveredAccount,
+    SymbolMatch,
+    SymbolSearchResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,3 +103,104 @@ class IBKRConnector(BrokerConnector):
             return ok
         except Exception:
             return False
+
+    # ── search_symbols ────────────────────────────────────────────────
+
+    # Map IBKR secType codes to our asset_type strings
+    _SECTYPE_MAP: dict[str, str] = {
+        "STK": "stock",
+        "FUT": "futures",
+        "IND": "index",
+        "OPT": "option",
+        "FOP": "futures_option",
+        "CASH": "forex",
+        "BOND": "bond",
+        "WAR": "warrant",
+        "FUND": "fund",
+        "CMDTY": "commodity",
+        "CFD": "cfd",
+        "CRYPTO": "crypto",
+    }
+
+    # Reverse map: our asset_type → IBKR secType code (for derivative matching)
+    _ASSET_TO_SECTYPE: dict[str, str] = {v: k for k, v in _SECTYPE_MAP.items()}
+
+    def search_symbols(
+        self,
+        config: dict[str, Any],
+        query: str,
+        asset_type: str | None = None,
+    ) -> SymbolSearchResult:
+        """Search IBKR for matching symbols via ``reqMatchingSymbols``.
+
+        Uses ``client_id + 2000`` to avoid collisions with other sessions.
+        """
+        host = config.get("host", "127.0.0.1")
+        port = config.get("port", 4001)
+        client_id = config.get("client_id", 101) + 2000  # search-only id
+        timeout = config.get("timeout_s", 10)
+
+        try:
+            from ib_async import IB
+
+            ib = IB()
+            ib.connect(host, port, clientId=client_id, timeout=timeout)
+
+            if not ib.isConnected():
+                return SymbolSearchResult(
+                    success=False,
+                    message=f"IBKR gateway at {host}:{port} did not respond",
+                )
+
+            try:
+                matches = ib.reqMatchingSymbols(query)
+                symbols: list[SymbolMatch] = []
+
+                for m in matches or []:
+                    contract = m.contract
+                    sec_type = getattr(contract, "secType", "")
+                    mapped_type = self._SECTYPE_MAP.get(sec_type, sec_type.lower())
+
+                    # Collect derivative sec types for extra info
+                    derivative_types = []
+                    if hasattr(m, "derivativeSecTypes") and m.derivativeSecTypes:
+                        derivative_types = list(m.derivativeSecTypes)
+
+                    # Apply asset_type filter: match the contract's own type
+                    # OR any of its derivative types (e.g. NQ is IND→"index"
+                    # but has FUT in derivativeSecTypes, so it should match
+                    # when filtering for "futures").
+                    if asset_type and mapped_type != asset_type:
+                        target_sec = self._ASSET_TO_SECTYPE.get(asset_type, "")
+                        if target_sec not in derivative_types:
+                            continue
+
+                    symbols.append(
+                        SymbolMatch(
+                            symbol=getattr(contract, "symbol", ""),
+                            name=getattr(m, "description", None) or getattr(contract, "description", None),
+                            asset_type=mapped_type,
+                            exchange=getattr(contract, "primaryExchange", None) or getattr(contract, "exchange", None),
+                            currency=getattr(contract, "currency", "USD"),
+                            con_id=getattr(contract, "conId", None),
+                            extra={
+                                "sec_type": sec_type,
+                                "derivative_sec_types": derivative_types,
+                            } if derivative_types else {
+                                "sec_type": sec_type,
+                            },
+                        )
+                    )
+
+                logger.info(
+                    "IBKR symbol search for '%s' returned %d result(s)",
+                    query, len(symbols),
+                )
+                return SymbolSearchResult(success=True, symbols=symbols)
+
+            finally:
+                ib.disconnect()
+
+        except Exception as e:
+            logger.error("IBKR symbol search failed: %s", e)
+            return SymbolSearchResult(success=False, message=str(e))

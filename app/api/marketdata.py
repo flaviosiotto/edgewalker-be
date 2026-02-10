@@ -159,27 +159,53 @@ def search_symbols_endpoint(
         description="Filter by asset type: stock, futures, index, etf"
     ),
     limit: int = Query(50, ge=1, le=500, description="Maximum number of results"),
+    connection: Optional[str] = Query(
+        None,
+        description=(
+            "Connection name to use for live IBKR symbol search. "
+            "Required when source=ibkr to search symbols directly from the IBKR gateway."
+        ),
+    ),
 ):
     """
     Search for available symbols.
     
-    Searches the local symbol cache, which is automatically synchronized
-    in the background from configured data sources.
-    
     **Sources:**
-    - `yahoo`: Yahoo Finance symbols
-    - `ibkr`: Interactive Brokers contracts
-    - `None`: Search all sources
+    - `yahoo`: Searches local symbol cache (auto-synced in background)
+    - `ibkr`: Searches **live** from IBKR gateway via `reqMatchingSymbols`.
+      Requires a `connection` parameter with the name of a configured IBKR connection.
+    - `None`: Search local cache across all sources
     
     **Examples:**
-    - `/marketdata/symbols?query=QQQ` - Search QQQ
+    - `/marketdata/symbols?query=QQQ` - Search QQQ in local cache
     - `/marketdata/symbols?query=Apple&asset_type=stock` - Search Apple stocks
-    - `/marketdata/symbols?query=NQ&source=ibkr` - Search NQ in IBKR source
-    
-    **Note:** The cache is kept up-to-date automatically. New symbols may take
-    up to the configured sync interval to appear.
+    - `/marketdata/symbols?query=NQ&source=ibkr&connection=my-ibkr` - Live search NQ on IBKR
     """
     try:
+        # IBKR live search via connection
+        if source == DataSourceType.IBKR:
+            if not connection:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Parameter 'connection' is required when source=ibkr. "
+                           "Provide the name of a configured IBKR connection.",
+                )
+            from app.services.symbol_sync_handler import search_ibkr_symbols
+
+            results = search_ibkr_symbols(
+                query=query,
+                connection_name=connection,
+                asset_type=asset_type.value if asset_type else None,
+                limit=limit,
+            )
+            return AvailableSymbolsResponse(
+                symbols=results,
+                source="ibkr",
+                asset_type=asset_type.value if asset_type else "all",
+                count=len(results),
+            )
+
+        # Local cache search (yahoo / all)
         from app.services.symbol_sync_handler import search_cached_symbols
         
         results = search_cached_symbols(
@@ -194,6 +220,18 @@ def search_symbols_endpoint(
             source=source.value if source else "all",
             asset_type=asset_type.value if asset_type else "all",
             count=len(results),
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e),
         )
     except Exception as e:
         logger.exception(f"Error searching symbols for '{query}'")

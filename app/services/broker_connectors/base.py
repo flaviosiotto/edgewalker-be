@@ -19,6 +19,26 @@ class DiscoveredAccount:
 
 
 @dataclass
+class SymbolMatch:
+    """A symbol returned from a broker symbol search."""
+    symbol: str
+    name: str | None = None
+    asset_type: str | None = None     # STK, FUT, OPT, IND, …
+    exchange: str | None = None
+    currency: str = "USD"
+    con_id: int | None = None
+    extra: dict[str, Any] | None = None
+
+
+@dataclass
+class SymbolSearchResult:
+    """Result of a symbol search operation."""
+    success: bool
+    message: str | None = None
+    symbols: list[SymbolMatch] = field(default_factory=list)
+
+
+@dataclass
 class ConnectorResult:
     """Result of a connect / disconnect / health-check operation."""
     success: bool
@@ -67,3 +87,19 @@ class BrokerConnector(ABC):
     @abstractmethod
     def is_connected(self, config: dict[str, Any]) -> bool:
         """Quick liveness check – is the broker reachable right now?"""
+
+    def search_symbols(self, config: dict[str, Any], query: str, asset_type: str | None = None) -> SymbolSearchResult:
+        """Search for symbols/contracts on this broker.
+
+        Default implementation returns an empty result.  Brokers that
+        support symbol search should override this.
+
+        Args:
+            config: Broker-specific connection parameters.
+            query:  Search string (ticker symbol or company name).
+            asset_type: Optional filter (e.g. ``'stock'``, ``'futures'``).
+
+        Returns:
+            SymbolSearchResult with matched symbols.
+        """
+        return SymbolSearchResult(success=False, message="Symbol search not supported for this broker")

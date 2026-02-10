@@ -488,7 +488,60 @@ def search_cached_symbols(
         ]
 
 
-def get_cache_stats() -> dict[str, Any]:
+def search_ibkr_symbols(
+    query: str,
+    connection_name: str,
+    asset_type: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Search IBKR symbols live via a named connection.
+
+    Connects to ib gateway using the connection's config and calls
+    ``reqMatchingSymbols``.  This is a **blocking** call that runs
+    in the caller's thread (the FastAPI route already runs in a
+    thread-pool for sync endpoints).
+    """
+    from app.models.connection import Connection
+    from app.services.broker_connectors.ibkr import IBKRConnector
+
+    with get_session_context() as session:
+        stmt = select(Connection).where(Connection.name == connection_name)
+        connection = session.exec(stmt).first()
+
+        if connection is None:
+            raise ValueError(f"Connection '{connection_name}' not found")
+
+        if connection.broker_type != "ibkr":
+            raise ValueError(
+                f"Connection '{connection_name}' is of type "
+                f"'{connection.broker_type}', expected 'ibkr'"
+            )
+
+        config = connection.config or {}
+
+    connector = IBKRConnector()
+    result = connector.search_symbols(config, query, asset_type=asset_type)
+
+    if not result.success:
+        raise RuntimeError(
+            f"IBKR symbol search failed: {result.message}"
+        )
+
+    symbols = result.symbols[:limit]
+
+    return [
+        {
+            "symbol": s.symbol,
+            "name": s.name,
+            "asset_type": s.asset_type,
+            "exchange": s.exchange,
+            "currency": s.currency,
+            "source_name": "ibkr",
+            "extra_data": s.extra,
+            "con_id": s.con_id,
+        }
+        for s in symbols
+    ]
     """Get cache statistics."""
     with get_session_context() as session:
         stmt = select(DataSource).where(DataSource.is_active == True)
