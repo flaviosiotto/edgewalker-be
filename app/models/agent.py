@@ -66,6 +66,7 @@ class Chat(SQLModel, table=True):
         SYSTEM = "system"
         STRATEGY = "strategy"
         GENERIC = "generic"
+        LIVE = "live"
 
     chat_type: "Chat.ChatType" = Field(
         sa_column=Column(

@@ -3,12 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+import logging
+
 import httpx
 from fastapi import HTTPException, status
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
 from app.models.agent import Agent, Chat
+from app.models.n8n_chat_history import N8nChatHistory
 from app.models.strategy import Strategy, BacktestResult, BacktestTrade, BacktestStatus
 from app.schemas.strategy import (
     StrategyCreate,
@@ -22,6 +25,8 @@ from app.schemas.chat import ChatCreate
 
 if TYPE_CHECKING:
     from sqlmodel import Session
+
+logger = logging.getLogger(__name__)
 
 
 def create_strategy(session: Session, payload: StrategyCreate) -> Strategy:
@@ -44,6 +49,7 @@ def create_strategy(session: Session, payload: StrategyCreate) -> Strategy:
         name=name,
         description=payload.description,
         definition=payload.definition,
+        manager_agent_id=payload.manager_agent_id,
         created_at=now,
         updated_at=now,
     )
@@ -93,6 +99,19 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate)
 
     if payload.layout_config is not None:
         strategy.layout_config = payload.layout_config
+
+    if payload.manager_agent_id is not None:
+        # Validate agent exists
+        if payload.manager_agent_id != 0:  # 0 means unset
+            agent = session.get(Agent, payload.manager_agent_id)
+            if not agent:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Agent with id {payload.manager_agent_id} not found",
+                )
+            strategy.manager_agent_id = payload.manager_agent_id
+        else:
+            strategy.manager_agent_id = None
 
     strategy.updated_at = datetime.now(timezone.utc)
 
@@ -612,3 +631,211 @@ def trigger_rule_agent(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to call agent webhook: {str(e)}",
         )
+
+
+# ─── AI AGENT MANAGER ───
+
+
+def get_or_create_live_chat(session: Session, strategy_id: int) -> Chat:
+    """Get or create the dedicated 'Live' chat for a strategy.
+
+    Every strategy has exactly one chat with ``chat_type='live'``.
+    If none exists it is created automatically, linked to the strategy's
+    manager agent.
+    """
+    strategy = get_strategy(session, strategy_id)
+
+    # Look for existing live chat
+    live_chat = session.exec(
+        select(Chat)
+        .where(Chat.strategy_id == strategy_id)
+        .where(Chat.chat_type == Chat.ChatType.LIVE)
+    ).first()
+
+    if live_chat:
+        # Ensure it points to the current manager agent
+        if live_chat.id_agent != strategy.manager_agent_id:
+            live_chat.id_agent = strategy.manager_agent_id
+            session.add(live_chat)
+            session.commit()
+            session.refresh(live_chat)
+        return live_chat
+
+    # Create a new live chat
+    live_chat = Chat(
+        strategy_id=strategy_id,
+        id_agent=strategy.manager_agent_id,
+        nome=f"Live",
+        descrizione="Chat live della strategia — l'agent manager riporta le attività in tempo reale",
+        chat_type=Chat.ChatType.LIVE,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(live_chat)
+    session.commit()
+    session.refresh(live_chat)
+    logger.info("Created Live chat (id=%s) for strategy %s", live_chat.id, strategy_id)
+    return live_chat
+
+
+def notify_manager_live_start(
+    session: Session,
+    strategy_id: int,
+    symbol: str,
+    timeframe: str,
+    account_config: dict | None = None,
+) -> dict | None:
+    """Send a context message to the strategy's manager agent when going live.
+
+    Creates a "Live" chat if it doesn't exist, writes a system message
+    with the strategy context, and fires the manager's webhook so the
+    agent is aware of the live session.
+
+    Returns the webhook response dict, or ``None`` if no manager is set.
+    """
+    strategy = get_strategy(session, strategy_id)
+
+    if not strategy.manager_agent_id:
+        logger.info("Strategy %s has no manager agent — skipping notification", strategy_id)
+        return None
+
+    agent = session.get(Agent, strategy.manager_agent_id)
+    if not agent:
+        logger.warning("Manager agent %s not found for strategy %s", strategy.manager_agent_id, strategy_id)
+        return None
+
+    # Ensure live chat exists
+    live_chat = get_or_create_live_chat(session, strategy_id)
+
+    # Build context payload
+    context = {
+        "strategy_id": strategy_id,
+        "strategy_name": strategy.name,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "definition": strategy.definition,
+        "live_started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if account_config:
+        context["account"] = {
+            k: v for k, v in account_config.items()
+            if k not in ("password", "secret", "token")
+        }
+
+    # Persist a system message in chat history
+    system_msg = N8nChatHistory(
+        session_id=live_chat.n8n_session_id,
+        message={
+            "type": "ai",
+            "text": (
+                f"🚀 **Strategia avviata in Live**\n\n"
+                f"- **Strategia**: {strategy.name}\n"
+                f"- **Simbolo**: {symbol}\n"
+                f"- **Timeframe**: {timeframe}\n"
+                f"- **Avvio**: {context['live_started_at']}\n\n"
+                f"Sono il manager di questa strategia. "
+                f"Riporterò le attività in tempo reale e risponderò alle domande."
+            ),
+        },
+    )
+    session.add(system_msg)
+    session.commit()
+
+    # Fire webhook (fire-and-forget style, but log errors)
+    chat_input = (
+        f"🚀 **Strategia avviata in Live**\n\n"
+        f"- **Strategia**: {strategy.name}\n"
+        f"- **Simbolo**: {symbol}\n"
+        f"- **Timeframe**: {timeframe}\n"
+        f"- **Avvio**: {context['live_started_at']}\n\n"
+        f"Sono il manager di questa strategia. "
+        f"Riporterò le attività in tempo reale e risponderò alle domande."
+    )
+    webhook_payload = [{
+        "action": "sendMessage",
+        "sessionId": live_chat.n8n_session_id or "",
+        "chatInput": chat_input,
+        "metadata": {
+            "chat_id": live_chat.n8n_session_id or "",
+        },
+    }]
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(agent.n8n_webhook, json=webhook_payload)
+            response.raise_for_status()
+            logger.info(
+                "Notified manager agent '%s' about live start for strategy %s",
+                agent.agent_name, strategy_id,
+            )
+            return response.json() if response.text else {"status": "ok"}
+    except Exception as e:
+        logger.warning(
+            "Failed to notify manager agent '%s' for strategy %s: %s",
+            agent.agent_name, strategy_id, e,
+        )
+        return None
+
+
+def post_manager_message(
+    session: Session,
+    strategy_id: int,
+    message: str,
+    sender: str = "system",
+    forward_to_webhook: bool = False,
+) -> Chat:
+    """Post a message to the strategy's live chat.
+
+    Used by the strategy runner to send status updates to the manager.
+    The message is written directly to the n8n chat history so it
+    appears in the ChatWidget.
+
+    When ``forward_to_webhook`` is True the message is also POSTed to
+    the manager agent's n8n webhook (fire-and-forget).
+
+    Args:
+        session: DB session
+        strategy_id: Strategy ID
+        message: Text content of the message
+        sender: 'system' | 'user' | 'ai' — maps to n8n message type
+        forward_to_webhook: Also call the manager agent's webhook
+
+    Returns:
+        The live Chat object
+    """
+    live_chat = get_or_create_live_chat(session, strategy_id)
+
+    msg_type = "ai" if sender in ("system", "ai", "agent") else "human"
+    history_entry = N8nChatHistory(
+        session_id=live_chat.n8n_session_id,
+        message={
+            "type": msg_type,
+            "text": message,
+        },
+    )
+    session.add(history_entry)
+    session.commit()
+
+    # Optionally forward to the manager agent's webhook
+    if forward_to_webhook:
+        strategy = get_strategy(session, strategy_id)
+        if strategy.manager_agent_id:
+            agent = session.get(Agent, strategy.manager_agent_id)
+            if agent and agent.n8n_webhook:
+                webhook_payload = [{
+                    "action": "sendMessage",
+                    "sessionId": live_chat.n8n_session_id or "",
+                    "chatInput": message,
+                    "metadata": {
+                        "chat_id": live_chat.n8n_session_id or "",
+                    },
+                }]
+                try:
+                    with httpx.Client(timeout=10.0) as client:
+                        resp = client.post(agent.n8n_webhook, json=webhook_payload)
+                        resp.raise_for_status()
+                except Exception as e:
+                    logger.warning(
+                        "Failed to forward message to manager webhook for strategy %s: %s",
+                        strategy_id, e,
+                    )
+
+    return live_chat

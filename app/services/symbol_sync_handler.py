@@ -4,7 +4,7 @@ Symbol Sync Handler - Handles synchronization of symbols from data sources.
 This is the concrete implementation of BaseSyncHandler for symbol data.
 It fetches symbols from various sources and caches them in PostgreSQL.
 
-Note: Blocking operations (yfinance, ib_async) are run in thread pool
+Note: Blocking operations (yfinance, httpx) are run in thread pool
 to avoid blocking the async event loop.
 """
 from __future__ import annotations
@@ -360,21 +360,31 @@ class SymbolSyncHandler(BaseSyncHandler):
         )
     
     def _check_ibkr_connection_blocking(self, host: str, port: int, client_id: int, timeout: int) -> tuple[bool, str | None]:
-        """Blocking IBKR connection check - runs in thread pool."""
+        """Check IBKR connectivity via any running ibkr-gateway container."""
         try:
-            from ib_async import IB
-            
-            ib = IB()
-            ib.connect(host, port, clientId=client_id, timeout=timeout)
-            
-            is_connected = ib.isConnected()
-            ib.disconnect()
-            
-            if is_connected:
-                return True, None
-            else:
-                return False, f"IBKR gateway at {host}:{port} did not respond"
-                
+            from app.services.connection_manager import get_connection_manager
+            import httpx
+
+            mgr = get_connection_manager()
+            if mgr._docker:
+                containers = mgr._docker.containers.list(
+                    filters={"label": "edgewalker.type=ibkr-gateway", "status": "running"},
+                )
+                for c in containers:
+                    conn_id = c.labels.get("edgewalker.connection_id", "")
+                    if conn_id:
+                        try:
+                            resp = httpx.get(
+                                f"http://ibkr-gw-{conn_id}:8080/status",
+                                timeout=timeout,
+                            )
+                            data = resp.json()
+                            if data.get("connected"):
+                                return True, None
+                        except Exception:
+                            continue
+
+            return False, "No ibkr-gateway container is running"
         except Exception as e:
             return False, str(e)
     
@@ -387,7 +397,7 @@ class SymbolSyncHandler(BaseSyncHandler):
         This sync checks if the gateway is connected and returns
         appropriate status (connected/not_connected).
         
-        Runs blocking ib_async operations in thread pool.
+        Runs check via ibkr-gateway container in thread pool.
         """
         config = source.config or {}
         host = config.get("host", "127.0.0.1")
@@ -494,15 +504,14 @@ def search_ibkr_symbols(
     asset_type: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search IBKR symbols live via a named connection.
+    """Search IBKR symbols live via a named connection's ibkr-gateway.
 
-    Connects to ib gateway using the connection's config and calls
-    ``reqMatchingSymbols``.  This is a **blocking** call that runs
-    in the caller's thread (the FastAPI route already runs in a
-    thread-pool for sync endpoints).
+    Uses the ``IBKRGatewayClient`` to call the per-Connection gateway
+    container's ``/search`` endpoint.  Falls back to the legacy direct
+    ``IBKRConnector`` if no gateway container is running.
     """
     from app.models.connection import Connection
-    from app.services.broker_connectors.ibkr import IBKRConnector
+    from app.services.connection_manager import get_connection_manager
 
     with get_session_context() as session:
         stmt = select(Connection).where(Connection.name == connection_name)
@@ -517,51 +526,48 @@ def search_ibkr_symbols(
                 f"'{connection.broker_type}', expected 'ibkr'"
             )
 
+        connection_id = connection.id
         config = connection.config or {}
 
-    connector = IBKRConnector()
-    result = connector.search_symbols(config, query, asset_type=asset_type)
+    # Try the ibkr-gateway container first
+    mgr = get_connection_manager()
+    container = mgr._get_container(connection_id)
+    if container and container.status == "running":
+        import httpx
 
-    if not result.success:
-        raise RuntimeError(
-            f"IBKR symbol search failed: {result.message}"
-        )
+        url = f"http://ibkr-gw-{connection_id}:8080/search"
+        params: dict[str, str] = {"query": query}
+        if asset_type:
+            params["asset_type"] = asset_type
 
-    symbols = result.symbols[:limit]
+        try:
+            resp = httpx.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            symbols = data.get("symbols", [])[:limit]
+            return [
+                {
+                    "symbol": s.get("symbol", ""),
+                    "name": s.get("name"),
+                    "asset_type": s.get("asset_type", ""),
+                    "exchange": s.get("exchange"),
+                    "currency": s.get("currency", "USD"),
+                    "source_name": "ibkr",
+                    "con_id": s.get("con_id"),
+                    "extra_data": {
+                        k: v for k, v in s.items()
+                        if k not in ("symbol", "name", "asset_type", "exchange", "currency", "con_id")
+                    },
+                }
+                for s in symbols
+            ]
+        except Exception as e:
+            raise RuntimeError(
+                f"IBKR symbol search via gateway failed: {e}. "
+                f"Is the connection '{connection_name}' connected?"
+            )
 
-    return [
-        {
-            "symbol": s.symbol,
-            "name": s.name,
-            "asset_type": s.asset_type,
-            "exchange": s.exchange,
-            "currency": s.currency,
-            "source_name": "ibkr",
-            "extra_data": s.extra,
-            "con_id": s.con_id,
-        }
-        for s in symbols
-    ]
-    """Get cache statistics."""
-    with get_session_context() as session:
-        stmt = select(DataSource).where(DataSource.is_active == True)
-        sources = session.exec(stmt).all()
-        
-        stats = {
-            "total_symbols": 0,
-            "sources": [],
-        }
-        
-        for source in sources:
-            source_stats = {
-                "name": source.name,
-                "display_name": source.display_name,
-                "symbols_count": source.symbols_count,
-                "last_sync_at": source.last_sync_at,
-                "last_sync_status": source.last_sync_status,
-                "sync_enabled": source.sync_enabled,
-            }
-            stats["sources"].append(source_stats)
-            stats["total_symbols"] += source.symbols_count
-        
-        return stats
+    raise RuntimeError(
+        f"No ibkr-gateway container running for connection '{connection_name}'. "
+        f"Please connect first."
+    )

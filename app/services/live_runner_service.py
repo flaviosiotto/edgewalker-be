@@ -36,7 +36,49 @@ CONTAINER_PREFIX = "edgewalker-strategy-"
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 
+# n8n internal address (Docker service name + internal port)
+N8N_INTERNAL_URL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
+# n8n path prefix used by Traefik (stripped before forwarding to n8n)
+N8N_PATH_PREFIX = os.getenv("N8N_PATH_PREFIX", "/n8n")
 
+
+def _rewrite_webhook_for_docker(url: str) -> str:
+    """Rewrite an external webhook URL to a Docker-internal URL.
+
+    Agent webhook URLs are stored with the external host (e.g.
+    ``http://localhost:8081/n8n/webhook/abc``).  Inside the Docker
+    network the runner must reach n8n directly at ``n8n:5678`` and
+    without the ``/n8n`` Traefik path prefix.
+
+    The rewrite is applied when the URL contains the ``N8N_PATH_PREFIX``
+    segment (default ``/n8n``).  Other URLs are returned unchanged.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(url)
+    path = parsed.path
+
+    # Only rewrite URLs that go through Traefik to n8n
+    if not path.startswith(N8N_PATH_PREFIX):
+        return url
+
+    # Strip the Traefik prefix (/n8n/webhook/abc -> /webhook/abc)
+    new_path = path[len(N8N_PATH_PREFIX):]
+    if not new_path.startswith("/"):
+        new_path = "/" + new_path
+
+    # Build internal URL using the n8n Docker service
+    internal = urlparse(N8N_INTERNAL_URL)
+    rewritten = urlunparse((
+        internal.scheme,
+        internal.netloc,
+        new_path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment,
+    ))
+    logger.debug("Rewrote webhook URL: %s -> %s", url, rewritten)
+    return rewritten
 
 
 class LiveRunnerService:
@@ -77,6 +119,8 @@ class LiveRunnerService:
         debug_rules: bool = False,
         account_config: dict[str, Any] | None = None,
         broker_type: str | None = None,
+        manager_webhook_url: str | None = None,
+        manager_chat_session_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Start a live strategy runner container.
@@ -127,7 +171,15 @@ class LiveRunnerService:
             "DEBUG_RULES": str(debug_rules).lower(),
             "LOG_LEVEL": "DEBUG" if debug_rules else "INFO",
             "PYTHONPATH": "/app",
+            # Backend API URL for manager agent notifications
+            "BACKEND_URL": os.getenv("BACKEND_URL", "http://backend:8000"),
         }
+
+        # Manager agent webhook (so the runner can call the agent directly)
+        if manager_webhook_url:
+            env["MANAGER_WEBHOOK_URL"] = _rewrite_webhook_for_docker(manager_webhook_url)
+        if manager_chat_session_id:
+            env["MANAGER_CHAT_SESSION_ID"] = manager_chat_session_id
         
         # Add broker / account configuration if provided
         if broker_type:

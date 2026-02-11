@@ -43,6 +43,11 @@ from app.services.live_trading_service import (
     validate_account_for_live,
 )
 from app.services.strategy_service import get_strategy
+from app.services.strategy_service import (
+    notify_manager_live_start,
+    post_manager_message,
+    get_or_create_live_chat,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +195,18 @@ def start_live_strategy(
                     strategy_id, recon_report.summary,
                 )
         
+        # Resolve manager agent webhook URL for the runner
+        _mgr_webhook: str | None = None
+        _mgr_session_id: str | None = None
+        if strategy.manager_agent_id:
+            from app.models.agent import Agent
+            _mgr_agent = session.get(Agent, strategy.manager_agent_id)
+            if _mgr_agent:
+                _mgr_webhook = _mgr_agent.n8n_webhook
+            # Pre-create the live chat so the runner has its session_id
+            _live_chat = get_or_create_live_chat(session, strategy_id)
+            _mgr_session_id = _live_chat.n8n_session_id
+
         result = live_runner_service.start_strategy(
             strategy_id=strategy_id,
             strategy_config=strategy.definition,
@@ -199,6 +216,8 @@ def start_live_strategy(
             debug_rules=request.debug_rules,
             account_config=account_config,
             broker_type=broker_type,
+            manager_webhook_url=_mgr_webhook,
+            manager_chat_session_id=_mgr_session_id,
         )
         
         if result["status"] == "already_running":
@@ -223,6 +242,21 @@ def start_live_strategy(
         session.add(strategy)
         session.commit()
         
+        # Notify the manager agent about the live start
+        try:
+            notify_manager_live_start(
+                session=session,
+                strategy_id=strategy_id,
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                account_config=account_config,
+            )
+        except Exception as notify_err:
+            logger.warning(
+                "Failed to notify manager agent for strategy %s: %s",
+                strategy_id, notify_err,
+            )
+        
         return LiveStartResponse(
             status="started",
             container_id=result.get("container_id"),
@@ -231,6 +265,8 @@ def start_live_strategy(
             timeframe=request.timeframe,
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         # Update DB with error state
         strategy.live_status = LiveStatus.ERROR.value
@@ -588,3 +624,57 @@ def reconcile_strategy(
         broker_positions=broker_positions,
     )
     return report
+
+
+# ═════════════════════════════════════════════════════════════════════
+# MANAGER AGENT  (AI Agent Manager)
+# ═════════════════════════════════════════════════════════════════════
+
+
+class ManagerMessageRequest(BaseModel):
+    """Message to post in the strategy's live chat."""
+    message: str
+    sender: str = "agent"  # 'agent' | 'system' | 'user'
+
+
+class ManagerMessageResponse(BaseModel):
+    """Response after posting a message."""
+    status: str
+    chat_id: int
+
+
+@router.post(
+    "/strategies/{strategy_id}/manager/message",
+    response_model=ManagerMessageResponse,
+)
+def post_manager_message_endpoint(
+    strategy_id: int,
+    payload: ManagerMessageRequest,
+    session: Session = Depends(get_session),
+):
+    """Post a message to the strategy's Live chat.
+
+    Typically called by the strategy-runner container to report
+    trade actions, status updates, or errors to the manager agent's
+    live chat.
+    """
+    _ = get_strategy(session, strategy_id)
+    chat = post_manager_message(
+        session=session,
+        strategy_id=strategy_id,
+        message=payload.message,
+        sender=payload.sender,
+    )
+    return ManagerMessageResponse(status="ok", chat_id=chat.id)
+
+
+@router.get("/strategies/{strategy_id}/manager/chat")
+def get_manager_live_chat(
+    strategy_id: int,
+    session: Session = Depends(get_session),
+):
+    """Get (or create) the dedicated Live chat for a strategy."""
+    from app.schemas.chat import ChatRead
+
+    chat = get_or_create_live_chat(session, strategy_id)
+    return ChatRead.model_validate(chat)

@@ -114,10 +114,28 @@ class Strategy(SQLModel, table=True):
         sa_column=Column(JSONB, nullable=True),
     )
 
+    # AI Agent Manager – the agent overseeing this strategy's live execution
+    manager_agent_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("agent.id_agent", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+
     # UI layout persistence (grid positions, time range, timezone)
     layout_config: Optional[Any] = Field(
         default=None,
         sa_column=Column(JSONB, nullable=True),
+    )
+
+    manager_agent: Optional["Agent"] = Relationship(
+        sa_relationship=relationship(
+            "Agent",
+            foreign_keys="[Strategy.manager_agent_id]",
+        )
     )
 
     backtests: list["BacktestResult"] = Relationship(

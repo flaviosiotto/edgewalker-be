@@ -1,11 +1,9 @@
 """
-Broker Connectors – abstraction layer for connecting to brokers/exchanges.
+Broker Connectors — shared data types for connection lifecycle.
 
-Each connector implements the BrokerConnector protocol:
-  connect()       → establish connection, return discovered accounts
-  disconnect()    → tear down connection
-  is_connected()  → check liveness
+IBKR operations are handled by per-Connection ``ibkr-gateway`` containers,
+managed by ``ConnectionManager`` and accessed via ``IBKRGatewayClient``.
 """
-from app.services.broker_connectors.base import BrokerConnector, ConnectorResult
+from app.services.broker_connectors.base import ConnectorResult, DiscoveredAccount
 
-__all__ = ["BrokerConnector", "ConnectorResult"]
+__all__ = ["ConnectorResult", "DiscoveredAccount"]

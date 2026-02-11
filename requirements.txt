@@ -14,7 +14,6 @@ pandas
 numpy
 pyarrow
 TA-Lib
-ib_async
 yfinance
 redis>=5.0.0
 docker>=7.0.0

@@ -14,6 +14,7 @@ class StrategyCreate(BaseModel):
     name: str
     description: Optional[str] = None
     definition: Any
+    manager_agent_id: Optional[int] = None
 
 
 class StrategyRead(BaseModel):
@@ -25,6 +26,9 @@ class StrategyRead(BaseModel):
     updated_at: datetime
     chats: list[ChatRead] = []
     
+    # AI Agent Manager
+    manager_agent_id: Optional[int] = None
+
     # Live trading state
     live_status: Optional[LiveStatus] = "stopped"
     live_container_id: Optional[str] = None
@@ -45,6 +49,7 @@ class StrategyUpdate(BaseModel):
     description: Optional[str] = None
     definition: Optional[Any] = None
     layout_config: Optional[dict[str, Any]] = None
+    manager_agent_id: Optional[int] = None
 
 
 # ─── BACKTEST SCHEMAS ───
