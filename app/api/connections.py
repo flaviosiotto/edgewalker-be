@@ -48,11 +48,12 @@ async def list_connections_endpoint(
 ):
     """List all broker connections.
 
-    Connections currently marked as *connected* are probed in real-time
-    against the broker so the returned status always reflects reality.
+    All active connections are probed in real-time against the broker
+    so the returned status always reflects reality — including gateways
+    that came back online after being marked disconnected.
     """
     manager = get_connection_manager()
-    await manager.check_all_connected()
+    await manager.probe_active_connections()
     # Re-read after potential status updates
     session.expire_all()
 
