@@ -763,17 +763,19 @@ def notify_manager_live_start(
         f"Sono il manager di questa strategia. "
         f"Riporterò le attività in tempo reale e risponderò alle domande."
     )
-    webhook_payload = [{
+    webhook_payload = {
         "action": "sendMessage",
         "sessionId": live_chat.n8n_session_id or "",
         "chatInput": chat_input,
         "metadata": {
             "chat_id": live_chat.n8n_session_id or "",
         },
-    }]
+    }
     try:
+        from app.services.live_runner_service import _rewrite_webhook_for_docker
+        webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
         with httpx.Client(timeout=30.0) as client:
-            response = client.post(agent.n8n_webhook, json=webhook_payload)
+            response = client.post(webhook_url, json=webhook_payload)
             response.raise_for_status()
             logger.info(
                 "Notified manager agent '%s' about live start for strategy %s",
@@ -833,17 +835,19 @@ def post_manager_message(
         if strategy.manager_agent_id:
             agent = session.get(Agent, strategy.manager_agent_id)
             if agent and agent.n8n_webhook:
-                webhook_payload = [{
+                from app.services.live_runner_service import _rewrite_webhook_for_docker
+                webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+                webhook_payload = {
                     "action": "sendMessage",
                     "sessionId": live_chat.n8n_session_id or "",
                     "chatInput": message,
                     "metadata": {
                         "chat_id": live_chat.n8n_session_id or "",
                     },
-                }]
+                }
                 try:
                     with httpx.Client(timeout=10.0) as client:
-                        resp = client.post(agent.n8n_webhook, json=webhook_payload)
+                        resp = client.post(webhook_url, json=webhook_payload)
                         resp.raise_for_status()
                 except Exception as e:
                     logger.warning(
