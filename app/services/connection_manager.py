@@ -515,8 +515,10 @@ class ConnectionManager:
             if stale or orphans:
                 session.commit()
 
-        # 3) Clean up stale gateway containers
-        self._cleanup_stale_containers()
+        # NOTE: We do NOT clean up gateway containers here — they are
+        # independent microservices that should survive backend restarts.
+        # probe_active_connections() (called after this) will reconcile
+        # DB status with actually running containers.
 
     def _cleanup_stale_containers(self) -> None:
         """Remove any ibkr-gateway containers left from a previous run."""
@@ -565,8 +567,9 @@ class ConnectionManager:
                 pass
         self._tasks.clear()
 
-        # Destroy all running gateway containers
-        self._cleanup_stale_containers()
+        # NOTE: We do NOT destroy gateway containers on stop() — they are
+        # independent microservices that should survive backend restarts.
+        # Only explicit disconnect (user action) destroys the container.
         _gateway_clients.clear()
 
         logger.info("Connection manager stopped")

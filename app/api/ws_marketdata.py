@@ -18,6 +18,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import redis.asyncio as redis
 
 from app.services.realtime_indicators import indicator_calculator
+import math
+import time as _time
 from app.services.ibkr_gateway_client import IBKRGatewayClient
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,59 @@ class WebSocketClient:
             return False
 
 
+# ── Tick-to-Bar Aggregator ────────────────────────────────────────────
+
+_TF_SECONDS = {
+    "1s": 1, "5s": 5, "10s": 10, "15s": 15, "30s": 30,
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "4h": 14400,
+}
+
+
+class TickAggregator:
+    """Aggregates ticks into OHLCV bars for one (symbol, timeframe) pair."""
+
+    def __init__(self, timeframe: str = "5s"):
+        self.tf_seconds = _TF_SECONDS.get(timeframe, 5)
+        self.current_bar: dict[str, Any] | None = None  # {time, open, high, low, close, volume}
+        self._period_start: int = 0  # unix seconds start of current bar
+
+    def _period_of(self, ts_seconds: float) -> int:
+        """Return the period-start timestamp for a given unix timestamp."""
+        return int(ts_seconds // self.tf_seconds) * self.tf_seconds
+
+    def add_tick(self, price: float, size: float, ts_seconds: float) -> dict[str, Any] | None:
+        """
+        Feed a tick. Returns the *completed* bar dict when a new period starts,
+        or None if still accumulating inside the current period.
+        The current (in-progress) bar is always available as ``self.current_bar``.
+        """
+        period = self._period_of(ts_seconds)
+        completed: dict[str, Any] | None = None
+
+        if self.current_bar is None or period != self._period_start:
+            # New period → emit the previous bar (if any)
+            if self.current_bar is not None:
+                completed = dict(self.current_bar)
+            self._period_start = period
+            self.current_bar = {
+                "time": period,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": size,
+            }
+        else:
+            # Update current bar
+            self.current_bar["high"] = max(self.current_bar["high"], price)
+            self.current_bar["low"] = min(self.current_bar["low"], price)
+            self.current_bar["close"] = price
+            self.current_bar["volume"] += size
+
+        return completed
+
+
 class ConnectionManager:
     """
     Manages WebSocket connections and Redis Pub/Sub subscriptions.
@@ -73,6 +128,8 @@ class ConnectionManager:
         self._running = False
         # Queue of ("subscribe"|"unsubscribe", channel) tuples consumed by _listen_redis
         self._sub_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        # Tick-to-bar aggregators: (symbol, timeframe) -> TickAggregator
+        self._tick_aggregators: dict[tuple[str, str], TickAggregator] = {}
     
     async def start(self) -> None:
         """Start the connection manager and Redis listener."""
@@ -335,12 +392,23 @@ class ConnectionManager:
                 logger.error(f"Error in Redis listener: {e}")
                 await asyncio.sleep(1)
     
+    def _get_bar_channels_for_symbol(self, symbol: str) -> list[tuple[str, str]]:
+        """Return [(bar_channel, timeframe), ...] for a symbol with active subscribers."""
+        results = []
+        for ch in self._channel_clients:
+            # Pattern: live:bars:{symbol}:{tf}
+            parts = ch.split(":")
+            if len(parts) == 4 and parts[1] == "bars" and parts[2] == symbol:
+                results.append((ch, parts[3]))
+        return results
+
     async def _broadcast_to_channel(self, channel: str, data: str) -> None:
         """Broadcast message to all clients subscribed to a channel."""
         client_ids = self._channel_clients.get(channel, set())
         
         if not client_ids:
-            return
+            # Even with no direct subscribers, tick channels may feed bar aggregation
+            pass
         
         # Parse JSON data
         try:
@@ -357,24 +425,102 @@ class ConnectionManager:
                 type_map = {"ticks": "tick", "bars": "bar", "quotes": "quote"}
                 parsed_data["event_type"] = type_map.get(ch_kind, ch_kind)
         
-        # If this is a bar event, calculate indicators
         event_type = parsed_data.get("event_type", "")
         symbol = parsed_data.get("symbol", "")
-        
-        indicator_values = {}
+
+        # ── Tick-to-bar aggregation with indicator calculation ──
+        if event_type == "tick" and symbol:
+            price = float(parsed_data.get("price", 0))
+            size = float(parsed_data.get("size", 0))
+            ts = parsed_data.get("timestamp", 0)
+            # Normalise timestamp to seconds (gateway may send ms or s)
+            ts_seconds = ts / 1000.0 if ts > 1e12 else float(ts)
+
+            for bar_channel, tf in self._get_bar_channels_for_symbol(symbol):
+                key = (symbol, tf)
+                if key not in self._tick_aggregators:
+                    self._tick_aggregators[key] = TickAggregator(tf)
+                agg = self._tick_aggregators[key]
+
+                completed_bar = agg.add_tick(price, size, ts_seconds)
+
+                # When a bar period completes, process it through indicators
+                if completed_bar:
+                    bar_data = {
+                        "event_type": "bar",
+                        "symbol": symbol,
+                        "timeframe": tf,
+                        "timestamp": completed_bar["time"] * 1000,  # ms for consistency
+                        "open": completed_bar["open"],
+                        "high": completed_bar["high"],
+                        "low": completed_bar["low"],
+                        "close": completed_bar["close"],
+                        "volume": completed_bar["volume"],
+                    }
+                    indicator_values = indicator_calculator.process_bar(symbol, bar_data)
+                    if indicator_values:
+                        bar_data["indicators"] = indicator_values
+                    await self._send_to_channel(bar_channel, bar_data)
+
+                # Also send in-progress bar update so chart stays current
+                if agg.current_bar:
+                    update_data = {
+                        "event_type": "bar",
+                        "symbol": symbol,
+                        "timeframe": tf,
+                        "timestamp": agg.current_bar["time"] * 1000,
+                        "open": agg.current_bar["open"],
+                        "high": agg.current_bar["high"],
+                        "low": agg.current_bar["low"],
+                        "close": agg.current_bar["close"],
+                        "volume": agg.current_bar["volume"],
+                        "in_progress": True,
+                    }
+                    # Attach latest indicator values (computed on last completed bar)
+                    # so indicators update tick-by-tick with the in-progress close
+                    indicator_values = indicator_calculator.process_bar(symbol, update_data)
+                    if indicator_values:
+                        update_data["indicators"] = indicator_values
+                    await self._send_to_channel(bar_channel, update_data)
+
+        # If this is a native bar event, calculate indicators
         if event_type == "bar" and symbol:
             indicator_values = indicator_calculator.process_bar(symbol, parsed_data)
-            logger.debug(f"Bar event for {symbol}: calculated {len(indicator_values)} indicator values: {list(indicator_values.keys())}")
             if indicator_values:
                 parsed_data["indicators"] = indicator_values
         
+        # Forward the original event (tick/quote/bar) to direct subscribers
+        if client_ids:
+            message = {
+                "type": "market_data",
+                "channel": channel,
+                "data": parsed_data,
+            }
+            
+            # Send to all subscribed clients
+            disconnected = []
+            for client_id in client_ids:
+                client = self._clients.get(client_id)
+                if client:
+                    success = await client.send_json(message)
+                    if not success:
+                        disconnected.append(client_id)
+            
+            # Clean up disconnected clients
+            for client_id in disconnected:
+                await self.disconnect(client_id)
+
+    async def _send_to_channel(self, channel: str, data: dict[str, Any]) -> None:
+        """Send a synthesised message to all clients subscribed to *channel*."""
+        client_ids = self._channel_clients.get(channel, set())
+        if not client_ids:
+            return
+
         message = {
             "type": "market_data",
             "channel": channel,
-            "data": parsed_data,
+            "data": data,
         }
-        
-        # Send to all subscribed clients
         disconnected = []
         for client_id in client_ids:
             client = self._clients.get(client_id)
@@ -382,8 +528,6 @@ class ConnectionManager:
                 success = await client.send_json(message)
                 if not success:
                     disconnected.append(client_id)
-        
-        # Clean up disconnected clients
         for client_id in disconnected:
             await self.disconnect(client_id)
     
@@ -452,6 +596,17 @@ async def websocket_marketdata(websocket: WebSocket):
         "type": "connected",
         "client_id": client_id,
     })
+
+    # Server-side keepalive: send a ping every 20s to prevent proxy idle timeout
+    async def _keepalive():
+        try:
+            while True:
+                await asyncio.sleep(20)
+                await websocket.send_json({"type": "pong"})
+        except Exception:
+            pass
+
+    keepalive_task = asyncio.create_task(_keepalive())
     
     try:
         while True:
@@ -531,6 +686,7 @@ async def websocket_marketdata(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error for {client_id}: {e}")
     finally:
+        keepalive_task.cancel()
         await connection_manager.disconnect(client_id)
 
 
