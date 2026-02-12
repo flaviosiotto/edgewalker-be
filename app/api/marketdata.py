@@ -24,7 +24,6 @@ from app.schemas.marketdata import (
 )
 from app.services.marketdata_service import (
     get_ohlc_history,
-    get_ohlc_history_with_fetch,
     MarketDataError,
 )
 from app.services.indicator_registry import (
@@ -107,29 +106,18 @@ def get_ohlc_history_endpoint(
     indicator_list = _parse_indicator_string(indicators)
     
     try:
-        if fetch:
-            # Fetch fresh data from source
-            result = get_ohlc_history_with_fetch(
-                symbol=symbol,
-                source=source.value,
-                asset_type=asset_type.value,
-                start_date=start_date,
-                end_date=end_date,
-                timeframe=timeframe,
-                indicators=indicator_list,
-                extended_hours=extended_hours,
-            )
-        else:
-            # Use existing partitioned data
-            result = get_ohlc_history(
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                timeframe=timeframe,
-                indicators=indicator_list,
-                source=source.value,
-                extended_hours=extended_hours,
-            )
+        # NOTE: fetch=True is handled by datasource-historical (Traefik
+        # routes /api/marketdata/ohlc-history there with priority 200).
+        # The backend only serves from pre-existing partitioned data.
+        result = get_ohlc_history(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            timeframe=timeframe,
+            indicators=indicator_list,
+            source=source.value,
+            extended_hours=extended_hours,
+        )
         return result
     except MarketDataError as e:
         raise HTTPException(

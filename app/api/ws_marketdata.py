@@ -18,6 +18,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import redis.asyncio as redis
 
 from app.services.realtime_indicators import indicator_calculator
+from app.services.ibkr_gateway_client import IBKRGatewayClient
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,8 @@ class WebSocketClient:
     subscriptions: set[str] = field(default_factory=set)
     # symbol -> list of indicator configs
     indicators: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # IBKR connection ID for gateway routing (set per-client)
+    connection_id: int | None = None
     
     async def send_json(self, data: dict) -> bool:
         """Send JSON message to client. Returns False if failed."""
@@ -53,6 +56,11 @@ class ConnectionManager:
     Manages WebSocket connections and Redis Pub/Sub subscriptions.
     
     Routes market data from Redis Pub/Sub to subscribed WebSocket clients.
+    
+    IMPORTANT: All PubSub subscribe/unsubscribe calls are funnelled through
+    ``_sub_queue`` so that only the listener task touches the ``_pubsub``
+    object — redis.asyncio PubSub is NOT safe for concurrent access from
+    multiple coroutines.
     """
     
     def __init__(self):
@@ -63,6 +71,8 @@ class ConnectionManager:
         self._pubsub: redis.client.PubSub | None = None
         self._listener_task: asyncio.Task | None = None
         self._running = False
+        # Queue of ("subscribe"|"unsubscribe", channel) tuples consumed by _listen_redis
+        self._sub_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
     
     async def start(self) -> None:
         """Start the connection manager and Redis listener."""
@@ -137,24 +147,28 @@ class ConnectionManager:
                 # Unsubscribe from Redis if no more clients
                 if not self._channel_clients[channel]:
                     del self._channel_clients[channel]
-                    if self._pubsub:
-                        await self._pubsub.unsubscribe(channel)
+                    await self._sub_queue.put(("unsubscribe", channel))
         
         logger.info(f"Client disconnected: {client_id}")
     
-    async def subscribe(self, client_id: str, channels: list[str]) -> None:
+    async def subscribe(self, client_id: str, channels: list[str], connection_id: int | None = None) -> None:
         """
         Subscribe client to channels.
         
         Args:
             client_id: Client identifier
             channels: List of Redis Pub/Sub channels (e.g., "live:ticks:QQQ")
+            connection_id: Optional IBKR connection ID for gateway routing
         """
         client = self._clients.get(client_id)
         if not client:
             return
         
-        # Extract symbols from channels to request from collector
+        # Store connection_id on the client for future use
+        if connection_id is not None:
+            client.connection_id = connection_id
+        
+        # Extract symbols from channels to request streaming
         symbols_to_request: set[str] = set()
         
         for channel in channels:
@@ -170,37 +184,35 @@ class ConnectionManager:
             # Add to channel -> clients mapping
             if channel not in self._channel_clients:
                 self._channel_clients[channel] = set()
-                # Subscribe to Redis channel
-                if self._pubsub:
-                    await self._pubsub.subscribe(channel)
+                # Queue Redis subscribe (processed by listener task)
+                await self._sub_queue.put(("subscribe", channel))
             
             self._channel_clients[channel].add(client_id)
         
-        # Request collector to start streaming these symbols
+        # Request ibkr-gateway to start streaming these symbols
+        effective_conn_id = connection_id or client.connection_id
         for symbol in symbols_to_request:
-            await self._request_collector_subscription(symbol)
+            await self._request_gateway_subscription(symbol, effective_conn_id)
         
         logger.info(f"Client {client_id} subscribed to {channels}")
     
-    async def _request_collector_subscription(self, symbol: str) -> None:
+    async def _request_gateway_subscription(self, symbol: str, connection_id: int | None = None) -> None:
         """
-        Request the datasource-collector to start streaming a symbol.
+        Request the ibkr-gateway to start streaming a symbol.
         
-        Sends a command via Redis Pub/Sub to control:subscribe channel.
+        Uses IBKRGatewayClient to call the per-Connection gateway container's
+        /subscribe endpoint.
         """
-        if not self._redis:
-            logger.warning(f"Cannot request subscription for {symbol}: Redis not connected")
+        if connection_id is None:
+            logger.warning(f"Cannot request streaming for {symbol}: no connection_id")
             return
         
         try:
-            command = {
-                "symbol": symbol,
-                "data_types": ["tick", "quote", "bar_5s"],
-            }
-            result = await self._redis.publish("control:subscribe", json.dumps(command))
-            logger.info(f"Requested collector subscription for {symbol}, receivers: {result}")
+            client = IBKRGatewayClient(connection_id)
+            result = await client.subscribe(symbol, data_types=["tick", "quote"])
+            logger.info(f"Requested gateway subscription for {symbol} via connection {connection_id}: {result}")
         except Exception as e:
-            logger.error(f"Failed to request collector subscription for {symbol}: {e}")
+            logger.error(f"Failed to request gateway subscription for {symbol} via connection {connection_id}: {e}")
     
     async def unsubscribe(self, client_id: str, channels: list[str]) -> None:
         """Unsubscribe client from channels."""
@@ -217,8 +229,7 @@ class ConnectionManager:
                 # Unsubscribe from Redis if no more clients
                 if not self._channel_clients[channel]:
                     del self._channel_clients[channel]
-                    if self._pubsub:
-                        await self._pubsub.unsubscribe(channel)
+                    await self._sub_queue.put(("unsubscribe", channel))
         
         logger.info(f"Client {client_id} unsubscribed from {channels}")
     
@@ -266,30 +277,55 @@ class ConnectionManager:
         logger.info(f"Client {client_id} configured {len(indicators)} indicators for {symbol}: {[i.get('name') for i in indicators]}")
     
     async def _listen_redis(self) -> None:
-        """Listen for Redis Pub/Sub messages and route to clients."""
+        """Listen for Redis Pub/Sub messages and route to clients.
+        
+        Also drains ``_sub_queue`` to apply subscribe/unsubscribe commands
+        from within this single task, avoiding concurrent PubSub access.
+        """
         logger.info("Redis listener started")
+        _msg_count = 0
         while self._running:
             try:
-                # Skip if no active subscriptions
+                # ── 1. Drain pending sub/unsub commands ───────────────
+                while not self._sub_queue.empty():
+                    try:
+                        action, channel = self._sub_queue.get_nowait()
+                        if self._pubsub:
+                            if action == "subscribe":
+                                await self._pubsub.subscribe(channel)
+                                logger.info(f"Redis PubSub: subscribed to {channel}")
+                            elif action == "unsubscribe":
+                                await self._pubsub.unsubscribe(channel)
+                                logger.info(f"Redis PubSub: unsubscribed from {channel}")
+                    except asyncio.QueueEmpty:
+                        break
+                
+                # ── 2. Skip if no active subscriptions ────────────────
                 if not self._channel_clients:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.1)
                     continue
                 
-                # Skip if pubsub not ready
+                # Skip if pubsub not ready yet
                 if not self._pubsub or not self._pubsub.subscribed:
-                    logger.debug(f"Pubsub not ready: pubsub={self._pubsub is not None}, subscribed={getattr(self._pubsub, 'subscribed', False)}")
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.1)
                     continue
                 
+                # ── 3. Poll for messages ──────────────────────────────
                 message = await self._pubsub.get_message(
                     ignore_subscribe_messages=True,
-                    timeout=1.0,
+                    timeout=0.1,
                 )
                 
-                if message and message["type"] == "message":
+                if message is None:
+                    await asyncio.sleep(0.01)
+                    continue
+                
+                if message["type"] == "message":
+                    _msg_count += 1
                     channel = message["channel"]
                     data = message["data"]
-                    logger.debug(f"Received message on {channel}")
+                    if _msg_count <= 5 or _msg_count % 500 == 0:
+                        logger.info(f"Redis msg #{_msg_count} on {channel} (clients={len(self._channel_clients.get(channel, set()))})")
                     
                     await self._broadcast_to_channel(channel, data)
                     
@@ -417,7 +453,8 @@ async def websocket_marketdata(websocket: WebSocket):
             
             if action == "subscribe":
                 channels = data.get("channels", [])
-                await connection_manager.subscribe(client_id, channels)
+                conn_id = data.get("connection_id")
+                await connection_manager.subscribe(client_id, channels, connection_id=conn_id)
                 await websocket.send_json({
                     "type": "subscribed",
                     "channels": channels,

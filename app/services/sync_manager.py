@@ -177,7 +177,7 @@ class BaseSyncHandler(ABC):
 async def run_in_executor(executor: ThreadPoolExecutor, func: Callable, *args, **kwargs) -> Any:
     """Run a blocking function in a thread pool executor.
     
-    This allows blocking I/O operations (like yfinance, ib_async) to run
+    This allows blocking I/O operations (like yfinance) to run
     without blocking the async event loop.
     """
     loop = asyncio.get_event_loop()
@@ -201,7 +201,7 @@ class SyncManager:
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._sync_in_progress: dict[tuple[int, SyncType], bool] = {}
-        # Thread pool for blocking operations (yfinance, ib_async)
+        # Thread pool for blocking operations (yfinance, etc.)
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sync_")
     
     def register_handler(self, handler: BaseSyncHandler) -> None:
