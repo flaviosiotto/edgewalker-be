@@ -40,6 +40,11 @@ GATEWAY_CONTAINER_PREFIX = "ibkr-gw-"
 # Paths for volume mounts (same as docker-compose)
 EDGEWALKER_PATH = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
 
+# Host UID/GID — gateway containers run as this user so written files
+# on mounted volumes match the host user (avoids root-owned data).
+HOST_PUID = os.getenv("PUID", "1000")
+HOST_PGID = os.getenv("PGID", "1000")
+
 # Active gateway clients — keyed by connection_id
 _gateway_clients: dict[int, IBKRGatewayClient] = {}
 
@@ -242,6 +247,7 @@ class ConnectionManager:
                 labels=labels,
                 extra_hosts=extra_hosts,
                 network=DOCKER_NETWORK,
+                user=f"{HOST_PUID}:{HOST_PGID}",
                 detach=True,
                 restart_policy={"Name": "unless-stopped"},
             )
