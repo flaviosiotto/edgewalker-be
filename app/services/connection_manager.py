@@ -439,6 +439,31 @@ class ConnectionManager:
         tasks = [self.check_connection_status(cid) for cid in connected_ids]
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def probe_active_connections(self) -> None:
+        """Probe ALL active connections regardless of stored status.
+
+        Called after startup reset to reconcile DB state with running
+        gateway containers (e.g. a container that survived a backend restart).
+        """
+        with get_session_context() as session:
+            stmt = select(Connection).where(
+                Connection.is_active == True  # noqa: E712
+            )
+            active_ids = [c.id for c in session.exec(stmt).all()]
+
+        if not active_ids:
+            return
+
+        logger.info("Probing %d active connection(s) for running gateways...", len(active_ids))
+        tasks = [self.check_connection_status(cid) for cid in active_ids]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        reconnected = sum(
+            1 for r in results
+            if isinstance(r, str) and r == ConnectionStatus.CONNECTED.value
+        )
+        if reconnected:
+            logger.info("Reconciled %d connection(s) back to 'connected'", reconnected)
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def _reset_connected_on_startup(self) -> None:
@@ -520,6 +545,9 @@ class ConnectionManager:
 
         # On (re)start, no broker connections can be alive
         self._reset_connected_on_startup()
+
+        # Reconcile: check if any gateway containers survived the restart
+        await self.probe_active_connections()
 
         logger.info("Connection manager started")
 

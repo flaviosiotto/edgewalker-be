@@ -348,6 +348,15 @@ class ConnectionManager:
         except json.JSONDecodeError:
             parsed_data = {"raw": data}
         
+        # Infer event_type from channel name if not present in the payload.
+        # Channel patterns: live:ticks:{symbol}, live:bars:{symbol}:{tf}, live:quotes:{symbol}
+        if "event_type" not in parsed_data:
+            parts = channel.split(":")
+            if len(parts) >= 2:
+                ch_kind = parts[1]  # ticks, bars, quotes
+                type_map = {"ticks": "tick", "bars": "bar", "quotes": "quote"}
+                parsed_data["event_type"] = type_map.get(ch_kind, ch_kind)
+        
         # If this is a bar event, calculate indicators
         event_type = parsed_data.get("event_type", "")
         symbol = parsed_data.get("symbol", "")
