@@ -10,11 +10,35 @@ from app.schemas.chat import ChatRead
 LiveStatus = Literal["stopped", "starting", "running", "stopping", "error"]
 
 
+# ─── STRATEGY LIVE (RUNTIME) SCHEMA ───
+
+
+class StrategyLiveRead(BaseModel):
+    """Runtime state of a live strategy session."""
+    id: int
+    strategy_id: int
+    status: LiveStatus = "stopped"
+    container_id: Optional[str] = None
+    symbol: Optional[str] = None
+    timeframe: Optional[str] = None
+    account_id: Optional[int] = None
+    started_at: Optional[datetime] = None
+    stopped_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    metrics: Optional[dict[str, Any]] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class StrategyCreate(BaseModel):
     name: str
     description: Optional[str] = None
     definition: Any
     manager_agent_id: Optional[int] = None
+    connection_id: Optional[int] = None
 
 
 class StrategyRead(BaseModel):
@@ -29,19 +53,17 @@ class StrategyRead(BaseModel):
     # AI Agent Manager
     manager_agent_id: Optional[int] = None
 
-    # Live trading state
-    live_status: Optional[LiveStatus] = "stopped"
-    live_container_id: Optional[str] = None
-    live_symbol: Optional[str] = None
-    live_timeframe: Optional[str] = None
-    live_started_at: Optional[datetime] = None
-    live_stopped_at: Optional[datetime] = None
-    live_error_message: Optional[str] = None
-    live_metrics: Optional[dict[str, Any]] = None
-    live_account_id: Optional[int] = None
+    # Datafeed connection binding
+    connection_id: Optional[int] = None
+
+    # Current live session (if any)
+    live: Optional[StrategyLiveRead] = None
 
     # UI layout persistence
     layout_config: Optional[dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True
 
 
 class StrategyUpdate(BaseModel):
@@ -50,6 +72,7 @@ class StrategyUpdate(BaseModel):
     definition: Optional[Any] = None
     layout_config: Optional[dict[str, Any]] = None
     manager_agent_id: Optional[int] = None
+    connection_id: Optional[int] = None
 
 
 # ─── BACKTEST SCHEMAS ───

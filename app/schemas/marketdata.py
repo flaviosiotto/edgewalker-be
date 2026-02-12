@@ -10,12 +10,6 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 
-class DataSourceType(str, Enum):
-    """Data source for market data."""
-    IBKR = "ibkr"
-    YAHOO = "yahoo"
-
-
 class AssetType(str, Enum):
     """Type of asset/instrument."""
     STOCK = "stock"
@@ -40,10 +34,6 @@ class IndicatorConfig(BaseModel):
 class OHLCHistoryRequest(BaseModel):
     """Request parameters for OHLC history endpoint."""
     symbol: str = Field(..., description="Trading symbol (e.g., 'QQQ', 'SPY')")
-    source: DataSourceType = Field(
-        DataSourceType.YAHOO,
-        description="Data source to fetch from"
-    )
     asset_type: AssetType = Field(
         AssetType.STOCK,
         description="Type of asset"
@@ -189,9 +179,9 @@ class AvailableSymbolsResponse(BaseModel):
 class SymbolSearchRequest(BaseModel):
     """Request parameters for symbol search."""
     query: str = Field(..., description="Search query (symbol pattern or name)")
-    source: DataSourceType = Field(
-        DataSourceType.YAHOO,
-        description="Data source to search"
+    connection_id: Optional[int] = Field(
+        None,
+        description="Connection ID to scope the search"
     )
     asset_type: Optional[AssetType] = Field(
         None,

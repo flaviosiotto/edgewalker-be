@@ -12,6 +12,7 @@ from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
     from app.models.agent import Chat
+    from app.models.live_trading import LiveOrder, LiveTrade, LivePosition
 
 
 class BacktestStatus(str, Enum):
@@ -49,6 +50,7 @@ class LiveStatus(str, Enum):
 
 
 class Strategy(SQLModel, table=True):
+    """Design-time strategy definition. No runtime/live state here."""
     __tablename__ = "strategies"
     __allow_unmapped__ = True
 
@@ -69,49 +71,16 @@ class Strategy(SQLModel, table=True):
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
 
-    # ── LIVE TRADING STATE ──
-    live_status: str = Field(
-        default=LiveStatus.STOPPED.value,
-        sa_column=Column(String(20), nullable=False, index=True),
-    )
-    live_container_id: Optional[str] = Field(
-        default=None,
-        sa_column=Column(String(64), nullable=True),
-    )
-    live_symbol: Optional[str] = Field(
-        default=None,
-        sa_column=Column(String(32), nullable=True),
-    )
-    live_timeframe: Optional[str] = Field(
-        default=None,
-        sa_column=Column(String(10), nullable=True),
-    )
-    live_started_at: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column(DateTime(timezone=True), nullable=True),
-    )
-    live_stopped_at: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column(DateTime(timezone=True), nullable=True),
-    )
-    live_error_message: Optional[str] = Field(
-        default=None,
-        sa_column=Column(Text, nullable=True),
-    )
-    # Trading account for live execution (nullable)
-    live_account_id: Optional[int] = Field(
+    # ── DATAFEED BINDING ──
+    # Connection used for market data (not for live trading account)
+    connection_id: Optional[int] = Field(
         default=None,
         sa_column=Column(
             Integer,
-            ForeignKey("accounts.id", ondelete="SET NULL"),
+            ForeignKey("connections.id", ondelete="SET NULL"),
             nullable=True,
             index=True,
         ),
-    )
-    # Runtime metrics snapshot (updated periodically)
-    live_metrics: Optional[Any] = Field(
-        default=None,
-        sa_column=Column(JSONB, nullable=True),
     )
 
     # AI Agent Manager – the agent overseeing this strategy's live execution
@@ -150,6 +119,122 @@ class Strategy(SQLModel, table=True):
         sa_relationship=relationship(
             "Chat",
             back_populates="strategy",
+            cascade="all, delete-orphan",
+        )
+    )
+
+    # One-to-many: a strategy can have multiple live sessions (history)
+    live_sessions: list["StrategyLive"] = Relationship(
+        sa_relationship=relationship(
+            "StrategyLive",
+            back_populates="strategy",
+            cascade="all, delete-orphan",
+            order_by="StrategyLive.id.desc()",
+        )
+    )
+
+    @property
+    def live(self) -> Optional["StrategyLive"]:
+        """Return the active/latest live session, if any."""
+        if not self.live_sessions:
+            return None
+        # Return first non-stopped, or the most recent
+        for sl in self.live_sessions:
+            if sl.status != LiveStatus.STOPPED.value:
+                return sl
+        return self.live_sessions[0] if self.live_sessions else None
+
+
+class StrategyLive(SQLModel, table=True):
+    """Runtime state for a live strategy execution."""
+    __tablename__ = "strategy_live"
+    __allow_unmapped__ = True
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    strategy_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("strategies.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+
+    status: str = Field(
+        default=LiveStatus.STOPPED.value,
+        sa_column=Column(String(20), nullable=False, index=True),
+    )
+    container_id: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(100), nullable=True),
+    )
+    symbol: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(30), nullable=True),
+    )
+    timeframe: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(10), nullable=True),
+    )
+    account_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("accounts.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    started_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    stopped_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    error_message: Optional[str] = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+    )
+    metrics: Optional[Any] = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+    # Relationships
+    strategy: Strategy = Relationship(
+        sa_relationship=relationship("Strategy", back_populates="live_sessions")
+    )
+
+    orders: list["LiveOrder"] = Relationship(
+        sa_relationship=relationship(
+            "LiveOrder",
+            back_populates="strategy_live",
+            cascade="all, delete-orphan",
+        )
+    )
+    trades: list["LiveTrade"] = Relationship(
+        sa_relationship=relationship(
+            "LiveTrade",
+            back_populates="strategy_live",
+            cascade="all, delete-orphan",
+        )
+    )
+    positions: list["LivePosition"] = Relationship(
+        sa_relationship=relationship(
+            "LivePosition",
+            back_populates="strategy_live",
             cascade="all, delete-orphan",
         )
     )

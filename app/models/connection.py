@@ -19,6 +19,7 @@ from sqlmodel import Field, Relationship, SQLModel
 class BrokerType(str, Enum):
     """Supported broker/exchange types."""
     IBKR = "ibkr"
+    YAHOO = "yahoo"
     BINANCE = "binance"  # future
 
 
@@ -43,7 +44,7 @@ class Connection(SQLModel, table=True):
     )
     broker_type: str = Field(
         sa_column=Column(String(30), nullable=False, index=True),
-        description="Broker type: 'ibkr', 'binance', etc.",
+        description="Broker type: 'ibkr', 'yahoo', 'binance', etc.",
     )
 
     # Connection settings (host, port, client_id, api_key, …)
@@ -66,6 +67,26 @@ class Connection(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+
+    # ── Symbol sync settings ──
+    sync_enabled: bool = Field(default=True, description="Enable automatic symbol sync")
+    sync_interval_minutes: float = Field(
+        default=1440, description="Sync interval in minutes (default: 24h)"
+    )
+    last_sync_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    last_sync_status: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(30), nullable=True),
+        description="'success', 'error', 'running', 'connected', 'not_connected'",
+    )
+    last_sync_error: Optional[str] = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+    )
+    symbols_count: int = Field(default=0, description="Number of cached symbols")
 
     # Timestamps
     created_at: datetime = Field(

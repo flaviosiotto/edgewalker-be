@@ -4,6 +4,9 @@ Live Trading Service.
 CRUD operations for live orders, trades, and positions.
 Includes startup reconciliation logic to detect stale states
 between the broker account and the local database.
+
+All operations are keyed to a StrategyLive session (strategy_live_id),
+NOT directly to a Strategy.
 """
 from __future__ import annotations
 
@@ -41,13 +44,13 @@ logger = logging.getLogger(__name__)
 
 def create_live_order(
     session: Session,
-    strategy_id: int,
+    strategy_live_id: int,
     account_id: int | None,
     payload: LiveOrderCreate,
 ) -> LiveOrder:
     """Create a new live order."""
     order = LiveOrder(
-        strategy_id=strategy_id,
+        strategy_live_id=strategy_live_id,
         account_id=account_id,
         symbol=payload.symbol,
         side=payload.side,
@@ -62,8 +65,8 @@ def create_live_order(
     session.commit()
     session.refresh(order)
     logger.info(
-        "Created live order %s: %s %s %s qty=%s (strategy=%s)",
-        order.id, order.side, order.order_type, order.symbol, order.quantity, strategy_id,
+        "Created live order %s: %s %s %s qty=%s (strategy_live=%s)",
+        order.id, order.side, order.order_type, order.symbol, order.quantity, strategy_live_id,
     )
     return order
 
@@ -96,15 +99,15 @@ def get_live_order(session: Session, order_id: int) -> LiveOrder | None:
 
 def list_live_orders(
     session: Session,
-    strategy_id: int,
+    strategy_live_id: int,
     *,
     status: str | None = None,
     limit: int = 100,
 ) -> list[LiveOrder]:
-    """List live orders for a strategy, optionally filtered by status."""
+    """List live orders for a strategy live session, optionally filtered by status."""
     stmt = (
         select(LiveOrder)
-        .where(LiveOrder.strategy_id == strategy_id)
+        .where(LiveOrder.strategy_live_id == strategy_live_id)
         .order_by(LiveOrder.created_at.desc())  # type: ignore[union-attr]
         .limit(limit)
     )
@@ -113,7 +116,7 @@ def list_live_orders(
     return list(session.exec(stmt).all())
 
 
-def list_active_orders(session: Session, strategy_id: int) -> list[LiveOrder]:
+def list_active_orders(session: Session, strategy_live_id: int) -> list[LiveOrder]:
     """List orders that are still active (pending, submitted, partially_filled)."""
     active_statuses = [
         OrderStatus.PENDING.value,
@@ -122,7 +125,7 @@ def list_active_orders(session: Session, strategy_id: int) -> list[LiveOrder]:
     ]
     stmt = (
         select(LiveOrder)
-        .where(LiveOrder.strategy_id == strategy_id)
+        .where(LiveOrder.strategy_live_id == strategy_live_id)
         .where(LiveOrder.status.in_(active_statuses))  # type: ignore[union-attr]
         .order_by(LiveOrder.created_at.desc())  # type: ignore[union-attr]
     )
@@ -136,13 +139,13 @@ def list_active_orders(session: Session, strategy_id: int) -> list[LiveOrder]:
 
 def create_live_trade(
     session: Session,
-    strategy_id: int,
+    strategy_live_id: int,
     account_id: int | None,
     payload: LiveTradeCreate,
 ) -> LiveTrade:
     """Record a live trade / fill."""
     trade = LiveTrade(
-        strategy_id=strategy_id,
+        strategy_live_id=strategy_live_id,
         account_id=account_id,
         order_id=payload.order_id,
         symbol=payload.symbol,
@@ -159,22 +162,22 @@ def create_live_trade(
     session.commit()
     session.refresh(trade)
     logger.info(
-        "Recorded live trade %s: %s %s qty=%s @%s (strategy=%s)",
-        trade.id, trade.side, trade.symbol, trade.quantity, trade.price, strategy_id,
+        "Recorded live trade %s: %s %s qty=%s @%s (strategy_live=%s)",
+        trade.id, trade.side, trade.symbol, trade.quantity, trade.price, strategy_live_id,
     )
     return trade
 
 
 def list_live_trades(
     session: Session,
-    strategy_id: int,
+    strategy_live_id: int,
     *,
     limit: int = 200,
 ) -> list[LiveTrade]:
-    """List live trades for a strategy."""
+    """List live trades for a strategy live session."""
     stmt = (
         select(LiveTrade)
-        .where(LiveTrade.strategy_id == strategy_id)
+        .where(LiveTrade.strategy_live_id == strategy_live_id)
         .order_by(LiveTrade.trade_time.desc())  # type: ignore[union-attr]
         .limit(limit)
     )
@@ -188,14 +191,14 @@ def list_live_trades(
 
 def get_open_position(
     session: Session,
-    strategy_id: int,
+    strategy_live_id: int,
     symbol: str,
     account_id: int | None = None,
 ) -> LivePosition | None:
-    """Get the open position for a strategy+symbol+account (max one by DB constraint)."""
+    """Get the open position for a strategy_live+symbol+account (max one by DB constraint)."""
     stmt = (
         select(LivePosition)
-        .where(LivePosition.strategy_id == strategy_id)
+        .where(LivePosition.strategy_live_id == strategy_live_id)
         .where(LivePosition.symbol == symbol)
         .where(LivePosition.status == PositionStatus.OPEN.value)
     )
@@ -206,17 +209,17 @@ def get_open_position(
 
 def upsert_position(
     session: Session,
-    strategy_id: int,
+    strategy_live_id: int,
     account_id: int | None,
     payload: LivePositionCreate,
 ) -> LivePosition:
-    """Create or update an open position for the strategy+symbol+account."""
-    pos = get_open_position(session, strategy_id, payload.symbol, account_id)
+    """Create or update an open position for the strategy_live+symbol+account."""
+    pos = get_open_position(session, strategy_live_id, payload.symbol, account_id)
     now = datetime.now(timezone.utc)
 
     if pos is None:
         pos = LivePosition(
-            strategy_id=strategy_id,
+            strategy_live_id=strategy_live_id,
             account_id=account_id,
             symbol=payload.symbol,
             side=payload.side,
@@ -258,15 +261,15 @@ def upsert_position(
 
 def list_positions(
     session: Session,
-    strategy_id: int,
+    strategy_live_id: int,
     *,
     status: str | None = None,
     limit: int = 100,
 ) -> list[LivePosition]:
-    """List positions for a strategy."""
+    """List positions for a strategy live session."""
     stmt = (
         select(LivePosition)
-        .where(LivePosition.strategy_id == strategy_id)
+        .where(LivePosition.strategy_live_id == strategy_live_id)
         .order_by(LivePosition.opened_at.desc())  # type: ignore[union-attr]
         .limit(limit)
     )
@@ -275,9 +278,9 @@ def list_positions(
     return list(session.exec(stmt).all())
 
 
-def list_open_positions(session: Session, strategy_id: int) -> list[LivePosition]:
-    """List all open positions for a strategy."""
-    return list_positions(session, strategy_id, status=PositionStatus.OPEN.value)
+def list_open_positions(session: Session, strategy_live_id: int) -> list[LivePosition]:
+    """List all open positions for a strategy live session."""
+    return list_positions(session, strategy_live_id, status=PositionStatus.OPEN.value)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -326,7 +329,7 @@ def validate_account_for_live(
 
 def reconcile_on_startup(
     session: Session,
-    strategy_id: int,
+    strategy_live_id: int,
     account_id: int | None,
     broker_orders: list[dict[str, Any]] | None = None,
     broker_positions: list[dict[str, Any]] | None = None,
@@ -340,7 +343,7 @@ def reconcile_on_startup(
     3. Syncs broker positions that are missing from DB
 
     Args:
-        strategy_id: The strategy being started
+        strategy_live_id: The strategy_live session being started
         account_id: The broker account
         broker_orders: Active orders from broker API
                        (list of dicts with keys: order_id, symbol, side, qty, status)
@@ -359,7 +362,7 @@ def reconcile_on_startup(
     # ── 1. Reconcile Orders ──────────────────────────────────────────
 
     # Get all active orders from DB
-    db_active_orders = list_active_orders(session, strategy_id)
+    db_active_orders = list_active_orders(session, strategy_live_id)
     broker_order_ids = {o.get("order_id") or o.get("broker_order_id") for o in broker_orders}
 
     for db_order in db_active_orders:
@@ -416,7 +419,7 @@ def reconcile_on_startup(
             broker_pos_map[sym] = bp
 
     # Check DB open positions against broker
-    db_open_positions = list_open_positions(session, strategy_id)
+    db_open_positions = list_open_positions(session, strategy_live_id)
     checked_symbols: set[str] = set()
 
     for db_pos in db_open_positions:
@@ -496,7 +499,7 @@ def reconcile_on_startup(
                 ))
                 # Create position in DB to match broker
                 new_pos = LivePosition(
-                    strategy_id=strategy_id,
+                    strategy_live_id=strategy_live_id,
                     account_id=account_id,
                     symbol=sym,
                     side=broker_side,
@@ -528,12 +531,12 @@ def reconcile_on_startup(
         summary = f"Found {len(items)} discrepancies ({', '.join(parts)}). All resolved."
 
     logger.info(
-        "Reconciliation for strategy %s (account %s): %s",
-        strategy_id, account_id, summary,
+        "Reconciliation for strategy_live %s (account %s): %s",
+        strategy_live_id, account_id, summary,
     )
 
     return ReconciliationReport(
-        strategy_id=strategy_id,
+        strategy_live_id=strategy_live_id,
         account_id=account_id,
         checked_at=now,
         items=items,

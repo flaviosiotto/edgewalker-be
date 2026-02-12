@@ -8,12 +8,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from sqlalchemy import Column, ForeignKey, Integer, String, DateTime, Float, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
+
+if TYPE_CHECKING:
+    from app.models.strategy import StrategyLive
 
 
 # ── Enums ────────────────────────────────────────────────────────────
@@ -68,10 +71,10 @@ class LiveOrder(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    strategy_id: int = Field(
+    strategy_live_id: int = Field(
         sa_column=Column(
             Integer,
-            ForeignKey("strategies.id", ondelete="CASCADE"),
+            ForeignKey("strategy_live.id", ondelete="CASCADE"),
             nullable=False,
             index=True,
         )
@@ -143,6 +146,9 @@ class LiveOrder(SQLModel, table=True):
     extra: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
 
     # Relationships
+    strategy_live: Optional["StrategyLive"] = Relationship(
+        sa_relationship=relationship("StrategyLive", back_populates="orders")
+    )
     trades: list["LiveTrade"] = Relationship(
         sa_relationship=relationship(
             "LiveTrade",
@@ -164,10 +170,10 @@ class LiveTrade(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    strategy_id: int = Field(
+    strategy_live_id: int = Field(
         sa_column=Column(
             Integer,
-            ForeignKey("strategies.id", ondelete="CASCADE"),
+            ForeignKey("strategy_live.id", ondelete="CASCADE"),
             nullable=False,
             index=True,
         )
@@ -220,6 +226,9 @@ class LiveTrade(SQLModel, table=True):
     extra: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
 
     # Relationships
+    strategy_live: Optional["StrategyLive"] = Relationship(
+        sa_relationship=relationship("StrategyLive", back_populates="trades")
+    )
     order: LiveOrder | None = Relationship(
         sa_relationship=relationship("LiveOrder", back_populates="trades")
     )
@@ -236,10 +245,10 @@ class LivePosition(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    strategy_id: int = Field(
+    strategy_live_id: int = Field(
         sa_column=Column(
             Integer,
-            ForeignKey("strategies.id", ondelete="CASCADE"),
+            ForeignKey("strategy_live.id", ondelete="CASCADE"),
             nullable=False,
             index=True,
         )
@@ -291,3 +300,8 @@ class LivePosition(SQLModel, table=True):
 
     # Extra data (broker-specific position details)
     extra: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+
+    # Relationships
+    strategy_live: Optional["StrategyLive"] = Relationship(
+        sa_relationship=relationship("StrategyLive", back_populates="positions")
+    )

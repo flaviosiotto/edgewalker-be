@@ -1,8 +1,9 @@
 """
-Symbol Sync Handler - Handles synchronization of symbols from data sources.
+Symbol Sync Handler - Handles synchronization of symbols from connections.
 
 This is the concrete implementation of BaseSyncHandler for symbol data.
-It fetches symbols from various sources and caches them in PostgreSQL.
+It fetches symbols from various sources (based on connection broker_type)
+and caches them in PostgreSQL.
 
 Note: Blocking operations (yfinance, httpx) are run in thread pool
 to avoid blocking the async event loop.
@@ -14,19 +15,19 @@ import hashlib
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import partial
 from typing import Any
 
 from sqlmodel import Session, select, delete
 
 from app.db.database import get_session_context
-from app.models.marketdata import DataSource, SymbolCache, SymbolSyncLog
+from app.models.connection import Connection
+from app.models.marketdata import SymbolCache, SymbolSyncLog
 from app.services.sync_manager import BaseSyncHandler, SyncType, FetchResult
 
 logger = logging.getLogger(__name__)
 
-# Thread pool for blocking I/O operations
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="symbol_sync_")
 
 
@@ -39,94 +40,84 @@ async def _run_blocking(func, *args, **kwargs):
 
 
 class SymbolSyncHandler(BaseSyncHandler):
-    """Handler for syncing symbols from data sources."""
-    
+    """Handler for syncing symbols from connections."""
+
     @property
     def sync_type(self) -> SyncType:
         return SyncType.SYMBOLS
-    
-    async def fetch_current_data(self, source: DataSource) -> FetchResult:
-        """Fetch symbols from the source and compute content hash."""
-        if source.source_type == "yahoo":
-            return await self._fetch_yahoo_symbols(source)
-        elif source.source_type == "ibkr":
-            return await self._fetch_ibkr_symbols(source)
+
+    async def fetch_current_data(self, conn: Connection) -> FetchResult:
+        """Fetch symbols based on connection's broker_type."""
+        if conn.broker_type == "yahoo":
+            return await self._fetch_yahoo_symbols(conn)
+        elif conn.broker_type == "ibkr":
+            return await self._fetch_ibkr_symbols(conn)
         else:
-            # Unknown source type - return empty but available
             return FetchResult(
                 available=True,
                 data=[],
                 content_hash=hashlib.sha256(b"[]").hexdigest()[:16],
             )
-    
+
     def _compute_hash(self, symbols: list[dict]) -> str:
-        """Compute content hash for change detection."""
         symbols_sorted = sorted(symbols, key=lambda x: x.get("symbol", ""))
         hash_input = json.dumps(
             [s.get("symbol") for s in symbols_sorted],
             sort_keys=True
         )
         return hashlib.sha256(hash_input.encode()).hexdigest()[:16]
-    
-    async def get_cached_hash(self, source: DataSource) -> str | None:
-        """Get the hash stored in the source config."""
-        config = source.config or {}
+
+    async def get_cached_hash(self, conn: Connection) -> str | None:
+        config = conn.config or {}
         return config.get("symbols_hash")
-    
+
     async def apply_changes(
         self,
-        source: DataSource,
+        conn: Connection,
         new_data: list[dict],
         is_full_refresh: bool,
     ) -> tuple[int, int, int]:
         """Apply symbol changes to the cache."""
         with get_session_context() as session:
-            # Refresh source from this session
-            source = session.get(DataSource, source.id)
-            
-            # Create sync log
+            conn = session.get(Connection, conn.id)
+
             sync_log = SymbolSyncLog(
-                source_id=source.id,
-                source_name=source.name,
+                connection_id=conn.id,
+                connection_name=conn.name,
                 started_at=datetime.utcnow(),
                 status="running",
                 symbols_fetched=len(new_data),
             )
             session.add(sync_log)
-            source.last_sync_status = "running"
+            conn.last_sync_status = "running"
             session.commit()
             session.refresh(sync_log)
-            
+
             try:
                 removed = 0
-                
+
                 if is_full_refresh:
-                    # Count existing before delete
                     count_stmt = select(SymbolCache).where(
-                        SymbolCache.source_id == source.id
+                        SymbolCache.connection_id == conn.id
                     )
                     removed = len(session.exec(count_stmt).all())
-                    
-                    # Delete all existing
+
                     stmt = delete(SymbolCache).where(
-                        SymbolCache.source_id == source.id
+                        SymbolCache.connection_id == conn.id
                     )
                     session.exec(stmt)
                     session.commit()
-                
-                # Upsert symbols
-                added, updated = self._upsert_symbols(session, source, new_data)
-                
-                # Update source stats
+
+                added, updated = self._upsert_symbols(session, conn, new_data)
+
                 count_stmt = select(SymbolCache).where(
-                    SymbolCache.source_id == source.id
+                    SymbolCache.connection_id == conn.id
                 )
-                source.symbols_count = len(session.exec(count_stmt).all())
-                source.last_sync_at = datetime.utcnow()
-                source.last_sync_status = "success"
-                source.last_sync_error = None
-                
-                # Update sync log
+                conn.symbols_count = len(session.exec(count_stmt).all())
+                conn.last_sync_at = datetime.now(timezone.utc)
+                conn.last_sync_status = "success"
+                conn.last_sync_error = None
+
                 sync_log.status = "success"
                 sync_log.completed_at = datetime.utcnow()
                 sync_log.symbols_added = added
@@ -135,48 +126,44 @@ class SymbolSyncHandler(BaseSyncHandler):
                 sync_log.duration_seconds = (
                     sync_log.completed_at - sync_log.started_at
                 ).total_seconds()
-                
+
                 session.commit()
-                
                 return added, updated, removed
-                
+
             except Exception as e:
                 sync_log.status = "error"
                 sync_log.error_message = str(e)
                 sync_log.completed_at = datetime.utcnow()
-                source.last_sync_status = "error"
-                source.last_sync_error = str(e)
+                conn.last_sync_status = "error"
+                conn.last_sync_error = str(e)
                 session.commit()
                 raise
-    
-    async def update_source_hash(self, source: DataSource, content_hash: str) -> None:
-        """Store the content hash in source config."""
+
+    async def update_connection_hash(self, conn: Connection, content_hash: str) -> None:
         with get_session_context() as session:
-            source = session.get(DataSource, source.id)
-            config = source.config or {}
+            conn = session.get(Connection, conn.id)
+            config = dict(conn.config or {})
             config["symbols_hash"] = content_hash
-            source.config = config
-            source.updated_at = datetime.utcnow()
+            conn.config = config
+            conn.updated_at = datetime.now(timezone.utc)
             session.commit()
-    
-    async def update_source_status(
-        self, 
-        source: DataSource, 
-        status: str, 
+
+    async def update_connection_status(
+        self,
+        conn: Connection,
+        status: str,
         message: str | None = None
     ) -> None:
-        """Update source status for skipped/error states."""
         with get_session_context() as session:
-            source = session.get(DataSource, source.id)
-            source.last_sync_status = status
-            source.last_sync_error = message
-            source.last_sync_at = datetime.utcnow()
-            source.updated_at = datetime.utcnow()
-            
-            # Create sync log for skipped state
+            conn = session.get(Connection, conn.id)
+            conn.last_sync_status = status
+            conn.last_sync_error = message
+            conn.last_sync_at = datetime.now(timezone.utc)
+            conn.updated_at = datetime.now(timezone.utc)
+
             sync_log = SymbolSyncLog(
-                source_id=source.id,
-                source_name=source.name,
+                connection_id=conn.id,
+                connection_name=conn.name,
                 started_at=datetime.utcnow(),
                 completed_at=datetime.utcnow(),
                 status=status,
@@ -189,32 +176,30 @@ class SymbolSyncHandler(BaseSyncHandler):
             )
             session.add(sync_log)
             session.commit()
-    
+
     def _upsert_symbols(
         self,
         session: Session,
-        source: DataSource,
+        conn: Connection,
         symbols: list[dict],
     ) -> tuple[int, int]:
         """Upsert symbols into cache."""
         added = 0
         updated = 0
-        
+
         for sym_data in symbols:
             symbol = sym_data.get("symbol", "")
             if not symbol:
                 continue
-            
-            # Check if exists
+
             stmt = select(SymbolCache).where(
-                SymbolCache.source_id == source.id,
+                SymbolCache.connection_id == conn.id,
                 SymbolCache.symbol == symbol,
             )
             existing = session.exec(stmt).first()
-            
-            # Build search text
+
             search_text = f"{symbol} {sym_data.get('name', '')} {sym_data.get('exchange', '')}".lower()
-            
+
             if existing:
                 existing.name = sym_data.get("name", existing.name)
                 existing.asset_type = sym_data.get("asset_type", existing.asset_type)
@@ -227,8 +212,8 @@ class SymbolSyncHandler(BaseSyncHandler):
                 updated += 1
             else:
                 new_symbol = SymbolCache(
-                    source_id=source.id,
-                    source_name=source.name,
+                    connection_id=conn.id,
+                    broker_type=conn.broker_type,
                     symbol=symbol,
                     name=sym_data.get("name", ""),
                     asset_type=sym_data.get("asset_type", "stock"),
@@ -240,32 +225,30 @@ class SymbolSyncHandler(BaseSyncHandler):
                 )
                 session.add(new_symbol)
                 added += 1
-        
+
         session.commit()
         return added, updated
-    
+
     def _fetch_yahoo_symbols_blocking(self, symbol_lists: dict, symbol_categories: dict, all_symbols: list) -> tuple[list[dict], list[str]]:
         """Blocking operation to fetch Yahoo symbols - runs in thread pool."""
         import yfinance as yf
-        
+
         results = []
         errors = []
-        
+
         try:
-            # Use yfinance to fetch all tickers at once
             tickers = yf.Tickers(" ".join(all_symbols))
-            
+
             for symbol in all_symbols:
                 try:
                     ticker = tickers.tickers.get(symbol)
                     if not ticker:
                         continue
-                    
+
                     info = ticker.info
                     if not info or info.get("regularMarketPrice") is None:
                         continue
-                    
-                    # Determine category
+
                     quote_type = info.get("quoteType", "EQUITY")
                     if quote_type == "ETF":
                         category = "etf"
@@ -273,7 +256,7 @@ class SymbolSyncHandler(BaseSyncHandler):
                         category = "index"
                     else:
                         category = symbol_categories.get(symbol, "stock")
-                    
+
                     results.append({
                         "symbol": symbol,
                         "name": info.get("shortName") or info.get("longName", ""),
@@ -292,19 +275,15 @@ class SymbolSyncHandler(BaseSyncHandler):
                 except Exception as e:
                     logger.debug(f"Failed to fetch {symbol}: {e}")
                     continue
-                    
+
         except Exception as e:
             errors.append(str(e))
             logger.warning(f"Failed to fetch from Yahoo Finance: {e}")
-        
+
         return results, errors
-    
-    async def _fetch_yahoo_symbols(self, source: DataSource) -> FetchResult:
-        """Fetch symbols from Yahoo Finance using yfinance library.
-        
-        Runs blocking yfinance operations in thread pool to avoid blocking event loop.
-        """
-        # Predefined lists of popular symbols
+
+    async def _fetch_yahoo_symbols(self, conn: Connection) -> FetchResult:
+        """Fetch symbols from Yahoo Finance using yfinance library."""
         symbol_lists = {
             "indices": ["^GSPC", "^DJI", "^IXIC", "^RUT", "^VIX", "^FTSE", "^N225", "^HSI"],
             "etfs": [
@@ -321,22 +300,19 @@ class SymbolSyncHandler(BaseSyncHandler):
                 "AMD", "INTC", "IBM", "ORCL", "QCOM", "TXN", "AMAT", "LRCX", "MU",
             ],
         }
-        
-        # Flatten all symbols
+
         all_symbols = []
         symbol_categories = {}
         for category, symbols in symbol_lists.items():
             for sym in symbols:
                 all_symbols.append(sym)
                 symbol_categories[sym] = category.rstrip("s")
-        
-        # Run blocking yfinance call in thread pool
+
         results, errors = await _run_blocking(
             self._fetch_yahoo_symbols_blocking,
             symbol_lists, symbol_categories, all_symbols
         )
-        
-        # If we got no results and had errors, source is not available
+
         if not results and errors:
             return FetchResult(
                 available=False,
@@ -344,82 +320,54 @@ class SymbolSyncHandler(BaseSyncHandler):
                 content_hash="",
                 skip_reason=f"Yahoo Finance unavailable: {errors[0]}",
             )
-        
-        # Compute content hash
+
         sorted_symbols = sorted(results, key=lambda x: x["symbol"])
         content_hash = hashlib.md5(
             json.dumps(sorted_symbols, sort_keys=True, default=str).encode()
         ).hexdigest()
-        
+
         logger.info(f"Fetched {len(results)} symbols from Yahoo Finance")
-        
-        return FetchResult(
-            available=True,
-            data=results,
-            content_hash=content_hash,
-        )
-    
-    def _check_ibkr_connection_blocking(self, host: str, port: int, client_id: int, timeout: int) -> tuple[bool, str | None]:
-        """Check IBKR connectivity via any running ibkr-gateway container."""
+        return FetchResult(available=True, data=results, content_hash=content_hash)
+
+    def _check_ibkr_connection_blocking(self, connection_id: int, timeout: int) -> tuple[bool, str | None]:
+        """Check IBKR connectivity via the connection's ibkr-gateway container."""
         try:
-            from app.services.connection_manager import get_connection_manager
             import httpx
 
-            mgr = get_connection_manager()
-            if mgr._docker:
-                containers = mgr._docker.containers.list(
-                    filters={"label": "edgewalker.type=ibkr-gateway", "status": "running"},
-                )
-                for c in containers:
-                    conn_id = c.labels.get("edgewalker.connection_id", "")
-                    if conn_id:
-                        try:
-                            resp = httpx.get(
-                                f"http://ibkr-gw-{conn_id}:8080/status",
-                                timeout=timeout,
-                            )
-                            data = resp.json()
-                            if data.get("connected"):
-                                return True, None
-                        except Exception:
-                            continue
-
-            return False, "No ibkr-gateway container is running"
+            resp = httpx.get(
+                f"http://ibkr-gw-{connection_id}:8080/status",
+                timeout=timeout,
+            )
+            data = resp.json()
+            if data.get("connected"):
+                return True, None
+            return False, "Gateway running but not connected to IBKR"
         except Exception as e:
-            return False, str(e)
-    
-    async def _fetch_ibkr_symbols(self, source: DataSource) -> FetchResult:
+            return False, f"ibkr-gateway not reachable: {e}"
+
+    async def _fetch_ibkr_symbols(self, conn: Connection) -> FetchResult:
         """Check IBKR gateway connection status.
-        
-        NOTE: IBKR doesn't have a "list all symbols" API like Yahoo.
-        Symbols are discovered on-demand through contract search.
-        
-        This sync checks if the gateway is connected and returns
-        appropriate status (connected/not_connected).
-        
-        Runs check via ibkr-gateway container in thread pool.
+
+        IBKR doesn't have a "list all symbols" API — symbols are
+        discovered on-demand through contract search.
         """
-        config = source.config or {}
-        host = config.get("host", "127.0.0.1")
-        port = config.get("port", 4001)
-        client_id = config.get("client_id", 99)  # Use dedicated client_id for health checks
+        config = conn.config or {}
         timeout = config.get("timeout_s", 5)
-        
+
         try:
-            # Run blocking IBKR connection in thread pool
             is_connected, error = await asyncio.wait_for(
                 _run_blocking(
                     self._check_ibkr_connection_blocking,
-                    host, port, client_id, timeout
+                    conn.id, timeout
                 ),
                 timeout=timeout + 5
             )
-            
+
             if is_connected:
-                logger.info(f"IBKR gateway connected at {host}:{port}")
+                logger.info(f"IBKR gateway connected for connection {conn.name}")
                 return FetchResult(
                     available=True,
-                    data=[],  # IBKR symbols are searched on-demand, not bulk loaded
+                    data=[],
                     content_hash="connected",
                 )
             else:
@@ -429,13 +377,13 @@ class SymbolSyncHandler(BaseSyncHandler):
                     content_hash="",
                     skip_reason=f"IBKR gateway not available: {error}",
                 )
-                
+
         except asyncio.TimeoutError:
             return FetchResult(
                 available=False,
                 data=[],
                 content_hash="",
-                skip_reason=f"IBKR gateway connection timeout ({host}:{port})",
+                skip_reason=f"IBKR gateway connection timeout for {conn.name}",
             )
         except Exception as e:
             return FetchResult(
@@ -446,44 +394,48 @@ class SymbolSyncHandler(BaseSyncHandler):
             )
 
 
-# Utility functions for API use
+# ─── Utility functions for API use ───────────────────────────────────────────
+
 
 def search_cached_symbols(
     query: str,
-    source_name: str | None = None,
+    broker_type: str | None = None,
+    connection_id: int | None = None,
     asset_type: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search symbols from cache."""
+    """Search symbols from cache, optionally scoped to a connection or broker_type."""
     with get_session_context() as session:
         stmt = select(SymbolCache)
-        
-        if source_name:
-            stmt = stmt.where(SymbolCache.source_name == source_name)
-        
+
+        if connection_id is not None:
+            stmt = stmt.where(SymbolCache.connection_id == connection_id)
+        elif broker_type:
+            stmt = stmt.where(SymbolCache.broker_type == broker_type)
+
         if asset_type:
             stmt = stmt.where(SymbolCache.asset_type == asset_type)
-        
+
         query_lower = query.lower()
         stmt = stmt.where(
             (SymbolCache.symbol.ilike(f"%{query}%")) |
             (SymbolCache.search_text.ilike(f"%{query_lower}%"))
         )
-        
+
         stmt = stmt.order_by(
             SymbolCache.symbol != query.upper(),
             ~SymbolCache.symbol.startswith(query.upper()),
             SymbolCache.symbol,
         )
-        
+
         stmt = stmt.limit(limit)
         results = session.exec(stmt).all()
-        
+
         return [
             {
                 "id": r.id,
-                "source_id": r.source_id,
-                "source_name": r.source_name,
+                "connection_id": r.connection_id,
+                "broker_type": r.broker_type,
                 "symbol": r.symbol,
                 "name": r.name,
                 "asset_type": r.asset_type,
@@ -504,13 +456,7 @@ def search_ibkr_symbols(
     asset_type: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search IBKR symbols live via a named connection's ibkr-gateway.
-
-    Uses the ``IBKRGatewayClient`` to call the per-Connection gateway
-    container's ``/search`` endpoint.  Falls back to the legacy direct
-    ``IBKRConnector`` if no gateway container is running.
-    """
-    from app.models.connection import Connection
+    """Search IBKR symbols live via a named connection's ibkr-gateway."""
     from app.services.connection_manager import get_connection_manager
 
     with get_session_context() as session:
@@ -527,9 +473,7 @@ def search_ibkr_symbols(
             )
 
         connection_id = connection.id
-        config = connection.config or {}
 
-    # Try the ibkr-gateway container first
     mgr = get_connection_manager()
     container = mgr._get_container(connection_id)
     if container and container.status == "running":
@@ -552,7 +496,7 @@ def search_ibkr_symbols(
                     "asset_type": s.get("asset_type", ""),
                     "exchange": s.get("exchange"),
                     "currency": s.get("currency", "USD"),
-                    "source_name": "ibkr",
+                    "broker_type": "ibkr",
                     "con_id": s.get("con_id"),
                     "extra_data": {
                         k: v for k, v in s.items()
@@ -569,5 +513,57 @@ def search_ibkr_symbols(
 
     raise RuntimeError(
         f"No ibkr-gateway container running for connection '{connection_name}'. "
+        f"Please connect first."
+    )
+
+
+def search_ibkr_symbols_by_id(
+    query: str,
+    connection_id: int,
+    asset_type: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Search IBKR symbols live via a connection's ibkr-gateway (by numeric ID)."""
+    from app.services.connection_manager import get_connection_manager
+
+    mgr = get_connection_manager()
+    container = mgr._get_container(connection_id)
+    if container and container.status == "running":
+        import httpx
+
+        url = f"http://ibkr-gw-{connection_id}:8080/search"
+        params: dict[str, str] = {"query": query}
+        if asset_type:
+            params["asset_type"] = asset_type
+
+        try:
+            resp = httpx.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            symbols = data.get("symbols", [])[:limit]
+            return [
+                {
+                    "symbol": s.get("symbol", ""),
+                    "name": s.get("name"),
+                    "asset_type": s.get("asset_type", ""),
+                    "exchange": s.get("exchange"),
+                    "currency": s.get("currency", "USD"),
+                    "broker_type": "ibkr",
+                    "con_id": s.get("con_id"),
+                    "extra_data": {
+                        k: v for k, v in s.items()
+                        if k not in ("symbol", "name", "asset_type", "exchange", "currency", "con_id")
+                    },
+                }
+                for s in symbols
+            ]
+        except Exception as e:
+            raise RuntimeError(
+                f"IBKR symbol search via gateway failed: {e}. "
+                f"Is connection {connection_id} connected?"
+            )
+
+    raise RuntimeError(
+        f"No ibkr-gateway container running for connection {connection_id}. "
         f"Please connect first."
     )

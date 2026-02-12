@@ -24,7 +24,7 @@ def create_db_and_tables():
     from app.models.n8n_chat_history import N8nChatHistory  # noqa: F401
     from app.models.strategy import Strategy, BacktestResult, BacktestTrade  # noqa: F401
     from app.models.connection import Connection, Account  # noqa: F401
-    from app.models.marketdata import DataSource, SymbolCache, SymbolSyncLog  # noqa: F401
+    from app.models.marketdata import SymbolCache, SymbolSyncLog  # noqa: F401
 
     SQLModel.metadata.create_all(engine)
 

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     
     # Market data directory (base path for partitioned datasets)
-    # Structure: <MARKETDATA_DIR>/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet
+    # Structure: <MARKETDATA_DIR>/<connection_id>-conn/<symbol>/<timeframe>/<date>/ext.parquet
     MARKETDATA_DIR: str = "/data"
     
     # Sync settings

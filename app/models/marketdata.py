@@ -1,5 +1,5 @@
 """
-Market Data Models - Data sources and symbol cache.
+Market Data Models - Symbol cache (backed by Connection).
 """
 from datetime import datetime
 from typing import Optional
@@ -8,63 +8,18 @@ from sqlmodel import SQLModel, Field, Column, JSON
 from sqlalchemy import ForeignKey, Integer
 
 
-class DataSource(SQLModel, table=True):
-    """Configuration for a market data source."""
-    
-    __tablename__ = "data_sources"
-    
-    id: int | None = Field(default=None, primary_key=True)
-    
-    # Source identification
-    name: str = Field(index=True, unique=True, description="Unique source name (e.g., 'yahoo', 'ibkr')")
-    display_name: str = Field(description="Human-readable name")
-    source_type: str = Field(description="Type: 'yahoo', 'ibkr', 'custom'")
-    
-    # Connection settings (JSON for flexibility)
-    config: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    
-    # Optional link to a broker connection (nullable for free sources like Yahoo)
-    connection_id: int | None = Field(
-        default=None,
-        sa_column=Column(Integer, ForeignKey("connections.id", ondelete="SET NULL"), nullable=True, index=True),
-    )
-    
-    # Supported features
-    supports_stocks: bool = Field(default=True)
-    supports_futures: bool = Field(default=False)
-    supports_indices: bool = Field(default=False)
-    supports_etfs: bool = Field(default=True)
-    supports_realtime: bool = Field(default=False)
-    
-    # Status
-    is_active: bool = Field(default=True)
-    is_default: bool = Field(default=False, description="Default source for symbol search")
-    
-    # Sync settings
-    sync_enabled: bool = Field(default=True, description="Enable automatic symbol sync")
-    sync_interval_minutes: float = Field(default=1440, description="Sync interval in minutes (default: 24h). Use 0.5 for 30 sec")
-    last_sync_at: datetime | None = Field(default=None)
-    last_sync_status: str | None = Field(default=None, description="'success', 'error', 'running'")
-    last_sync_error: str | None = Field(default=None)
-    symbols_count: int = Field(default=0, description="Number of cached symbols")
-    
-    # Timestamps
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-
-
 class SymbolCache(SQLModel, table=True):
-    """Cached symbol information from data sources."""
+    """Cached symbol information, scoped per Connection."""
     
     __tablename__ = "symbol_cache"
     
     id: int | None = Field(default=None, primary_key=True)
     
-    # Source reference (cascade delete when data source is deleted)
-    source_id: int = Field(
-        sa_column=Column(Integer, ForeignKey("data_sources.id", ondelete="CASCADE"), index=True)
+    # Connection reference (cascade delete when connection is deleted)
+    connection_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("connections.id", ondelete="CASCADE"), index=True)
     )
-    source_name: str = Field(index=True, description="Denormalized for faster queries")
+    broker_type: str = Field(index=True, description="Denormalized broker type for faster queries")
     
     # Symbol identification
     symbol: str = Field(index=True, description="Ticker symbol")
@@ -85,10 +40,6 @@ class SymbolCache(SQLModel, table=True):
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    
-    class Config:
-        # Composite unique constraint
-        pass
 
 
 class SymbolSyncLog(SQLModel, table=True):
@@ -98,11 +49,11 @@ class SymbolSyncLog(SQLModel, table=True):
     
     id: int | None = Field(default=None, primary_key=True)
     
-    # Source reference (cascade delete when data source is deleted)
-    source_id: int = Field(
-        sa_column=Column(Integer, ForeignKey("data_sources.id", ondelete="CASCADE"), index=True)
+    # Connection reference (cascade delete when connection is deleted)
+    connection_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("connections.id", ondelete="CASCADE"), index=True)
     )
-    source_name: str = Field(index=True)
+    connection_name: str = Field(index=True)
     
     started_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: datetime | None = Field(default=None)

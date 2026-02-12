@@ -13,7 +13,6 @@ from app.api.healthcheck import router as system_router
 from app.api.agents import router as agents_router
 from app.api.strategies import router as strategies_router
 from app.api.marketdata import router as marketdata_router
-from app.api.datasources import router as datasources_router
 from app.api.ws_marketdata import router as ws_marketdata_router
 from app.api.ws_marketdata import startup_websocket_manager, shutdown_websocket_manager
 from app.api.live import router as live_router
@@ -110,7 +109,6 @@ app.include_router(system_router)
 app.include_router(agents_router)
 app.include_router(strategies_router)
 app.include_router(marketdata_router)
-app.include_router(datasources_router)
 app.include_router(ws_marketdata_router)
 app.include_router(live_router)
 app.include_router(connections_router)

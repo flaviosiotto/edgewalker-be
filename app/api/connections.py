@@ -3,12 +3,16 @@ Connections & Accounts API Endpoints.
 
 CRUD for broker connections.  Accounts are auto-discovered when a
 connection is established — there is no manual account creation.
+
+Connection-scoped endpoints include symbol search via the connection's
+ibkr-gateway container.
 """
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlmodel import Session
 
@@ -20,6 +24,10 @@ from app.schemas.connection import (
     ConnectionListResponse,
     ConnectionRead,
     ConnectionUpdate,
+)
+from app.schemas.marketdata import (
+    AvailableSymbolsResponse,
+    AssetType,
 )
 from app.services.connection_service import (
     create_connection,
@@ -221,4 +229,70 @@ def get_account_endpoint(
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
     return AccountRead.model_validate(account)
+
+
+# ─── CONNECTION-SCOPED MARKET DATA ───
+
+
+@router.get("/{connection_id}/symbols", response_model=AvailableSymbolsResponse)
+def search_connection_symbols(
+    connection_id: int,
+    query: str = Query(
+        ...,
+        description="Search query — symbol pattern or company name (e.g., 'QQQ', 'Apple', 'NQ')",
+    ),
+    asset_type: Optional[AssetType] = Query(
+        None,
+        description="Filter by asset type: stock, futures, index, etf",
+    ),
+    limit: int = Query(50, ge=1, le=500, description="Maximum number of results"),
+    session: Session = Depends(get_session),
+):
+    """Search symbols via a connection's ibkr-gateway.
+
+    Requires the connection to be of type ``ibkr`` with a running
+    ibkr-gateway container.
+    """
+    conn = get_connection(session, connection_id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    if conn.broker_type != "ibkr":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Connection {connection_id} is of type '{conn.broker_type}', "
+                   f"symbol search requires an IBKR connection.",
+        )
+
+    from app.services.symbol_sync_handler import search_ibkr_symbols_by_id
+
+    try:
+        results = search_ibkr_symbols_by_id(
+            query=query,
+            connection_id=connection_id,
+            asset_type=asset_type.value if asset_type else None,
+            limit=limit,
+        )
+        return AvailableSymbolsResponse(
+            symbols=results,
+            source="ibkr",
+            asset_type=asset_type.value if asset_type else "all",
+            count=len(results),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.exception(f"Error searching symbols for connection {connection_id}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to search symbols: {str(e)}",
+        )
 

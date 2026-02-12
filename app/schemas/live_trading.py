@@ -53,7 +53,7 @@ class LiveOrderUpdate(BaseModel):
 class LiveOrderRead(BaseModel):
     """Response schema for a live order."""
     id: int
-    strategy_id: int
+    strategy_live_id: int
     account_id: int | None = None
     broker_order_id: str | None = None
     symbol: str
@@ -99,7 +99,7 @@ class LiveTradeCreate(BaseModel):
 class LiveTradeRead(BaseModel):
     """Response schema for a live trade."""
     id: int
-    strategy_id: int
+    strategy_live_id: int
     account_id: int | None = None
     order_id: int | None = None
     broker_trade_id: str | None = None
@@ -150,7 +150,7 @@ class LivePositionUpdate(BaseModel):
 class LivePositionRead(BaseModel):
     """Response schema for a live position."""
     id: int
-    strategy_id: int
+    strategy_live_id: int
     account_id: int | None = None
     symbol: str
     side: str
@@ -185,7 +185,7 @@ class ReconciliationItem(BaseModel):
 
 class ReconciliationReport(BaseModel):
     """Report returned after startup reconciliation."""
-    strategy_id: int
+    strategy_live_id: int
     account_id: int | None = None
     checked_at: datetime
     items: list[ReconciliationItem] = []

@@ -50,6 +50,7 @@ def create_strategy(session: Session, payload: StrategyCreate) -> Strategy:
         description=payload.description,
         definition=payload.definition,
         manager_agent_id=payload.manager_agent_id,
+        connection_id=payload.connection_id,
         created_at=now,
         updated_at=now,
     )
@@ -60,12 +61,18 @@ def create_strategy(session: Session, payload: StrategyCreate) -> Strategy:
 
 
 def list_strategies(session: Session) -> list[Strategy]:
-    stmt = select(Strategy).options(selectinload(Strategy.chats)).order_by(Strategy.id.desc())
+    stmt = select(Strategy).options(
+        selectinload(Strategy.chats),
+        selectinload(Strategy.live_sessions),
+    ).order_by(Strategy.id.desc())
     return list(session.exec(stmt).all())
 
 
 def get_strategy(session: Session, strategy_id: int) -> Strategy:
-    stmt = select(Strategy).options(selectinload(Strategy.chats)).where(Strategy.id == strategy_id)
+    stmt = select(Strategy).options(
+        selectinload(Strategy.chats),
+        selectinload(Strategy.live_sessions),
+    ).where(Strategy.id == strategy_id)
     strategy = session.exec(stmt).first()
     if not strategy:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
@@ -112,6 +119,12 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate)
             strategy.manager_agent_id = payload.manager_agent_id
         else:
             strategy.manager_agent_id = None
+
+    if payload.connection_id is not None:
+        if payload.connection_id == 0:
+            strategy.connection_id = None
+        else:
+            strategy.connection_id = payload.connection_id
 
     strategy.updated_at = datetime.now(timezone.utc)
 

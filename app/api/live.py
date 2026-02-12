@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlmodel import Session
 
 from app.db.database import get_session
-from app.models.strategy import LiveStatus
+from app.models.strategy import LiveStatus, StrategyLive
 from app.schemas.live_trading import (
     LiveOrderCreate,
     LiveOrderRead,
@@ -115,6 +115,36 @@ class RunningStrategyInfo(BaseModel):
     status: str
 
 
+# ─── HELPERS ───
+
+
+def _get_strategy_or_404(session: Session, strategy_id: int):
+    """Fetch strategy or raise 404."""
+    strategy = get_strategy(session, strategy_id)
+    if not strategy:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Strategy {strategy_id} not found",
+        )
+    return strategy
+
+
+def _get_current_live(strategy) -> StrategyLive | None:
+    """Get the current (active or latest) StrategyLive session."""
+    return strategy.live
+
+
+def _require_current_live(strategy) -> StrategyLive:
+    """Get the current StrategyLive or raise 404."""
+    sl = _get_current_live(strategy)
+    if sl is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No live session found for strategy {strategy.id}",
+        )
+    return sl
+
+
 # ─── ENDPOINTS ───
 
 
@@ -134,66 +164,69 @@ def start_live_strategy(
     
     The container is routed via Traefik at /api/runners/{strategy_id}/
     """
-    # Verify strategy exists
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Strategy {strategy_id} not found",
-        )
+    strategy = _get_strategy_or_404(session, strategy_id)
     
-    # Check if already running
-    if strategy.live_status == LiveStatus.RUNNING.value:
+    # Check if already running via current_live
+    current = _get_current_live(strategy)
+    if current and current.status == LiveStatus.RUNNING.value:
         return LiveStartResponse(
             status="already_running",
-            container_id=strategy.live_container_id,
-            symbol=strategy.live_symbol,
-            timeframe=strategy.live_timeframe,
+            container_id=current.container_id,
+            symbol=current.symbol,
+            timeframe=current.timeframe,
             message="Strategy is already running",
         )
     
-    # Validate account if provided
+    # Account is mandatory for live trading
+    if request.account_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="account_id è obbligatorio per il live trading",
+        )
+    
+    # Validate account
     account_config: dict[str, Any] | None = None
     broker_type: str | None = None
-    if request.account_id is not None:
-        try:
-            account, connection = validate_account_for_live(session, request.account_id)
-            account_config = {
-                "account_id": account.account_id,  # broker-specific code (e.g. DU1234567)
-                "db_account_id": account.id,
-                "connection_id": connection.id,
-                "connection_name": connection.name,
-                **(connection.config or {}),
-            }
-            broker_type = connection.broker_type
-        except ValueError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(e),
-            )
+    try:
+        account, connection = validate_account_for_live(session, request.account_id)
+        account_config = {
+            "account_id": account.account_id,
+            "db_account_id": account.id,
+            "connection_id": connection.id,
+            "connection_name": connection.name,
+            **(connection.config or {}),
+        }
+        broker_type = connection.broker_type
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
     
     try:
-        # Update status to starting
-        strategy.live_status = LiveStatus.STARTING.value
-        strategy.live_symbol = request.symbol
-        strategy.live_timeframe = request.timeframe
-        strategy.live_account_id = request.account_id
-        strategy.live_error_message = None
-        session.add(strategy)
+        # Create a new StrategyLive session
+        sl = StrategyLive(
+            strategy_id=strategy_id,
+            status=LiveStatus.STARTING.value,
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            account_id=request.account_id,
+        )
+        session.add(sl)
         session.commit()
+        session.refresh(sl)
         
         # Run reconciliation before starting
-        if request.account_id is not None:
-            recon_report = reconcile_on_startup(
-                session,
-                strategy_id=strategy_id,
-                account_id=request.account_id,
+        recon_report = reconcile_on_startup(
+            session,
+            strategy_live_id=sl.id,
+            account_id=request.account_id,
+        )
+        if recon_report.items:
+            logger.info(
+                "Pre-start reconciliation for strategy_live %s: %s",
+                sl.id, recon_report.summary,
             )
-            if recon_report.items:
-                logger.info(
-                    "Pre-start reconciliation for strategy %s: %s",
-                    strategy_id, recon_report.summary,
-                )
         
         # Resolve manager agent webhook URL for the runner
         _mgr_webhook: str | None = None
@@ -203,7 +236,6 @@ def start_live_strategy(
             _mgr_agent = session.get(Agent, strategy.manager_agent_id)
             if _mgr_agent:
                 _mgr_webhook = _mgr_agent.n8n_webhook
-            # Pre-create the live chat so the runner has its session_id
             _live_chat = get_or_create_live_chat(session, strategy_id)
             _mgr_session_id = _live_chat.n8n_session_id
 
@@ -221,10 +253,9 @@ def start_live_strategy(
         )
         
         if result["status"] == "already_running":
-            # Sync DB with actual container state
-            strategy.live_status = LiveStatus.RUNNING.value
-            strategy.live_container_id = result.get("container_id")
-            session.add(strategy)
+            sl.status = LiveStatus.RUNNING.value
+            sl.container_id = result.get("container_id")
+            session.add(sl)
             session.commit()
             
             return LiveStartResponse(
@@ -234,15 +265,14 @@ def start_live_strategy(
                 message="Strategy is already running",
             )
         
-        # Update DB with running state
-        strategy.live_status = LiveStatus.RUNNING.value
-        strategy.live_container_id = result.get("container_id")
-        strategy.live_started_at = datetime.now(timezone.utc)
-        strategy.live_stopped_at = None
-        session.add(strategy)
+        # Update StrategyLive with running state
+        sl.status = LiveStatus.RUNNING.value
+        sl.container_id = result.get("container_id")
+        sl.started_at = datetime.now(timezone.utc)
+        session.add(sl)
         session.commit()
         
-        # Notify the manager agent about the live start
+        # Notify manager agent
         try:
             notify_manager_live_start(
                 session=session,
@@ -268,11 +298,12 @@ def start_live_strategy(
     except HTTPException:
         raise
     except Exception as e:
-        # Update DB with error state
-        strategy.live_status = LiveStatus.ERROR.value
-        strategy.live_error_message = str(e)
-        session.add(strategy)
-        session.commit()
+        # Update StrategyLive with error state
+        if sl and sl.id:
+            sl.status = LiveStatus.ERROR.value
+            sl.error_message = str(e)
+            session.add(sl)
+            session.commit()
         
         logger.exception(f"Failed to start strategy {strategy_id}")
         raise HTTPException(
@@ -292,18 +323,12 @@ def stop_live_strategy(
     
     Stops and optionally removes the Docker container.
     """
-    # Verify strategy exists
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Strategy {strategy_id} not found",
-        )
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _require_current_live(strategy)
     
     try:
-        # Update status to stopping
-        strategy.live_status = LiveStatus.STOPPING.value
-        session.add(strategy)
+        sl.status = LiveStatus.STOPPING.value
+        session.add(sl)
         session.commit()
         
         result = live_runner_service.stop_strategy(
@@ -311,11 +336,10 @@ def stop_live_strategy(
             remove=remove,
         )
         
-        # Update DB with stopped state
-        strategy.live_status = LiveStatus.STOPPED.value
-        strategy.live_container_id = None
-        strategy.live_stopped_at = datetime.now(timezone.utc)
-        session.add(strategy)
+        sl.status = LiveStatus.STOPPED.value
+        sl.container_id = None
+        sl.stopped_at = datetime.now(timezone.utc)
+        session.add(sl)
         session.commit()
         
         if result["status"] == "not_found":
@@ -332,10 +356,9 @@ def stop_live_strategy(
     except HTTPException:
         raise
     except Exception as e:
-        # Update DB with error state
-        strategy.live_status = LiveStatus.ERROR.value
-        strategy.live_error_message = str(e)
-        session.add(strategy)
+        sl.status = LiveStatus.ERROR.value
+        sl.error_message = str(e)
+        session.add(sl)
         session.commit()
         
         logger.exception(f"Failed to stop strategy {strategy_id}")
@@ -355,34 +378,28 @@ def get_live_strategy_status(
     
     Returns both database state and container state.
     """
-    # Get strategy from DB
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Strategy {strategy_id} not found",
-        )
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _get_current_live(strategy)
     
     # Get container status
     container_info = live_runner_service.get_strategy_status(strategy_id)
     
     # Sync DB if container state differs
-    if container_info["status"] == "not_found" and strategy.live_status == LiveStatus.RUNNING.value:
-        # Container died unexpectedly
-        strategy.live_status = LiveStatus.ERROR.value
-        strategy.live_error_message = "Container not found (crashed or removed)"
-        strategy.live_container_id = None
-        session.add(strategy)
+    if sl and container_info["status"] == "not_found" and sl.status == LiveStatus.RUNNING.value:
+        sl.status = LiveStatus.ERROR.value
+        sl.error_message = "Container not found (crashed or removed)"
+        sl.container_id = None
+        session.add(sl)
         session.commit()
     
     return LiveStatusResponse(
-        live_status=strategy.live_status,
-        symbol=strategy.live_symbol,
-        timeframe=strategy.live_timeframe,
-        started_at=strategy.live_started_at.isoformat() if strategy.live_started_at else None,
-        stopped_at=strategy.live_stopped_at.isoformat() if strategy.live_stopped_at else None,
-        error_message=strategy.live_error_message,
-        metrics=strategy.live_metrics,
+        live_status=sl.status if sl else LiveStatus.STOPPED.value,
+        symbol=sl.symbol if sl else None,
+        timeframe=sl.timeframe if sl else None,
+        started_at=sl.started_at.isoformat() if sl and sl.started_at else None,
+        stopped_at=sl.stopped_at.isoformat() if sl and sl.stopped_at else None,
+        error_message=sl.error_message if sl else None,
+        metrics=sl.metrics if sl else None,
         container_status=container_info.get("status"),
         container_id=container_info.get("container_id"),
         container_name=container_info.get("container_name"),
@@ -454,10 +471,11 @@ def list_strategy_orders(
     session: Session = Depends(get_session),
 ):
     """List live orders for a strategy."""
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
-    orders = list_live_orders(session, strategy_id, status=status, limit=limit)
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _get_current_live(strategy)
+    if not sl:
+        return []
+    orders = list_live_orders(session, sl.id, status=status, limit=limit)
     return [LiveOrderRead.model_validate(o) for o in orders]
 
 
@@ -467,10 +485,11 @@ def list_strategy_active_orders(
     session: Session = Depends(get_session),
 ):
     """List active (pending/submitted/partially_filled) orders for a strategy."""
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
-    orders = list_active_orders(session, strategy_id)
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _get_current_live(strategy)
+    if not sl:
+        return []
+    orders = list_active_orders(session, sl.id)
     return [LiveOrderRead.model_validate(o) for o in orders]
 
 
@@ -481,10 +500,9 @@ def create_strategy_order(
     session: Session = Depends(get_session),
 ):
     """Create a live order for a strategy (typically called by the runner)."""
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
-    order = create_live_order(session, strategy_id, strategy.live_account_id, payload)
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _require_current_live(strategy)
+    order = create_live_order(session, sl.id, sl.account_id, payload)
     return LiveOrderRead.model_validate(order)
 
 
@@ -525,10 +543,11 @@ def list_strategy_trades(
     session: Session = Depends(get_session),
 ):
     """List live trades / fills for a strategy."""
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
-    trades = list_live_trades(session, strategy_id, limit=limit)
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _get_current_live(strategy)
+    if not sl:
+        return []
+    trades = list_live_trades(session, sl.id, limit=limit)
     return [LiveTradeRead.model_validate(t) for t in trades]
 
 
@@ -539,10 +558,9 @@ def create_strategy_trade(
     session: Session = Depends(get_session),
 ):
     """Record a live trade / fill (typically called by the runner)."""
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
-    trade = create_live_trade(session, strategy_id, strategy.live_account_id, payload)
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _require_current_live(strategy)
+    trade = create_live_trade(session, sl.id, sl.account_id, payload)
     return LiveTradeRead.model_validate(trade)
 
 
@@ -559,10 +577,11 @@ def list_strategy_positions(
     session: Session = Depends(get_session),
 ):
     """List live positions for a strategy."""
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
-    positions = list_positions(session, strategy_id, status=status, limit=limit)
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _get_current_live(strategy)
+    if not sl:
+        return []
+    positions = list_positions(session, sl.id, status=status, limit=limit)
     return [LivePositionRead.model_validate(p) for p in positions]
 
 
@@ -572,10 +591,11 @@ def list_strategy_open_positions(
     session: Session = Depends(get_session),
 ):
     """List open positions for a strategy."""
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
-    positions = list_open_positions(session, strategy_id)
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _get_current_live(strategy)
+    if not sl:
+        return []
+    positions = list_open_positions(session, sl.id)
     return [LivePositionRead.model_validate(p) for p in positions]
 
 
@@ -586,10 +606,9 @@ def upsert_strategy_position(
     session: Session = Depends(get_session),
 ):
     """Create or update a position for a strategy (typically called by the runner)."""
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
-    position = upsert_position(session, strategy_id, strategy.live_account_id, payload)
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _require_current_live(strategy)
+    position = upsert_position(session, sl.id, sl.account_id, payload)
     return LivePositionRead.model_validate(position)
 
 
@@ -612,14 +631,13 @@ def reconcile_strategy(
     Optionally accepts broker state; if not provided, reconciles
     only local DB state (cancels stale orders, etc.).
     """
-    strategy = get_strategy(session, strategy_id)
-    if not strategy:
-        raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _require_current_live(strategy)
 
     report = reconcile_on_startup(
         session,
-        strategy_id=strategy_id,
-        account_id=strategy.live_account_id,
+        strategy_live_id=sl.id,
+        account_id=sl.account_id,
         broker_orders=broker_orders,
         broker_positions=broker_positions,
     )

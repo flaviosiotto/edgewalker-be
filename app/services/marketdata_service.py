@@ -4,11 +4,11 @@ Market Data Service - OHLCV data provider with indicators.
 Loads historical bar data from partitioned parquet datasets and computes technical indicators.
 
 Partitioned dataset structure:
-    data/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet
+    data/<connection_id>-conn/<symbol>/<timeframe>/<date>/ext.parquet
     
 Example:
-    data/ibkr-ohlcv/QQQ/5m/2026-01-26/part-0000.parquet
-    data/yahoo-ohlcv/SPY/5m/2026-01-26/part-0000.parquet
+    data/1-conn/QQQ/5m/2026-01-26/ext.parquet
+    data/2-conn/SPY/5m/2026-01-26/rth.parquet
 """
 from __future__ import annotations
 
@@ -86,22 +86,22 @@ def _find_partitioned_data(
     timeframe: str,
     start_date: date | None = None,
     end_date: date | None = None,
-    source: str | None = None,
+    connection_id: str | int | None = None,
     extended_hours: bool = False,
 ) -> list[Path]:
     """Find partitioned parquet files for a symbol/timeframe/date range.
     
     Directory structure:
-        data/<source>-ohlcv/<symbol>/<timeframe>/<date>/rth.parquet   (RTH only)
-        data/<source>-ohlcv/<symbol>/<timeframe>/<date>/ext.parquet   (extended hours)
-        data/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet  (legacy)
+        data/<connection_id>-conn/<symbol>/<timeframe>/<date>/rth.parquet   (RTH only)
+        data/<connection_id>-conn/<symbol>/<timeframe>/<date>/ext.parquet   (extended hours)
+        data/<connection_id>-conn/<symbol>/<timeframe>/<date>/part-0000.parquet  (legacy)
     
     Args:
         symbol: Trading symbol (e.g., 'QQQ')
         timeframe: Target timeframe (1m, 5m, 15m, 1h, 1d)
         start_date: Start date filter
         end_date: End date filter
-        source: Data source (ibkr, yahoo). If None, searches all sources.
+        connection_id: Connection ID scoping data root. If None, searches all connections.
         extended_hours: If True select ext.parquet, else rth.parquet.
         
     Returns:
@@ -111,21 +111,21 @@ def _find_partitioned_data(
     tf_canonical = _normalize_timeframe(timeframe)
     monthly = _is_monthly_timeframe(tf_canonical)
     
-    # Find available sources
-    sources_to_check = []
-    if source:
-        sources_to_check = [source.lower()]
+    # Find available connection roots
+    conn_roots: list[str] = []
+    if connection_id is not None:
+        conn_roots = [str(connection_id)]
     else:
-        # Auto-detect: check ibkr first, then yahoo
-        for src in ["ibkr", "yahoo"]:
-            src_dir = EDGEWALKER_DATA_DIR / f"{src}-ohlcv"
-            if src_dir.exists():
-                sources_to_check.append(src)
+        # Auto-detect: scan for *-conn directories
+        if EDGEWALKER_DATA_DIR.exists():
+            for entry in sorted(EDGEWALKER_DATA_DIR.iterdir()):
+                if entry.is_dir() and entry.name.endswith("-conn"):
+                    conn_roots.append(entry.name.removesuffix("-conn"))
     
     parquet_files = []
     
-    for src in sources_to_check:
-        tf_dir = EDGEWALKER_DATA_DIR / f"{src}-ohlcv" / symbol_upper / tf_canonical
+    for conn in conn_roots:
+        tf_dir = EDGEWALKER_DATA_DIR / f"{conn}-conn" / symbol_upper / tf_canonical
         
         if not tf_dir.exists():
             continue
@@ -187,7 +187,7 @@ def load_ohlcv_partitioned(
     start_date: date | None = None,
     end_date: date | None = None,
     timeframe: str = "5m",
-    source: str | None = None,
+    connection_id: str | int | None = None,
     extended_hours: bool = False,
 ) -> pd.DataFrame:
     """Load OHLCV data from partitioned parquet files.
@@ -197,21 +197,21 @@ def load_ohlcv_partitioned(
         start_date: Start date filter (inclusive)
         end_date: End date filter (inclusive)
         timeframe: Target timeframe (1m, 5m, 15m, 1h, 1d)
-        source: Data source (ibkr, yahoo). If None, auto-detects.
+        connection_id: Connection ID scoping data root. If None, auto-detects.
         extended_hours: If True load ext.parquet, else rth.parquet.
     
     Returns:
         DataFrame with columns: ts, open, high, low, close, volume
     """
     parquet_files = _find_partitioned_data(
-        symbol, timeframe, start_date, end_date, source, extended_hours
+        symbol, timeframe, start_date, end_date, connection_id, extended_hours
     )
     
     if not parquet_files:
         raise MarketDataError(
             f"No partitioned data found for symbol '{symbol}' timeframe '{timeframe}' "
             f"in {EDGEWALKER_DATA_DIR}. "
-            f"Expected structure: <source>-ohlcv/{symbol.upper()}/{_normalize_timeframe(timeframe)}/<date>/{{rth|ext}}.parquet"
+            f"Expected structure: <connection_id>-conn/{symbol.upper()}/{_normalize_timeframe(timeframe)}/<date>/{{rth|ext}}.parquet"
         )
     
     logger.info(f"Loading {len(parquet_files)} partition files for {symbol}/{timeframe}")
@@ -697,13 +697,13 @@ def get_ohlc_history(
     end_date: date | None = None,
     timeframe: str = "5m",
     indicators: list[dict[str, Any]] | list[str] | None = None,
-    source: str | None = None,
+    connection_id: str | int | None = None,
     extended_hours: bool = False,
 ) -> dict[str, Any]:
     """Get OHLC history with optional indicators from partitioned dataset.
     
     Reads from partitioned parquet structure:
-        data/<source>-ohlcv/<symbol>/<timeframe>/<date>/part-0000.parquet
+        data/<connection_id>-conn/<symbol>/<timeframe>/<date>/ext.parquet
     
     Args:
         symbol: Trading symbol
@@ -711,7 +711,7 @@ def get_ohlc_history(
         end_date: End date filter
         timeframe: Bar timeframe (1m, 5m, 15m, 1h, 1d)
         indicators: List of indicator configs or legacy string specs
-        source: Data source (ibkr, yahoo). If None, auto-detects.
+        connection_id: Connection ID scoping data root. If None, auto-detects.
         extended_hours: If True, include pre/after-market bars.
     
     Returns:
@@ -724,7 +724,7 @@ def get_ohlc_history(
         }
     """
     df = load_ohlcv_partitioned(
-        symbol, start_date, end_date, timeframe, source, extended_hours
+        symbol, start_date, end_date, timeframe, connection_id, extended_hours
     )
 
     # Filter to Regular Trading Hours unless extended_hours is requested.

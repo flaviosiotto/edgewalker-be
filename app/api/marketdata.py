@@ -19,7 +19,6 @@ from app.schemas.marketdata import (
     AvailableSymbolsResponse,
     IndicatorsListResponse,
     IndicatorInfo,
-    DataSourceType,
     AssetType,
 )
 from app.services.marketdata_service import (
@@ -40,10 +39,6 @@ router = APIRouter(prefix="/marketdata", tags=["Market Data"])
 @router.get("/ohlc-history", response_model=OHLCHistoryResponse)
 def get_ohlc_history_endpoint(
     symbol: str = Query(..., description="Trading symbol (e.g., 'QQQ', 'SPY', 'NQ')"),
-    source: DataSourceType = Query(
-        DataSourceType.YAHOO,
-        description="Data source: ibkr (Interactive Brokers) or yahoo (Yahoo Finance)"
-    ),
     asset_type: AssetType = Query(
         AssetType.STOCK,
         description="Asset type: stock, futures, index, etf"
@@ -67,13 +62,16 @@ def get_ohlc_history_endpoint(
         False,
         description="Include pre/after-market data. False = RTH only (09:30-16:00 ET)."
     ),
+    connection_id: Optional[int] = Query(
+        None,
+        description="Connection ID scoping data storage. If None, auto-detects from available data."
+    ),
 ):
     """
     Get OHLC history with optional technical indicators.
     
-    **Sources:**
-    - `yahoo`: Free Yahoo Finance data (limited history for intraday)
-    - `ibkr`: Interactive Brokers (requires connection)
+    Data source (IBKR vs Yahoo) is auto-detected from the connection_id
+    by the datasource-historical service.
     
     **Asset Types:**
     - `stock`: Equities (e.g., AAPL, MSFT)
@@ -115,7 +113,7 @@ def get_ohlc_history_endpoint(
             end_date=end_date,
             timeframe=timeframe,
             indicators=indicator_list,
-            source=source.value,
+            connection_id=str(connection_id) if connection_id is not None else None,
             extended_hours=extended_hours,
         )
         return result
@@ -138,74 +136,72 @@ def search_symbols_endpoint(
         ...,
         description="Search query - symbol pattern or company name (e.g., 'QQQ', 'Apple', 'NQ')"
     ),
-    source: Optional[DataSourceType] = Query(
+    connection_id: Optional[int] = Query(
         None,
-        description="Filter by data source: ibkr or yahoo (default: search all)"
+        description=(
+            "Connection ID to scope the search. "
+            "For IBKR connections, performs a live search via the gateway. "
+            "For Yahoo connections, searches that connection's cached symbols. "
+            "If omitted, searches all cached symbols."
+        ),
     ),
     asset_type: Optional[AssetType] = Query(
         None,
         description="Filter by asset type: stock, futures, index, etf"
     ),
     limit: int = Query(50, ge=1, le=500, description="Maximum number of results"),
-    connection: Optional[str] = Query(
-        None,
-        description=(
-            "Connection name to use for live IBKR symbol search. "
-            "Required when source=ibkr to search symbols directly from the IBKR gateway."
-        ),
-    ),
 ):
     """
     Search for available symbols.
     
-    **Sources:**
-    - `yahoo`: Searches local symbol cache (auto-synced in background)
-    - `ibkr`: Searches **live** from IBKR gateway via `reqMatchingSymbols`.
-      Requires a `connection` parameter with the name of a configured IBKR connection.
-    - `None`: Search local cache across all sources
+    When ``connection_id`` points to an IBKR connection with a running
+    gateway container, the search is done **live** via ``reqMatchingSymbols``.
+    Otherwise, results come from the local symbol cache.
     
     **Examples:**
-    - `/marketdata/symbols?query=QQQ` - Search QQQ in local cache
-    - `/marketdata/symbols?query=Apple&asset_type=stock` - Search Apple stocks
-    - `/marketdata/symbols?query=NQ&source=ibkr&connection=my-ibkr` - Live search NQ on IBKR
+    - ``/marketdata/symbols?query=QQQ`` – Search all cached symbols
+    - ``/marketdata/symbols?query=Apple&asset_type=stock`` – Search Apple stocks
+    - ``/marketdata/symbols?query=NQ&connection_id=1`` – Live search NQ on IBKR connection 1
     """
     try:
-        # IBKR live search via connection
-        if source == DataSourceType.IBKR:
-            if not connection:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Parameter 'connection' is required when source=ibkr. "
-                           "Provide the name of a configured IBKR connection.",
+        # If connection_id is provided, check if it's an IBKR connection for live search
+        if connection_id is not None:
+            from app.models.connection import Connection
+            from app.db.database import get_session_context
+            from sqlmodel import select as sql_select
+
+            with get_session_context() as session:
+                conn = session.get(Connection, connection_id)
+
+            if conn and conn.broker_type == "ibkr":
+                from app.services.symbol_sync_handler import search_ibkr_symbols_by_id
+
+                results = search_ibkr_symbols_by_id(
+                    query=query,
+                    connection_id=connection_id,
+                    asset_type=asset_type.value if asset_type else None,
+                    limit=limit,
                 )
-            from app.services.symbol_sync_handler import search_ibkr_symbols
+                return AvailableSymbolsResponse(
+                    symbols=results,
+                    source="ibkr",
+                    asset_type=asset_type.value if asset_type else "all",
+                    count=len(results),
+                )
 
-            results = search_ibkr_symbols(
-                query=query,
-                connection_name=connection,
-                asset_type=asset_type.value if asset_type else None,
-                limit=limit,
-            )
-            return AvailableSymbolsResponse(
-                symbols=results,
-                source="ibkr",
-                asset_type=asset_type.value if asset_type else "all",
-                count=len(results),
-            )
-
-        # Local cache search (yahoo / all)
+        # Local cache search (all connections or specific one)
         from app.services.symbol_sync_handler import search_cached_symbols
         
         results = search_cached_symbols(
             query=query,
-            source_name=source.value if source else None,
+            connection_id=connection_id,
             asset_type=asset_type.value if asset_type else None,
             limit=limit,
         )
         
         return AvailableSymbolsResponse(
             symbols=results,
-            source=source.value if source else "all",
+            source="cache",
             asset_type=asset_type.value if asset_type else "all",
             count=len(results),
         )
