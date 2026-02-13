@@ -203,6 +203,12 @@ class StrategyLive(SQLModel, table=True):
         sa_column=Column(JSONB, nullable=True),
     )
 
+    # UI layout persistence (grid widget positions, chart settings)
+    layout_config: Optional[Any] = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
+
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),

@@ -109,6 +109,17 @@ class RunningStrategyInfo(BaseModel):
     status: str
 
 
+class LayoutConfigUpdate(BaseModel):
+    """Schema for updating the layout_config field."""
+    layout_config: dict[str, Any]
+
+
+class LiveLayoutResponse(BaseModel):
+    """Response after updating live session layout."""
+    live_id: int
+    layout_config: dict[str, Any] | None = None
+
+
 # ─── HELPERS ───
 
 
@@ -645,6 +656,26 @@ def reconcile_session(
         broker_positions=broker_positions,
     )
     return report
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LAYOUT PERSISTENCE
+# ═════════════════════════════════════════════════════════════════════
+
+
+@router.patch("/sessions/{live_id}/layout", response_model=LiveLayoutResponse)
+def update_live_layout_endpoint(
+    live_id: int,
+    payload: LayoutConfigUpdate,
+    session: Session = Depends(get_session),
+):
+    """Update only the UI layout configuration for a live session."""
+    from app.services.strategy_service import update_live_layout
+    sl = update_live_layout(session, live_id, payload)
+    return LiveLayoutResponse(
+        live_id=sl.id,
+        layout_config=sl.layout_config,
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════

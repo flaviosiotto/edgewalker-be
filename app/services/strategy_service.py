@@ -12,7 +12,7 @@ from sqlmodel import Session, select
 
 from app.models.agent import Agent, Chat
 from app.models.n8n_chat_history import N8nChatHistory
-from app.models.strategy import Strategy, BacktestResult, BacktestTrade, BacktestStatus
+from app.models.strategy import Strategy, StrategyLive, BacktestResult, BacktestTrade, BacktestStatus
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyUpdate,
@@ -409,6 +409,23 @@ def update_backtest_layout(
     session.commit()
     session.refresh(backtest)
     return backtest
+
+
+def update_live_layout(
+    session: Session, live_id: int, payload: LayoutConfigUpdate
+) -> StrategyLive:
+    """Update only the layout_config of a live session."""
+    sl = session.get(StrategyLive, live_id)
+    if not sl:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Live session {live_id} not found",
+        )
+    sl.layout_config = payload.layout_config
+    session.add(sl)
+    session.commit()
+    session.refresh(sl)
+    return sl
 
 
 def create_trade(session: Session, backtest_id: int, payload: TradeCreate) -> BacktestTrade:

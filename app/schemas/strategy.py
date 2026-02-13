@@ -26,6 +26,7 @@ class StrategyLiveRead(BaseModel):
     stopped_at: Optional[datetime] = None
     error_message: Optional[str] = None
     metrics: Optional[dict[str, Any]] = None
+    layout_config: Optional[dict[str, Any]] = None
     created_at: datetime
     updated_at: datetime
 
