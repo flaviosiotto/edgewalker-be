@@ -17,20 +17,14 @@ from sqlmodel import Session
 from app.db.database import get_session
 from app.models.strategy import LiveStatus, StrategyLive
 from app.schemas.live_trading import (
-    LiveOrderCreate,
     LiveOrderRead,
     LiveOrderUpdate,
-    LivePositionCreate,
     LivePositionRead,
-    LivePositionUpdate,
-    LiveTradeCreate,
     LiveTradeRead,
     ReconciliationReport,
 )
 from app.services.live_runner_service import live_runner_service
 from app.services.live_trading_service import (
-    create_live_order,
-    create_live_trade,
     get_live_order,
     list_active_orders,
     list_live_orders,
@@ -39,7 +33,6 @@ from app.services.live_trading_service import (
     list_positions,
     reconcile_on_startup,
     update_live_order,
-    upsert_position,
     validate_account_for_live,
 )
 from app.services.strategy_service import get_strategy
@@ -79,6 +72,7 @@ class LiveStartResponse(BaseModel):
 class LiveStatusResponse(BaseModel):
     """Status of a live strategy runner."""
     # Database state
+    live_id: int | None = None
     live_status: str
     symbol: str | None = None
     timeframe: str | None = None
@@ -141,6 +135,17 @@ def _require_current_live(strategy) -> StrategyLive:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No live session found for strategy {strategy.id}",
+        )
+    return sl
+
+
+def _get_live_or_404(session: Session, live_id: int) -> StrategyLive:
+    """Fetch a StrategyLive by ID or raise 404."""
+    sl = session.get(StrategyLive, live_id)
+    if sl is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Live session {live_id} not found",
         )
     return sl
 
@@ -250,6 +255,7 @@ def start_live_strategy(
             broker_type=broker_type,
             manager_webhook_url=_mgr_webhook,
             manager_chat_session_id=_mgr_session_id,
+            strategy_live_id=sl.id,
         )
         
         if result["status"] == "already_running":
@@ -393,6 +399,7 @@ def get_live_strategy_status(
         session.commit()
     
     return LiveStatusResponse(
+        live_id=sl.id if sl else None,
         live_status=sl.status if sl else LiveStatus.STOPPED.value,
         symbol=sl.symbol if sl else None,
         timeframe=sl.timeframe if sl else None,
@@ -459,51 +466,32 @@ def list_running_strategies():
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LIVE ORDERS
+# LIVE ORDERS  (read-only — submission via runner: POST /api/runners/{id}/orders)
 # ═════════════════════════════════════════════════════════════════════
 
 
-@router.get("/strategies/{strategy_id}/orders", response_model=list[LiveOrderRead])
-def list_strategy_orders(
-    strategy_id: int,
+@router.get("/sessions/{live_id}/orders", response_model=list[LiveOrderRead])
+def list_session_orders(
+    live_id: int,
     status: str | None = Query(None, description="Filter by order status"),
     limit: int = Query(100, ge=1, le=1000),
     session: Session = Depends(get_session),
 ):
-    """List live orders for a strategy."""
-    strategy = _get_strategy_or_404(session, strategy_id)
-    sl = _get_current_live(strategy)
-    if not sl:
-        return []
-    orders = list_live_orders(session, sl.id, status=status, limit=limit)
+    """List live orders for a session."""
+    _get_live_or_404(session, live_id)
+    orders = list_live_orders(session, live_id, status=status, limit=limit)
     return [LiveOrderRead.model_validate(o) for o in orders]
 
 
-@router.get("/strategies/{strategy_id}/orders/active", response_model=list[LiveOrderRead])
-def list_strategy_active_orders(
-    strategy_id: int,
+@router.get("/sessions/{live_id}/orders/active", response_model=list[LiveOrderRead])
+def list_session_active_orders(
+    live_id: int,
     session: Session = Depends(get_session),
 ):
-    """List active (pending/submitted/partially_filled) orders for a strategy."""
-    strategy = _get_strategy_or_404(session, strategy_id)
-    sl = _get_current_live(strategy)
-    if not sl:
-        return []
-    orders = list_active_orders(session, sl.id)
+    """List active (pending/submitted/partially_filled) orders for a session."""
+    _get_live_or_404(session, live_id)
+    orders = list_active_orders(session, live_id)
     return [LiveOrderRead.model_validate(o) for o in orders]
-
-
-@router.post("/strategies/{strategy_id}/orders", response_model=LiveOrderRead, status_code=201)
-def create_strategy_order(
-    strategy_id: int,
-    payload: LiveOrderCreate,
-    session: Session = Depends(get_session),
-):
-    """Create a live order for a strategy (typically called by the runner)."""
-    strategy = _get_strategy_or_404(session, strategy_id)
-    sl = _require_current_live(strategy)
-    order = create_live_order(session, sl.id, sl.account_id, payload)
-    return LiveOrderRead.model_validate(order)
 
 
 @router.patch("/orders/{order_id}", response_model=LiveOrderRead)
@@ -512,7 +500,7 @@ def update_order(
     payload: LiveOrderUpdate,
     session: Session = Depends(get_session),
 ):
-    """Update a live order (status, fill info, etc.)."""
+    """Update a live order (status, fill info — manual corrections)."""
     order = update_live_order(session, order_id, payload)
     if order is None:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
@@ -532,36 +520,20 @@ def get_order(
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LIVE TRADES
+# LIVE TRADES  (read-only — runner writes directly to DB)
 # ═════════════════════════════════════════════════════════════════════
 
 
-@router.get("/strategies/{strategy_id}/trades", response_model=list[LiveTradeRead])
-def list_strategy_trades(
-    strategy_id: int,
+@router.get("/sessions/{live_id}/trades", response_model=list[LiveTradeRead])
+def list_session_trades(
+    live_id: int,
     limit: int = Query(200, ge=1, le=1000),
     session: Session = Depends(get_session),
 ):
-    """List live trades / fills for a strategy."""
-    strategy = _get_strategy_or_404(session, strategy_id)
-    sl = _get_current_live(strategy)
-    if not sl:
-        return []
-    trades = list_live_trades(session, sl.id, limit=limit)
+    """List live trades / fills for a session."""
+    _get_live_or_404(session, live_id)
+    trades = list_live_trades(session, live_id, limit=limit)
     return [LiveTradeRead.model_validate(t) for t in trades]
-
-
-@router.post("/strategies/{strategy_id}/trades", response_model=LiveTradeRead, status_code=201)
-def create_strategy_trade(
-    strategy_id: int,
-    payload: LiveTradeCreate,
-    session: Session = Depends(get_session),
-):
-    """Record a live trade / fill (typically called by the runner)."""
-    strategy = _get_strategy_or_404(session, strategy_id)
-    sl = _require_current_live(strategy)
-    trade = create_live_trade(session, sl.id, sl.account_id, payload)
-    return LiveTradeRead.model_validate(trade)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -569,47 +541,79 @@ def create_strategy_trade(
 # ═════════════════════════════════════════════════════════════════════
 
 
-@router.get("/strategies/{strategy_id}/positions", response_model=list[LivePositionRead])
-def list_strategy_positions(
-    strategy_id: int,
+def _enrich_position(pos) -> LivePositionRead:
+    """Enrich a LivePosition DB model with computed real-time PnL fields.
+
+    Reads the last market price from the in-memory Redis cache and
+    computes:
+      - ``computed_unrealized_pnl`` = (last_price - avg_price) * qty * direction
+      - ``computed_market_value``   = last_price * qty
+      - ``total_commission``        = sum of commissions from fills
+      - ``net_pnl``                 = realized + unrealized - commissions
+    """
+    from app.services.market_price_cache import price_cache
+
+    data = LivePositionRead.model_validate(pos)
+
+    # Extract total commission from position extra
+    total_comm = (pos.extra or {}).get("total_commission", 0) or 0
+    data.total_commission = total_comm
+
+    if pos.status != "open" or pos.quantity == 0 or pos.avg_price is None:
+        data.net_pnl = (pos.realized_pnl or 0) - total_comm
+        return data
+
+    # Look up last market price
+    price_info = price_cache.get_last_price(pos.symbol)
+    if price_info and price_info.get("price") is not None:
+        last = price_info["price"]
+        data.last_price = last
+        data.price_age_seconds = price_info.get("age_seconds")
+        data.computed_market_value = last * pos.quantity
+
+        # Unrealized PnL
+        if pos.side == "long":
+            data.computed_unrealized_pnl = (last - pos.avg_price) * pos.quantity
+        elif pos.side == "short":
+            data.computed_unrealized_pnl = (pos.avg_price - last) * pos.quantity
+        else:
+            data.computed_unrealized_pnl = 0
+
+        # Net PnL = realized + unrealized - commissions
+        data.net_pnl = (
+            (pos.realized_pnl or 0)
+            + (data.computed_unrealized_pnl or 0)
+            - total_comm
+        )
+    else:
+        # No live price available — return DB values only
+        data.net_pnl = (pos.realized_pnl or 0) - total_comm
+
+    return data
+
+
+@router.get("/sessions/{live_id}/positions", response_model=list[LivePositionRead])
+def list_session_positions(
+    live_id: int,
     status: str | None = Query(None, description="Filter by status: open/closed"),
     limit: int = Query(100, ge=1, le=1000),
     session: Session = Depends(get_session),
 ):
-    """List live positions for a strategy."""
-    strategy = _get_strategy_or_404(session, strategy_id)
-    sl = _get_current_live(strategy)
-    if not sl:
-        return []
-    positions = list_positions(session, sl.id, status=status, limit=limit)
-    return [LivePositionRead.model_validate(p) for p in positions]
+    """List live positions for a session (enriched with real-time PnL)."""
+    _get_live_or_404(session, live_id)
+    positions = list_positions(session, live_id, status=status, limit=limit)
+    return [_enrich_position(p) for p in positions]
 
 
-@router.get("/strategies/{strategy_id}/positions/open", response_model=list[LivePositionRead])
-def list_strategy_open_positions(
-    strategy_id: int,
+@router.get("/sessions/{live_id}/positions/open", response_model=list[LivePositionRead])
+def list_session_open_positions(
+    live_id: int,
     session: Session = Depends(get_session),
 ):
-    """List open positions for a strategy."""
-    strategy = _get_strategy_or_404(session, strategy_id)
-    sl = _get_current_live(strategy)
-    if not sl:
-        return []
-    positions = list_open_positions(session, sl.id)
-    return [LivePositionRead.model_validate(p) for p in positions]
-
-
-@router.post("/strategies/{strategy_id}/positions", response_model=LivePositionRead, status_code=201)
-def upsert_strategy_position(
-    strategy_id: int,
-    payload: LivePositionCreate,
-    session: Session = Depends(get_session),
-):
-    """Create or update a position for a strategy (typically called by the runner)."""
-    strategy = _get_strategy_or_404(session, strategy_id)
-    sl = _require_current_live(strategy)
-    position = upsert_position(session, sl.id, sl.account_id, payload)
-    return LivePositionRead.model_validate(position)
+    """List open positions for a session (enriched with real-time PnL)."""
+    _get_live_or_404(session, live_id)
+    positions = list_open_positions(session, live_id)
+    return [_enrich_position(p) for p in positions]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -617,22 +621,21 @@ def upsert_strategy_position(
 # ═════════════════════════════════════════════════════════════════════
 
 
-@router.post("/strategies/{strategy_id}/reconcile", response_model=ReconciliationReport)
-def reconcile_strategy(
-    strategy_id: int,
+@router.post("/sessions/{live_id}/reconcile", response_model=ReconciliationReport)
+def reconcile_session(
+    live_id: int,
     broker_orders: list[dict[str, Any]] | None = None,
     broker_positions: list[dict[str, Any]] | None = None,
     session: Session = Depends(get_session),
 ):
     """
-    Run reconciliation between DB state and broker state for a strategy.
+    Run reconciliation between DB state and broker state for a live session.
 
     Can be called manually or automatically on startup.
     Optionally accepts broker state; if not provided, reconciles
     only local DB state (cancels stale orders, etc.).
     """
-    strategy = _get_strategy_or_404(session, strategy_id)
-    sl = _require_current_live(strategy)
+    sl = _get_live_or_404(session, live_id)
 
     report = reconcile_on_startup(
         session,

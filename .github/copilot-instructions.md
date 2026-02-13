@@ -39,10 +39,11 @@ Backend triggers n8n workflows via webhooks:
 - Agents store `n8n_webhook` URL for their workflow
 - `trigger_rule_agent()` in `services/strategy_service.py` POSTs to n8n
 
-### Real-time WebSocket
-- `api/ws_marketdata.py` – WebSocket endpoint for UI streaming
-- Subscribes to Redis Pub/Sub channels (`live:ticks:*`, `live:bars:*`)
-- Fans out to connected WebSocket clients
+### Real-time WebSocket (DEPRECATED — migrated to datasource-realtime)
+- `api/ws_marketdata.py` – Legacy WebSocket code, kept for reference but no longer active
+- Real-time streaming is now handled by the `datasource-realtime` service in `edgewalker-runtime`
+- Traefik routes `/api/ws/*` directly to `datasource-realtime` (priority 200)
+- The backend no longer starts the WebSocket connection manager in its lifespan
 
 ### Background Sync
 - `services/sync_manager.py` – polls datasources for updates
@@ -69,7 +70,7 @@ Key settings in `core/config.py` (Pydantic BaseSettings):
 - `GET/POST /strategies/` – CRUD strategies
 - `POST /strategies/{id}/backtests/{bid}/run` – Trigger backtest via n8n
 - `GET /datasources/` – List available market data
-- `WS /ws/marketdata` – Real-time streaming
+- `WS /ws/marketdata` – ~~Real-time streaming~~ (migrated to `datasource-realtime` service)
 
 ## Conventions
 - Use `HTTPException` for error responses

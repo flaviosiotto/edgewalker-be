@@ -1,5 +1,11 @@
 """HTTP client for the ibkr-gateway microservice.
 
+Used by the backend for non-order operations: health checks, account
+discovery, symbol search, streaming control, and historical fetches.
+
+Order placement is handled directly by the strategy runner — see
+``strategy-runner/app/broker_client.py``.
+
 All IBKR operations from the backend are routed through this client,
 which talks to the per-Connection ``ibkr-gateway`` container over the
 Docker network.
@@ -198,3 +204,10 @@ class IBKRGatewayClient:
     async def get_fetch_status(self, task_id: str) -> dict:
         """Check the status of an async fetch task."""
         return await self._get(f"/fetch-status/{task_id}")
+
+    # ── Orders (read-only — placement is handled by the runner) ───────
+
+    async def list_open_orders(self) -> list[dict]:
+        """List open orders from the gateway (for reconciliation)."""
+        resp = await self._get("/orders")
+        return resp.get("orders", [])

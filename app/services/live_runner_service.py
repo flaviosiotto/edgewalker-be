@@ -121,6 +121,7 @@ class LiveRunnerService:
         broker_type: str | None = None,
         manager_webhook_url: str | None = None,
         manager_chat_session_id: str | None = None,
+        strategy_live_id: int | None = None,
     ) -> dict[str, Any]:
         """
         Start a live strategy runner container.
@@ -173,7 +174,13 @@ class LiveRunnerService:
             "PYTHONPATH": "/app",
             # Backend API URL for manager agent notifications
             "BACKEND_URL": os.getenv("BACKEND_URL", "http://backend:8000"),
+            # Database URL for direct order/position persistence
+            "DATABASE_URL": os.getenv("DATABASE_URL", ""),
         }
+
+        # Strategy live session ID (for DB writes)
+        if strategy_live_id:
+            env["STRATEGY_LIVE_ID"] = str(strategy_live_id)
 
         # Manager agent webhook (so the runner can call the agent directly)
         if manager_webhook_url:
@@ -197,6 +204,8 @@ class LiveRunnerService:
                 env["BROKER_PORT"] = str(account_config["port"])
             if "client_id" in account_config:
                 env["BROKER_CLIENT_ID"] = str(account_config["client_id"])
+            if "connection_id" in account_config:
+                env["CONNECTION_ID"] = str(account_config["connection_id"])
         
         # Traefik labels for routing
         # Route: /api/runners/{strategy_id}/* -> container:8080

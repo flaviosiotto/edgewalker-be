@@ -542,3 +542,11 @@ def reconcile_on_startup(
         items=items,
         summary=summary,
     )
+
+# NOTE: Order submission to the broker gateway and position auto-update
+# on fill have been moved to the strategy runner.  The runner writes
+# directly to the database and talks to the gateway without routing
+# through the backend.  See:
+#   strategy-runner/app/broker_client.py  — BrokerClient.place_order()
+#   strategy-runner/app/broker_client.py  — BrokerClient._update_position_from_fill()
+

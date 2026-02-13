@@ -166,6 +166,14 @@ class LivePositionRead(BaseModel):
     updated_at: datetime
     extra: dict[str, Any] | None = None
 
+    # Computed fields (enriched at response time, not persisted)
+    last_price: float | None = None
+    computed_unrealized_pnl: float | None = None
+    computed_market_value: float | None = None
+    total_commission: float | None = None
+    net_pnl: float | None = None
+    price_age_seconds: float | None = None
+
     class Config:
         from_attributes = True
 
