@@ -210,15 +210,10 @@ class ConnectionManager:
             "CONNECTION_ID": str(connection_id),
             "DATA_DIR": "/opt/edgewalker/data",
             "LOG_LEVEL": "INFO",
-            "PYTHONPATH": "/app:/opt/edgewalker",
         }
 
         volumes = {
-            # Edgewalker library (for historical fetch)
-            f"{EDGEWALKER_PATH}/edgewalker": {
-                "bind": "/opt/edgewalker/edgewalker",
-                "mode": "ro",
-            },
+            # Runtime data only (edgewalker library is baked into the image)
             # Edgewalker configs
             f"{EDGEWALKER_PATH}/configs": {
                 "bind": "/opt/edgewalker/configs",
