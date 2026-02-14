@@ -22,6 +22,8 @@ class StrategyLiveRead(BaseModel):
     symbol: Optional[str] = None
     timeframe: Optional[str] = None
     account_id: Optional[int] = None
+    connection_id: Optional[int] = None
+    definition: Optional[Any] = None
     started_at: Optional[datetime] = None
     stopped_at: Optional[datetime] = None
     error_message: Optional[str] = None

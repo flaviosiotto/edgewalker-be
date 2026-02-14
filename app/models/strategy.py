@@ -186,6 +186,21 @@ class StrategyLive(SQLModel, table=True):
             index=True,
         ),
     )
+    connection_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("connections.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    # Snapshot of the strategy definition at live session creation time.
+    # Decoupled from the design — used on restart.
+    definition: Optional[Any] = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
     started_at: Optional[datetime] = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),

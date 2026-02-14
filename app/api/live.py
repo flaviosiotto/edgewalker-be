@@ -227,6 +227,8 @@ def start_live_strategy(
             symbol=request.symbol,
             timeframe=request.timeframe,
             account_id=request.account_id,
+            connection_id=connection.id if connection else None,
+            definition=strategy.definition,  # snapshot, decoupled from design
         )
         session.add(sl)
         session.commit()
@@ -257,7 +259,7 @@ def start_live_strategy(
 
         result = live_runner_service.start_strategy(
             strategy_id=strategy_id,
-            strategy_config=strategy.definition,
+            strategy_config=sl.definition,
             symbol=request.symbol,
             timeframe=request.timeframe,
             tick_eval=request.tick_eval,
