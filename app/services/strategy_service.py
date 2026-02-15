@@ -208,125 +208,65 @@ def get_backtest(session: Session, backtest_id: int) -> BacktestResult:
 
 
 def run_backtest(session: Session, backtest_id: int) -> BacktestResult:
-    """Start backtest execution via n8n webhook.
-    
-    Sends a minimal request to the agent's webhook with backtest_id and dates.
-    The n8n workflow fetches full details from DB and should:
-    1. Execute the backtest using edgewalker
-    2. Call PATCH /strategies/backtests/{id} with results
-    3. Call POST /strategies/backtests/{id}/trades/bulk with trades
+    """Start backtest execution by spawning a strategy-backtest container.
+
+    The container reads params from the DB, verifies data coverage in the
+    shared parquet datalake, runs the backtest with edgewalker, and writes
+    results (metrics + trades) directly to the database.
     """
+    from app.services.backtest_runner_service import backtest_runner_service
+
     backtest = get_backtest(session, backtest_id)
-    
+
     if backtest.status != BacktestStatus.PENDING.value:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot run backtest with status '{backtest.status}'. Only 'pending' backtests can be run.",
         )
-    
-    if backtest.agent_id is None:
+
+    # Resolve connection_id from the strategy
+    strategy = session.get(Strategy, backtest.strategy_id)
+    connection_id = strategy.connection_id if strategy else None
+
+    if not connection_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Backtest has no agent assigned. Set agent_id when creating the backtest.",
+            detail=(
+                "Strategy has no connection_id assigned. "
+                "Assign a data connection to the strategy before running a backtest."
+            ),
         )
-    
-    agent = session.get(Agent, backtest.agent_id)
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent with id {backtest.agent_id} not found",
-        )
-    
-    # Update status to running
-    backtest.status = BacktestStatus.RUNNING.value
-    backtest.started_at = datetime.now(timezone.utc)
-    session.add(backtest)
-    session.commit()
-    session.refresh(backtest)
-    
-    # Prepare payload for n8n webhook with all parameters for fetch and backtest
-    webhook_payload = {
-        "action": "backtest",
-        "backtest_id": backtest.id,
-        "strategy_id": backtest.strategy_id,
-        # Required parameters
-        "symbol": backtest.symbol,
-        "start_date": str(backtest.start_date),
-        "end_date": str(backtest.end_date),
-        # Data source parameters (for fetch)
-        "source": backtest.source,
-        "timeframe": backtest.timeframe,
-        "asset": backtest.asset,
-        "rth": backtest.rth,
-        # IBKR-specific parameters
-        "ibkr_config": backtest.ibkr_config,
-        "exchange": backtest.exchange,
-        "currency": backtest.currency,
-        "expiry": backtest.expiry,
-        # Backtest execution parameters
-        "initial_capital": backtest.initial_capital,
-        "commission": backtest.commission,
-        # Additional config overrides
-        "parameters": backtest.parameters,
-        # Full strategy configuration
-        "config": backtest.config,
-    }
-    
-    # Call n8n webhook (fire and forget - don't wait for backtest to complete)
+
+    # Status stays as 'pending' — the container will set 'running' then
+    # 'completed'/'error' as it progresses.
     try:
-        with httpx.Client(timeout=30.0) as client:
-            response = client.post(agent.n8n_webhook, json=webhook_payload)
-            response.raise_for_status()
-    except httpx.ConnectError as e:
-        # Connection failed - n8n might be down or webhook URL is wrong
-        backtest.status = BacktestStatus.FAILED.value
+        result = backtest_runner_service.start_backtest(
+            backtest_id=backtest.id,
+            connection_id=connection_id,
+        )
+        logger.info(
+            "Started backtest container for backtest %d: %s",
+            backtest.id, result,
+        )
+    except RuntimeError as e:
+        backtest.status = BacktestStatus.ERROR.value
         backtest.completed_at = datetime.now(timezone.utc)
-        backtest.error_message = f"Cannot connect to n8n webhook: {agent.n8n_webhook}"
+        backtest.error_message = f"Failed to start backtest container: {e}"
         session.add(backtest)
         session.commit()
         session.refresh(backtest)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Cannot connect to n8n webhook at {agent.n8n_webhook}. Is n8n running?",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start backtest runner: {e}",
         )
-    except httpx.HTTPStatusError as e:
-        # Webhook returned an error status
-        backtest.status = BacktestStatus.FAILED.value
-        backtest.completed_at = datetime.now(timezone.utc)
-        error_detail = f"Webhook returned {e.response.status_code}"
-        try:
-            error_body = e.response.text[:500]  # Limit error body size
-            error_detail += f": {error_body}"
-        except Exception:
-            pass
-        backtest.error_message = error_detail
-        session.add(backtest)
-        session.commit()
-        session.refresh(backtest)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"n8n webhook error: {error_detail}",
-        )
-    except httpx.HTTPError as e:
-        # Revert status on webhook failure
-        backtest.status = BacktestStatus.FAILED.value
-        backtest.completed_at = datetime.now(timezone.utc)
-        backtest.error_message = f"Failed to call n8n webhook: {str(e)}"
-        session.add(backtest)
-        session.commit()
-        session.refresh(backtest)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to trigger n8n workflow: {str(e)}",
-        )
-    
+
     return backtest
 
 
 def update_backtest(
     session: Session, backtest_id: int, payload: BacktestUpdate
 ) -> BacktestResult:
-    """Update backtest status and results (callback from n8n)."""
+    """Update backtest status and results."""
     backtest = get_backtest(session, backtest_id)
     
     if payload.status is not None:

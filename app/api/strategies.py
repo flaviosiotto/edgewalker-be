@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, BackgroundTasks
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends
 from sqlmodel import Session
 
 from app.db.database import get_session
+from app.models.strategy import BacktestStatus
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyRead,
@@ -9,7 +12,6 @@ from app.schemas.strategy import (
     BacktestCreate,
     BacktestRead,
     BacktestUpdate,
-    TradeCreate,
     TradeRead,
     RuleTriggerRequest,
     RuleTriggerResponse,
@@ -28,8 +30,6 @@ from app.services.strategy_service import (
     run_backtest,
     update_backtest,
     delete_backtest,
-    create_trade,
-    create_trades_bulk,
     list_trades,
     list_strategy_chats,
     create_strategy_chat,
@@ -100,44 +100,82 @@ def list_backtests_endpoint(strategy_id: int, session: Session = Depends(get_ses
     return list_backtests(session, strategy_id)
 
 
-@router.get("/backtests/{backtest_id}", response_model=BacktestRead)
-def get_backtest_endpoint(backtest_id: int, session: Session = Depends(get_session)):
+@router.get("/{strategy_id}/backtests/{backtest_id}", response_model=BacktestRead)
+def get_backtest_endpoint(strategy_id: int, backtest_id: int, session: Session = Depends(get_session)):
     """Get backtest details including status and results if completed."""
     return get_backtest(session, backtest_id)
 
 
-@router.post("/backtests/{backtest_id}/run", response_model=BacktestRead)
+@router.post("/{strategy_id}/backtests/{backtest_id}/run", response_model=BacktestRead)
 def run_backtest_endpoint(
+    strategy_id: int,
     backtest_id: int,
     session: Session = Depends(get_session),
 ):
-    """Start backtest execution via n8n webhook.
-    
-    Sets status to 'running' and calls the agent's webhook.
-    The agent_id must be set on the backtest.
+    """Start backtest execution.
+
+    Spawns a strategy-backtest Docker container that reads params from
+    the DB, verifies data coverage, runs the backtest with edgewalker,
+    and writes results directly to the database.
     """
     return run_backtest(session, backtest_id)
 
 
-@router.patch("/backtests/{backtest_id}", response_model=BacktestRead)
+@router.post("/{strategy_id}/backtests/{backtest_id}/stop")
+def stop_backtest_endpoint(strategy_id: int, backtest_id: int, session: Session = Depends(get_session)):
+    """Stop a running backtest container."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id)
+    result = backtest_runner_service.stop_backtest(backtest.id)
+
+    # Update DB status
+    if backtest.status in (BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value):
+        backtest.status = BacktestStatus.FAILED.value
+        backtest.completed_at = datetime.now(timezone.utc)
+        backtest.error_message = "Stopped by user"
+        session.add(backtest)
+        session.commit()
+
+    return result
+
+
+@router.get("/{strategy_id}/backtests/{backtest_id}/logs")
+def get_backtest_logs_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    tail: int = 200,
+    session: Session = Depends(get_session),
+):
+    """Get container logs for a running or recently finished backtest."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    _ = get_backtest(session, backtest_id)  # validate exists
+    logs = backtest_runner_service.get_container_logs(backtest_id, tail=tail)
+    return {"backtest_id": backtest_id, "logs": logs}
+
+
+@router.patch("/{strategy_id}/backtests/{backtest_id}", response_model=BacktestRead)
 def update_backtest_endpoint(
+    strategy_id: int,
     backtest_id: int,
     payload: BacktestUpdate,
     session: Session = Depends(get_session),
 ):
-    """Update backtest status and results (callback endpoint for n8n)."""
+    """Update backtest status and results."""
     return update_backtest(session, backtest_id, payload)
 
 
-@router.delete("/backtests/{backtest_id}")
-def delete_backtest_endpoint(backtest_id: int, session: Session = Depends(get_session)):
+@router.delete("/{strategy_id}/backtests/{backtest_id}")
+def delete_backtest_endpoint(strategy_id: int, backtest_id: int, session: Session = Depends(get_session)):
     """Delete a backtest and all its trades."""
     delete_backtest(session, backtest_id)
     return {"status": "ok"}
 
 
-@router.patch("/backtests/{backtest_id}/layout", response_model=BacktestRead)
+@router.patch("/{strategy_id}/backtests/{backtest_id}/layout", response_model=BacktestRead)
 def update_backtest_layout_endpoint(
+    strategy_id: int,
     backtest_id: int,
     payload: LayoutConfigUpdate,
     session: Session = Depends(get_session),
@@ -146,28 +184,8 @@ def update_backtest_layout_endpoint(
     return update_backtest_layout(session, backtest_id, payload)
 
 
-@router.post("/backtests/{backtest_id}/trades", response_model=TradeRead)
-def create_trade_endpoint(
-    backtest_id: int,
-    payload: TradeCreate,
-    session: Session = Depends(get_session),
-):
-    """Create a single trade record for a backtest."""
-    return create_trade(session, backtest_id, payload)
-
-
-@router.post("/backtests/{backtest_id}/trades/bulk", response_model=list[TradeRead])
-def create_trades_bulk_endpoint(
-    backtest_id: int,
-    payload: list[TradeCreate],
-    session: Session = Depends(get_session),
-):
-    """Create multiple trade records for a backtest in bulk."""
-    return create_trades_bulk(session, backtest_id, payload)
-
-
-@router.get("/backtests/{backtest_id}/trades", response_model=list[TradeRead])
-def list_trades_endpoint(backtest_id: int, session: Session = Depends(get_session)):
+@router.get("/{strategy_id}/backtests/{backtest_id}/trades", response_model=list[TradeRead])
+def list_trades_endpoint(strategy_id: int, backtest_id: int, session: Session = Depends(get_session)):
     """List all trades for a backtest."""
     return list_trades(session, backtest_id)
 
