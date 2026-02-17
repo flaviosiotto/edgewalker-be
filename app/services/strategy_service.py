@@ -181,6 +181,8 @@ def create_backtest(session: Session, strategy_id: int, payload: BacktestCreate)
         parameters=payload.parameters,
         # Strategy configuration snapshot (explicit override or auto-capture)
         config=payload.config if payload.config else strategy.definition,
+        # UI layout config (timezone, extended hours, etc.)
+        layout_config=payload.layout_config,
         status=BacktestStatus.PENDING.value,
     )
     session.add(backtest)

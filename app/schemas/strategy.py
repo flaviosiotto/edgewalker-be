@@ -118,6 +118,9 @@ class BacktestCreate(BaseModel):
     # Full strategy configuration snapshot (auto-captured from strategy.definition)
     config: Optional[dict[str, Any]] = None
 
+    # UI layout config snapshot (timezone, extended hours, etc.)
+    layout_config: Optional[dict[str, Any]] = None
+
 
 class BacktestRead(BaseModel):
     """Full backtest representation including status and results."""
