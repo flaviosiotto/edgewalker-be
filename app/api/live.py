@@ -31,6 +31,9 @@ from app.services.live_trading_service import (
     list_live_trades,
     list_open_positions,
     list_positions,
+    list_strategy_orders,
+    list_strategy_positions,
+    list_strategy_trades,
     reconcile_on_startup,
     update_live_order,
     validate_account_for_live,
@@ -626,6 +629,49 @@ def list_session_open_positions(
     """List open positions for a session (enriched with real-time PnL)."""
     _get_live_or_404(session, live_id)
     positions = list_open_positions(session, live_id)
+    return [_enrich_position(p) for p in positions]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# STRATEGY-LEVEL HISTORY (aggregate across all sessions)
+# ═════════════════════════════════════════════════════════════════════
+
+
+@router.get("/strategies/{strategy_id}/orders", response_model=list[LiveOrderRead])
+def list_all_strategy_orders(
+    strategy_id: int,
+    status: str | None = Query(None, description="Filter by order status"),
+    limit: int = Query(200, ge=1, le=2000),
+    session: Session = Depends(get_session),
+):
+    """List orders across ALL live sessions for a strategy."""
+    _get_strategy_or_404(session, strategy_id)
+    orders = list_strategy_orders(session, strategy_id, status=status, limit=limit)
+    return [LiveOrderRead.model_validate(o) for o in orders]
+
+
+@router.get("/strategies/{strategy_id}/trades", response_model=list[LiveTradeRead])
+def list_all_strategy_trades(
+    strategy_id: int,
+    limit: int = Query(500, ge=1, le=5000),
+    session: Session = Depends(get_session),
+):
+    """List trades across ALL live sessions for a strategy."""
+    _get_strategy_or_404(session, strategy_id)
+    trades = list_strategy_trades(session, strategy_id, limit=limit)
+    return [LiveTradeRead.model_validate(t) for t in trades]
+
+
+@router.get("/strategies/{strategy_id}/positions", response_model=list[LivePositionRead])
+def list_all_strategy_positions(
+    strategy_id: int,
+    status: str | None = Query(None, description="Filter by status: open/closed"),
+    limit: int = Query(200, ge=1, le=2000),
+    session: Session = Depends(get_session),
+):
+    """List positions across ALL live sessions for a strategy (enriched with PnL)."""
+    _get_strategy_or_404(session, strategy_id)
+    positions = list_strategy_positions(session, strategy_id, status=status, limit=limit)
     return [_enrich_position(p) for p in positions]
 
 

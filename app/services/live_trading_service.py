@@ -284,6 +284,82 @@ def list_open_positions(session: Session, strategy_live_id: int) -> list[LivePos
 
 
 # ═════════════════════════════════════════════════════════════════════
+# STRATEGY-LEVEL QUERIES (aggregate across all sessions)
+# ═════════════════════════════════════════════════════════════════════
+
+from app.models.strategy import StrategyLive  # noqa: E402
+
+
+def _live_ids_for_strategy(session: Session, strategy_id: int) -> list[int]:
+    """Return all strategy_live IDs for a given strategy."""
+    stmt = select(StrategyLive.id).where(StrategyLive.strategy_id == strategy_id)
+    return list(session.exec(stmt).all())
+
+
+def list_strategy_orders(
+    session: Session,
+    strategy_id: int,
+    *,
+    status: str | None = None,
+    limit: int = 200,
+) -> list[LiveOrder]:
+    """List orders across ALL sessions for a strategy."""
+    live_ids = _live_ids_for_strategy(session, strategy_id)
+    if not live_ids:
+        return []
+    stmt = (
+        select(LiveOrder)
+        .where(LiveOrder.strategy_live_id.in_(live_ids))  # type: ignore[union-attr]
+        .order_by(LiveOrder.created_at.desc())  # type: ignore[union-attr]
+        .limit(limit)
+    )
+    if status:
+        stmt = stmt.where(LiveOrder.status == status)
+    return list(session.exec(stmt).all())
+
+
+def list_strategy_trades(
+    session: Session,
+    strategy_id: int,
+    *,
+    limit: int = 500,
+) -> list[LiveTrade]:
+    """List trades across ALL sessions for a strategy."""
+    live_ids = _live_ids_for_strategy(session, strategy_id)
+    if not live_ids:
+        return []
+    stmt = (
+        select(LiveTrade)
+        .where(LiveTrade.strategy_live_id.in_(live_ids))  # type: ignore[union-attr]
+        .order_by(LiveTrade.trade_time.desc())  # type: ignore[union-attr]
+        .limit(limit)
+    )
+    return list(session.exec(stmt).all())
+
+
+def list_strategy_positions(
+    session: Session,
+    strategy_id: int,
+    *,
+    status: str | None = None,
+    limit: int = 200,
+) -> list[LivePosition]:
+    """List positions across ALL sessions for a strategy."""
+    live_ids = _live_ids_for_strategy(session, strategy_id)
+    if not live_ids:
+        return []
+    stmt = (
+        select(LivePosition)
+        .where(LivePosition.strategy_live_id.in_(live_ids))  # type: ignore[union-attr]
+        .order_by(LivePosition.opened_at.desc())  # type: ignore[union-attr]
+        .limit(limit)
+    )
+    if status:
+        stmt = stmt.where(LivePosition.status == status)
+    return list(session.exec(stmt).all())
+
+
+# ═════════════════════════════════════════════════════════════════════
 # ACCOUNT VALIDATION
 # ═════════════════════════════════════════════════════════════════════
 
