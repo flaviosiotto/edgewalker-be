@@ -160,7 +160,7 @@ class LiveRunnerService:
             "REDIS_PORT": REDIS_PORT,
             "STRATEGY_ID": str(strategy_id),
             "SYMBOL": symbol,
-            "TIMEFRAME": timeframe,
+            "BAR_TIMEFRAME": timeframe,
             # Streams to consume (market:* for reliable delivery via XREAD)
             # Format: market:bars:{symbol}:{tf}, market:ticks:{symbol}, market:quotes:{symbol}
             "STREAMS": f"market:bars:{symbol}:{timeframe},market:ticks:{symbol},market:quotes:{symbol}",
