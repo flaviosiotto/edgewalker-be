@@ -37,8 +37,18 @@ DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "edgewalker-devops_default")
 GATEWAY_IMAGE = os.getenv("GATEWAY_IMAGE", "edgewalker-devops-ibkr-gateway:latest")
 GATEWAY_CONTAINER_PREFIX = "ibkr-gw-"
 
-# Paths for volume mounts (same as docker-compose)
+# Paths for volume mounts — these are HOST paths passed to Docker bind mounts,
+# so they MUST be absolute host paths (not container-relative).
+# Do NOT use os.path.abspath() here: it resolves against the container's CWD.
 EDGEWALKER_PATH = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
+RUNTIME_PATH = os.getenv("RUNTIME_PATH", "/home/flavio/playground/edgewalker-runtime")
+
+if not os.path.isabs(EDGEWALKER_PATH) or not os.path.isabs(RUNTIME_PATH):
+    logger.warning(
+        "EDGEWALKER_PATH and RUNTIME_PATH must be absolute host paths for Docker "
+        "bind mounts. Current values: EDGEWALKER_PATH=%s, RUNTIME_PATH=%s",
+        EDGEWALKER_PATH, RUNTIME_PATH,
+    )
 
 # Host UID/GID — gateway containers run as this user so written files
 # on mounted volumes match the host user (avoids root-owned data).
@@ -223,6 +233,16 @@ class ConnectionManager:
             f"{EDGEWALKER_PATH}/data": {
                 "bind": "/opt/edgewalker/data",
                 "mode": "rw",
+            },
+            # Shared module (constants, schemas) — dev overlay
+            f"{RUNTIME_PATH}/shared": {
+                "bind": "/app/shared",
+                "mode": "ro",
+            },
+            # Application code — dev overlay (live reload)
+            f"{RUNTIME_PATH}/ibkr-gateway/app": {
+                "bind": "/app/app",
+                "mode": "ro",
             },
         }
 
