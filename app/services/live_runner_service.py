@@ -155,15 +155,19 @@ class LiveRunnerService:
                 existing.remove(force=True)
         
         # Build environment variables
+        # Connection ID determines the stream key suffix (architecture v3)
+        conn_id = str(account_config["connection_id"]) if account_config and "connection_id" in account_config else ""
+        conn_suffix = f":{conn_id}" if conn_id else ""
+        
         env = {
             "REDIS_HOST": REDIS_HOST,
             "REDIS_PORT": REDIS_PORT,
             "STRATEGY_ID": str(strategy_id),
             "SYMBOL": symbol,
             "BAR_TIMEFRAME": timeframe,
-            # Streams to consume (market:* for reliable delivery via XREAD)
-            # Format: market:bars:{symbol}:{tf}, market:ticks:{symbol}, market:quotes:{symbol}
-            "STREAMS": f"market:bars:{symbol}:{timeframe},market:ticks:{symbol},market:quotes:{symbol}",
+            # Streams to consume (live:bars:* for runner, market:* for ticks/quotes)
+            # Format: live:bars:{symbol}:{tf}:{conn_id}, market:ticks:{symbol}:{conn_id}, ...
+            "STREAMS": f"live:bars:{symbol}:{timeframe}{conn_suffix},market:ticks:{symbol}{conn_suffix},market:quotes:{symbol}{conn_suffix}",
             "CONSUMER_GROUP": f"cg:strategy-{strategy_id}",
             "CONSUMER_ID": f"runner-{strategy_id}",
             # Strategy config as JSON (runner will persist if needed)
