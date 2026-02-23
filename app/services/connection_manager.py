@@ -436,28 +436,31 @@ class ConnectionManager:
             except Exception:
                 actual = ConnectionStatus.DISCONNECTED
 
-        if actual.value != stored_status:
+        status_changed = actual.value != stored_status
+
+        if status_changed:
             with get_session_context() as session:
                 _update_connection_status(session, connection_id, actual)
-
-                # Re-sync accounts when reconciling back to connected
-                # (e.g. gateway survived a backend restart)
-                if actual == ConnectionStatus.CONNECTED:
-                    try:
-                        client = self.get_gateway_client(connection_id)
-                        accounts = await client.get_accounts()
-                        if accounts:
-                            _sync_accounts_from_gateway(session, connection_id, accounts)
-                    except Exception as e:
-                        logger.warning(
-                            "Could not re-sync accounts for connection %s: %s",
-                            connection_id, e,
-                        )
-
             logger.info(
                 "Connection %s status changed: %s → %s",
                 connection_id, stored_status, actual.value,
             )
+
+        # Always re-sync accounts when connection is alive so that any
+        # stale is_active=False accounts (left over from a previous
+        # disconnect cycle) are re-activated.
+        if actual == ConnectionStatus.CONNECTED:
+            try:
+                client = self.get_gateway_client(connection_id)
+                accounts = await client.get_accounts()
+                if accounts:
+                    with get_session_context() as session:
+                        _sync_accounts_from_gateway(session, connection_id, accounts)
+            except Exception as e:
+                logger.warning(
+                    "Could not re-sync accounts for connection %s: %s",
+                    connection_id, e,
+                )
 
         return actual.value
 
