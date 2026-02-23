@@ -523,7 +523,47 @@ def search_ibkr_symbols_by_id(
     asset_type: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search IBKR symbols live via a connection's ibkr-gateway (by numeric ID)."""
+    """Search IBKR symbols live via a connection's ibkr-gateway (by numeric ID).
+
+    For futures searches, checks Redis first for cached contract data
+    (populated by ibkr-gateway).  Falls back to the gateway HTTP search.
+    """
+    import os, json, redis as sync_redis
+
+    # ── Redis cache check (contracts populated by ibkr-gateway) ──
+    # When asking for futures, contract lists are cached in Redis by
+    # the gateway under  ibkr:contracts:{connection_id}:{SYMBOL}
+    redis_host = os.getenv("REDIS_HOST", "redis")
+    redis_port = int(os.getenv("REDIS_PORT", "6379"))
+    cache_key = f"ibkr:contracts:{connection_id}:{query.upper()}"
+    try:
+        r = sync_redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+        cached = r.get(cache_key)
+        r.close()
+        if cached:
+            contracts = json.loads(cached)
+            if contracts:
+                results = [
+                    {
+                        "symbol": s.get("symbol", ""),
+                        "name": s.get("name"),
+                        "asset_type": s.get("asset_type", ""),
+                        "exchange": s.get("exchange"),
+                        "currency": s.get("currency", "USD"),
+                        "broker_type": "ibkr",
+                        "con_id": s.get("con_id"),
+                        "extra_data": {
+                            k: v for k, v in s.items()
+                            if k not in ("symbol", "name", "asset_type", "exchange", "currency", "con_id")
+                        },
+                    }
+                    for s in contracts
+                ][:limit]
+                return results
+    except Exception:
+        pass  # Redis unavailable — fall through to HTTP
+
+    # ── Live search via ibkr-gateway HTTP ──
     from app.services.connection_manager import get_connection_manager
 
     mgr = get_connection_manager()
