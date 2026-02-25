@@ -2,7 +2,10 @@ from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
 import logging
 import os
+import uuid
 from pathlib import Path
+
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
 from app.db.database import create_db_and_tables
@@ -100,6 +103,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Track-ID middleware (end-to-end tracing) ──
+class TrackIDMiddleware(BaseHTTPMiddleware):
+    """Propagate X-Track-Id header for end-to-end request tracing."""
+
+    async def dispatch(self, request, call_next):
+        track_id = request.headers.get("X-Track-Id") or str(uuid.uuid4())
+        request.state.track_id = track_id
+        response = await call_next(request)
+        response.headers["X-Track-Id"] = track_id
+        return response
+
+
+app.add_middleware(TrackIDMiddleware)
 
 app.include_router(auth_router)
 app.include_router(users_router)

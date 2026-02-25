@@ -12,7 +12,7 @@ import logging
 from datetime import date
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from app.schemas.marketdata import (
     OHLCHistoryResponse,
@@ -38,6 +38,7 @@ router = APIRouter(prefix="/marketdata", tags=["Market Data"])
 
 @router.get("/ohlc-history", response_model=OHLCHistoryResponse)
 def get_ohlc_history_endpoint(
+    request: Request,
     symbol: str = Query(..., description="Trading symbol (e.g., 'QQQ', 'SPY', 'NQ')"),
     asset_type: AssetType = Query(
         AssetType.STOCK,
@@ -100,6 +101,21 @@ def get_ohlc_history_endpoint(
     **Response format:**
     All timestamps are Unix timestamps in seconds, compatible with TradingView Lightweight Charts.
     """
+    # ── Track ID propagation (end-to-end tracing) ──
+    track_id = request.headers.get("X-Track-Id")
+    if track_id:
+        logger.info(json.dumps({
+            "track_id": track_id,
+            "action": "ohlc_history_request",
+            "service": "backend",
+            "symbol": symbol,
+            "asset_type": asset_type.value,
+            "timeframe": timeframe,
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "fetch": fetch,
+        }))
+
     # Parse indicators from string
     indicator_list = _parse_indicator_string(indicators)
     
