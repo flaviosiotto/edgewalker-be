@@ -57,6 +57,14 @@ logging.basicConfig(
 )
 logging.getLogger(__name__).info(f"Logging initialized with level {_level_name}")
 
+
+class _HealthCheckFilter(logging.Filter):
+    """Suppress noisy health-check access-log lines."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "GET /health" not in record.getMessage()
+
+logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
