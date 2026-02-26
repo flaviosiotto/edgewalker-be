@@ -115,7 +115,7 @@ class LiveRunnerService:
         strategy_config: dict[str, Any],
         symbol: str,
         timeframe: str = "5s",
-        tick_eval: bool = True,
+        eval_in_progress: bool = True,
         debug_rules: bool = False,
         account_config: dict[str, Any] | None = None,
         broker_type: str | None = None,
@@ -128,13 +128,17 @@ class LiveRunnerService:
         
         Args:
             strategy_id: Database ID of the strategy
-            strategy_config: Strategy definition (YAML-like dict)
+            strategy_config: Strategy definition (YAML-like dict) — kept for reference,
+                runner loads config from DB via STRATEGY_LIVE_ID
             symbol: Trading symbol to subscribe to
             timeframe: Bar timeframe for subscription (default: 5s)
-            tick_eval: Whether to evaluate rules on every tick
+            eval_in_progress: Evaluate rules on in-progress bars too (not only bar close)
             debug_rules: Enable detailed condition logging
             account_config: Broker account config (host, port, account_id, etc.)
             broker_type: Broker type identifier (e.g. 'ibkr')
+            manager_webhook_url: n8n webhook URL for manager agent
+            manager_chat_session_id: Chat session ID for manager agent
+            strategy_live_id: Database ID of the strategy_live session
             
         Returns:
             Dict with container info and status
@@ -164,21 +168,17 @@ class LiveRunnerService:
             "REDIS_PORT": REDIS_PORT,
             "STRATEGY_ID": str(strategy_id),
             "SYMBOL": symbol,
-            "BAR_TIMEFRAME": timeframe,
-            # Streams to consume (live:bars:* for runner, market:* for ticks/quotes)
-            # Format: live:bars:{symbol}:{tf}:{conn_id}, market:ticks:{symbol}:{conn_id}, ...
-            "STREAMS": f"live:bars:{symbol}:{timeframe}{conn_suffix},market:ticks:{symbol}{conn_suffix},market:quotes:{symbol}{conn_suffix}",
+            # Single live:bars stream — runner derives from DB config if STRATEGY_LIVE_ID is set
+            "STREAMS": f"live:bars:{symbol}:{timeframe}{conn_suffix}",
             "CONSUMER_GROUP": f"cg:strategy-{strategy_id}",
             "CONSUMER_ID": f"runner-{strategy_id}",
-            # Strategy config as JSON (runner will persist if needed)
-            "STRATEGY_CONFIG_JSON": json.dumps(strategy_config),
-            "TICK_EVAL": str(tick_eval).lower(),
+            "EVAL_IN_PROGRESS": str(eval_in_progress).lower(),
             "DEBUG_RULES": str(debug_rules).lower(),
             "LOG_LEVEL": "DEBUG" if debug_rules else "INFO",
             "PYTHONPATH": "/app",
             # Backend API URL for manager agent notifications
             "BACKEND_URL": os.getenv("BACKEND_URL", "http://backend:8000"),
-            # Database URL for direct order/position persistence
+            # Database URL for direct order/position persistence + config loading
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
         }
 

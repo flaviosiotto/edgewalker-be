@@ -57,7 +57,7 @@ class LiveStartRequest(BaseModel):
     """Request to start a live strategy."""
     symbol: str
     timeframe: str = "5s"  # Bar aggregation interval
-    tick_eval: bool = True  # Evaluate rules on every tick
+    eval_in_progress: bool = True  # Evaluate rules on in-progress bars
     debug_rules: bool = False  # Log per-condition evaluation detail
     account_id: int | None = None  # Trading account to send orders to
 
@@ -265,7 +265,7 @@ def start_live_strategy(
             strategy_config=sl.definition,
             symbol=request.symbol,
             timeframe=request.timeframe,
-            tick_eval=request.tick_eval,
+            eval_in_progress=request.eval_in_progress,
             debug_rules=request.debug_rules,
             account_config=account_config,
             broker_type=broker_type,
