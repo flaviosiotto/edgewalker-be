@@ -5,7 +5,7 @@ CRUD for broker connections.  Accounts are auto-discovered when a
 connection is established — there is no manual account creation.
 
 Connection-scoped endpoints include symbol search via the connection's
-ibkr-gateway container.
+gateway container.
 """
 from __future__ import annotations
 
@@ -248,34 +248,36 @@ def search_connection_symbols(
     limit: int = Query(50, ge=1, le=500, description="Maximum number of results"),
     session: Session = Depends(get_session),
 ):
-    """Search symbols via a connection's ibkr-gateway.
+    """Search symbols via a connection's gateway.
 
-    Requires the connection to be of type ``ibkr`` with a running
-    ibkr-gateway container.
+    Requires the connection to have a running gateway container
+    (broker types with gateway support: ibkr, binance, etc.).
     """
     conn = get_connection(session, connection_id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
-    if conn.broker_type != "ibkr":
+    # Yahoo connections have no live gateway — use cached symbols only
+    if conn.broker_type == "yahoo":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Connection {connection_id} is of type '{conn.broker_type}', "
-                   f"symbol search requires an IBKR connection.",
+            detail=f"Connection {connection_id} is of type 'yahoo' which "
+                   f"does not support live symbol search. Use the cached symbols endpoint.",
         )
 
-    from app.services.symbol_sync_handler import search_ibkr_symbols_by_id
+    from app.services.symbol_sync_handler import search_gateway_symbols_by_id
 
     try:
-        results = search_ibkr_symbols_by_id(
+        results = search_gateway_symbols_by_id(
             query=query,
             connection_id=connection_id,
+            broker_type=conn.broker_type,
             asset_type=asset_type.value if asset_type else None,
             limit=limit,
         )
         return AvailableSymbolsResponse(
             symbols=results,
-            source="ibkr",
+            source=conn.broker_type,
             asset_type=asset_type.value if asset_type else "all",
             count=len(results),
         )

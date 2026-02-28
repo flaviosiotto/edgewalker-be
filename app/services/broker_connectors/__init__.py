@@ -1,8 +1,9 @@
 """
 Broker Connectors — shared data types for connection lifecycle.
 
-IBKR operations are handled by per-Connection ``ibkr-gateway`` containers,
-managed by ``ConnectionManager`` and accessed via ``IBKRGatewayClient``.
+Broker operations are handled by per-Connection gateway containers
+(e.g. ``ibkr-gateway``, ``binance-gateway``), managed by
+``ConnectionManager`` and accessed via ``GatewayClient``.
 """
 from app.services.broker_connectors.base import ConnectorResult, DiscoveredAccount
 

@@ -1,4 +1,4 @@
-"""HTTP client for the ibkr-gateway microservice.
+"""HTTP client for broker gateway microservices.
 
 Used by the backend for non-order operations: health checks, account
 discovery, symbol search, streaming control, and historical fetches.
@@ -6,13 +6,13 @@ discovery, symbol search, streaming control, and historical fetches.
 Order placement is handled directly by the strategy runner — see
 ``strategy-runner/app/broker_client.py``.
 
-All IBKR operations from the backend are routed through this client,
-which talks to the per-Connection ``ibkr-gateway`` container over the
-Docker network.
+All broker operations from the backend are routed through this client,
+which talks to the per-Connection ``<broker>-gw-{id}`` container over
+the Docker network.
 
 Usage::
 
-    client = IBKRGatewayClient(connection_id=42)
+    client = GatewayClient(connection_id=42, broker_type="ibkr")
     status = await client.get_status()
     accounts = await client.get_accounts()
     results = await client.search_symbols("NQ", asset_type="futures")
@@ -26,36 +26,48 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Container naming convention — must match what ConnectionManager uses
-# when spawning containers via Docker API.
-CONTAINER_PREFIX = "ibkr-gw-"
+# Default gateway port (all gateways use the same port)
 GATEWAY_PORT = 8080
 DEFAULT_TIMEOUT = 30.0
 FETCH_TIMEOUT = 300.0  # Historical fetches can be slow
 
+# Prefix map: broker_type → container name prefix.
+# Must stay in sync with GATEWAY_REGISTRY in connection_manager.py.
+_BROKER_PREFIX: dict[str, str] = {
+    "ibkr": "ibkr-gw-",
+    "binance": "binance-gw-",
+}
 
-class IBKRGatewayClient:
-    """Async HTTP client that talks to an ``ibkr-gateway`` container."""
+
+def gateway_url_for(connection_id: int | str, broker_type: str = "ibkr") -> str:
+    """Build the gateway base URL for a given connection.
+
+    On the Docker network the container is named
+    ``<broker>-gw-{connection_id}`` and listens on ``GATEWAY_PORT``.
+    """
+    prefix = _BROKER_PREFIX.get(broker_type, f"{broker_type}-gw-")
+    return f"http://{prefix}{connection_id}:{GATEWAY_PORT}"
+
+
+class GatewayClient:
+    """Async HTTP client that talks to a broker gateway container."""
 
     def __init__(
         self,
         connection_id: int | str,
         *,
+        broker_type: str = "ibkr",
         base_url: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self._connection_id = connection_id
-        self._base_url = base_url or self._default_url(connection_id)
+        self._broker_type = broker_type
+        self._base_url = base_url or gateway_url_for(connection_id, broker_type)
         self._timeout = timeout
 
-    @staticmethod
-    def _default_url(connection_id: int | str) -> str:
-        """Derive the gateway URL from the connection_id.
-
-        On the Docker network the container is named
-        ``ibkr-gw-{connection_id}`` and listens on port 8080.
-        """
-        return f"http://{CONTAINER_PREFIX}{connection_id}:{GATEWAY_PORT}"
+    @property
+    def base_url(self) -> str:
+        return self._base_url
 
     # ── Low-level helpers ─────────────────────────────────────────────────
 
@@ -107,11 +119,11 @@ class IBKRGatewayClient:
     # ── Connection lifecycle ──────────────────────────────────────────────
 
     async def connect(self) -> dict:
-        """Trigger IBKR connection (if not already auto-connected)."""
+        """Trigger broker connection (if not already auto-connected)."""
         return await self._post("/connect")
 
     async def disconnect(self) -> dict:
-        """Disconnect from IBKR."""
+        """Disconnect from the broker."""
         return await self._post("/disconnect")
 
     # ── Accounts ──────────────────────────────────────────────────────────
@@ -128,7 +140,7 @@ class IBKRGatewayClient:
         query: str,
         asset_type: str | None = None,
     ) -> list[dict]:
-        """Search IBKR for matching symbols."""
+        """Search the broker for matching symbols."""
         params: dict[str, str] = {"query": query}
         if asset_type:
             params["asset_type"] = asset_type
@@ -211,3 +223,7 @@ class IBKRGatewayClient:
         """List open orders from the gateway (for reconciliation)."""
         resp = await self._get("/orders")
         return resp.get("orders", [])
+
+
+# Backwards-compatible alias
+IBKRGatewayClient = GatewayClient

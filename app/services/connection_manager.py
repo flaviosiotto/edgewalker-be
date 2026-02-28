@@ -2,22 +2,24 @@
 Connection Manager – async background service that manages broker
 connect / disconnect lifecycle and auto-discovers accounts.
 
-**Architecture (v2 — ibkr-gateway):**
+**Architecture (v2 — gateway-per-connection):**
 
 When the user clicks "Connect" the manager spawns a dedicated
-``ibkr-gateway`` Docker container for that Connection.  The container
-maintains the persistent IBKR connection(s) and exposes a REST API.
+``<broker>-gateway`` Docker container for that Connection.  The container
+maintains the persistent broker connection(s) and exposes a REST API.
 All further operations (search, streaming, historical fetch, orders)
-are routed through that container via ``IBKRGatewayClient``.
+are routed through that container via ``GatewayClient``.
 
-One container per Connection = one IBKR Gateway = complete user
-segregation.
+One container per Connection = one Gateway = complete user segregation.
+New brokers are registered in ``GATEWAY_REGISTRY`` — no code changes
+required in ConnectionManager itself.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,14 +30,12 @@ from sqlmodel import Session, select
 from app.db.database import get_session_context
 from app.models.connection import Account, Connection, ConnectionStatus
 from app.services.broker_connectors.base import ConnectorResult, DiscoveredAccount
-from app.services.ibkr_gateway_client import IBKRGatewayClient
+from app.services.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
 
 # ── Docker settings ──────────────────────────────────────────────────
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "edgewalker-devops_default")
-GATEWAY_IMAGE = os.getenv("GATEWAY_IMAGE", "edgewalker-devops-ibkr-gateway:latest")
-GATEWAY_CONTAINER_PREFIX = "ibkr-gw-"
 
 # Paths for volume mounts — these are HOST paths passed to Docker bind mounts,
 # so they MUST be absolute host paths (not container-relative).
@@ -55,8 +55,70 @@ if not os.path.isabs(EDGEWALKER_PATH) or not os.path.isabs(RUNTIME_PATH):
 HOST_PUID = os.getenv("PUID", "1000")
 HOST_PGID = os.getenv("PGID", "1000")
 
+
+# ── Gateway Registry ─────────────────────────────────────────────────
+# Each broker type maps to its Docker image, container prefix, label,
+# and a function that builds the environment dict from Connection.config.
+# To add a new broker, add an entry here — no other code changes needed
+# in ConnectionManager.
+
+def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
+    """Build env vars for an ibkr-gateway container."""
+    return {
+        "IBKR_HOST": str(config.get("host", "host.docker.internal")),
+        "IBKR_PORT": str(config.get("port", 4001)),
+        "IBKR_CLIENT_ID": str(config.get("client_id", 100)),
+    }
+
+
+def _binance_env(config: dict[str, Any]) -> dict[str, str]:
+    """Build env vars for a binance-gateway container."""
+    return {
+        "BINANCE_API_KEY": str(config.get("api_key", "")),
+        "BINANCE_API_SECRET": str(config.get("api_secret", "")),
+        "BINANCE_TESTNET": str(config.get("testnet", False)).lower(),
+    }
+
+
+@dataclass
+class GatewaySpec:
+    """Specification for a broker gateway Docker container."""
+    image: str
+    prefix: str
+    label: str
+    env_mapper: Any  # Callable[[dict], dict[str, str]]
+    # Dev-overlay volume: <broker>-gateway/app → /app/app
+    app_dir: str
+    # Extra Docker host entries (e.g. host.docker.internal)
+    extra_hosts: dict[str, str] | None = None
+
+
+GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
+    "ibkr": GatewaySpec(
+        image=os.getenv("IBKR_GATEWAY_IMAGE", "edgewalker-devops-ibkr-gateway:latest"),
+        prefix="ibkr-gw-",
+        label="ibkr-gateway",
+        env_mapper=_ibkr_env,
+        app_dir="ibkr-gateway/app",
+        extra_hosts={"host.docker.internal": "host-gateway"},
+    ),
+    "binance": GatewaySpec(
+        image=os.getenv("BINANCE_GATEWAY_IMAGE", "edgewalker-devops-binance-gateway:latest"),
+        prefix="binance-gw-",
+        label="binance-gateway",
+        env_mapper=_binance_env,
+        app_dir="binance-gateway/app",
+    ),
+}
+
+
+def get_gateway_spec(broker_type: str) -> GatewaySpec | None:
+    """Look up the gateway specification for a broker type."""
+    return GATEWAY_REGISTRY.get(broker_type)
+
+
 # Active gateway clients — keyed by connection_id
-_gateway_clients: dict[int, IBKRGatewayClient] = {}
+_gateway_clients: dict[int, GatewayClient] = {}
 
 
 def _sync_accounts_from_gateway(
@@ -64,7 +126,7 @@ def _sync_accounts_from_gateway(
     connection_id: int,
     accounts: list[dict[str, str]],
 ) -> None:
-    """Sync accounts discovered by the ibkr-gateway container.
+    """Sync accounts discovered by a gateway container.
 
     ``accounts`` is a list of ``{"account_id": "...", "account_type": "..."}``
     dicts returned by the gateway's ``/accounts`` endpoint.
@@ -160,14 +222,16 @@ def _update_connection_status(
 # ── Public async API (called by route handlers) ─────────────────────
 
 class ConnectionManager:
-    """Manages broker connections via ``ibkr-gateway`` Docker containers.
+    """Manages broker connections via per-connection gateway Docker containers.
 
-    For each IBKR Connection the manager:
-    1. Spawns a dedicated ``ibkr-gateway`` container on connect
+    For each Connection the manager:
+    1. Spawns a dedicated ``<broker>-gw-{id}`` container on connect
     2. Waits for the gateway to report "connected"
     3. Syncs discovered accounts into the DB
-    4. Provides an ``IBKRGatewayClient`` for the rest of the backend
+    4. Provides a ``GatewayClient`` for the rest of the backend
     5. Destroys the container on disconnect
+
+    Supported brokers are defined in ``GATEWAY_REGISTRY``.
     """
 
     def __init__(self) -> None:
@@ -181,49 +245,58 @@ class ConnectionManager:
 
     # ── Container management ─────────────────────────────────────────
 
-    def _container_name(self, connection_id: int) -> str:
-        return f"{GATEWAY_CONTAINER_PREFIX}{connection_id}"
+    def _container_name(self, connection_id: int, broker_type: str = "ibkr") -> str:
+        spec = get_gateway_spec(broker_type)
+        prefix = spec.prefix if spec else f"{broker_type}-gw-"
+        return f"{prefix}{connection_id}"
 
-    def _get_container(self, connection_id: int):
+    def _get_container(self, connection_id: int, broker_type: str = "ibkr"):
         """Get existing gateway container for a connection, if any."""
         if not self._docker:
             return None
         try:
-            return self._docker.containers.get(self._container_name(connection_id))
+            return self._docker.containers.get(self._container_name(connection_id, broker_type))
         except NotFound:
             return None
         except Exception as e:
             logger.warning("Docker error checking container: %s", e)
             return None
 
-    def _spawn_gateway(self, connection_id: int, config: dict[str, Any]) -> None:
-        """Spawn a new ibkr-gateway container for the given Connection."""
+    def _spawn_gateway(self, connection_id: int, broker_type: str, config: dict[str, Any]) -> None:
+        """Spawn a gateway container for the given Connection.
+
+        The container image, env vars, and volumes are determined by the
+        ``GATEWAY_REGISTRY`` entry for *broker_type*.
+        """
         if not self._docker:
             raise RuntimeError("Docker is not available")
 
-        container_name = self._container_name(connection_id)
+        spec = get_gateway_spec(broker_type)
+        if spec is None:
+            raise ValueError(f"No gateway registered for broker type '{broker_type}'")
+
+        container_name = self._container_name(connection_id, broker_type)
 
         # Remove any existing stopped container
-        existing = self._get_container(connection_id)
+        existing = self._get_container(connection_id, broker_type)
         if existing:
             if existing.status == "running":
                 logger.info("Gateway container %s already running", container_name)
                 return
             existing.remove(force=True)
 
+        # Common env vars (shared by all gateways)
         env = {
-            "IBKR_HOST": str(config.get("host", "host.docker.internal")),
-            "IBKR_PORT": str(config.get("port", 4001)),
-            "IBKR_CLIENT_ID": str(config.get("client_id", 100)),
             "REDIS_HOST": "redis",
             "REDIS_PORT": "6379",
             "CONNECTION_ID": str(connection_id),
             "DATA_DIR": "/opt/edgewalker/data",
             "LOG_LEVEL": "INFO",
         }
+        # Broker-specific env vars (from registry)
+        env.update(spec.env_mapper(config))
 
         volumes = {
-            # Runtime data only (edgewalker library is baked into the image)
             # Edgewalker configs
             f"{EDGEWALKER_PATH}/configs": {
                 "bind": "/opt/edgewalker/configs",
@@ -240,67 +313,69 @@ class ConnectionManager:
                 "mode": "ro",
             },
             # Application code — dev overlay (live reload)
-            f"{RUNTIME_PATH}/ibkr-gateway/app": {
+            f"{RUNTIME_PATH}/{spec.app_dir}": {
                 "bind": "/app/app",
                 "mode": "ro",
             },
         }
 
         labels = {
-            "edgewalker.type": "ibkr-gateway",
+            "edgewalker.type": spec.label,
+            "edgewalker.broker_type": broker_type,
             "edgewalker.connection_id": str(connection_id),
         }
 
-        extra_hosts = {"host.docker.internal": "host-gateway"}
+        extra_hosts = spec.extra_hosts or {}
 
         try:
             self._docker.containers.run(
-                image=GATEWAY_IMAGE,
+                image=spec.image,
                 name=container_name,
                 environment=env,
                 volumes=volumes,
                 labels=labels,
-                extra_hosts=extra_hosts,
+                extra_hosts=extra_hosts or None,
                 network=DOCKER_NETWORK,
                 user=f"{HOST_PUID}:{HOST_PGID}",
                 detach=True,
                 restart_policy={"Name": "unless-stopped"},
             )
-            logger.info("Spawned gateway container %s", container_name)
+            logger.info("Spawned %s gateway container %s", broker_type, container_name)
         except APIError as e:
             logger.error("Failed to spawn gateway container: %s", e)
             raise
 
-    def _destroy_gateway(self, connection_id: int) -> None:
+    def _destroy_gateway(self, connection_id: int, broker_type: str = "ibkr") -> None:
         """Stop and remove the gateway container for a Connection."""
-        container = self._get_container(connection_id)
+        container = self._get_container(connection_id, broker_type)
         if container:
             try:
                 container.stop(timeout=10)
                 container.remove(force=True)
-                logger.info("Destroyed gateway container %s", self._container_name(connection_id))
+                logger.info("Destroyed gateway container %s", self._container_name(connection_id, broker_type))
             except Exception as e:
                 logger.warning("Error destroying container: %s", e)
         _gateway_clients.pop(connection_id, None)
 
     # ── Gateway client ───────────────────────────────────────────────
 
-    def get_gateway_client(self, connection_id: int) -> IBKRGatewayClient:
+    def get_gateway_client(self, connection_id: int, broker_type: str = "ibkr") -> GatewayClient:
         """Get (or create) the HTTP client for a connection's gateway."""
         if connection_id not in _gateway_clients:
-            _gateway_clients[connection_id] = IBKRGatewayClient(connection_id)
+            _gateway_clients[connection_id] = GatewayClient(connection_id, broker_type=broker_type)
         return _gateway_clients[connection_id]
 
     # ── Connect ──────────────────────────────────────────────────────
 
     async def connect(self, connection_id: int) -> ConnectorResult:
-        """Connect to IBKR by spawning an ibkr-gateway container.
+        """Connect to a broker by spawning the appropriate gateway container.
 
         Steps:
-        1. Spawn ``ibkr-gw-{connection_id}`` container
-        2. Poll ``/health`` until the gateway is connected (up to 60 s)
-        3. Fetch discovered accounts from the gateway
-        4. Sync accounts into the DB
+        1. Look up the broker type from ``GATEWAY_REGISTRY``
+        2. Spawn ``<broker>-gw-{connection_id}`` container
+        3. Poll ``/health`` until the gateway is connected (up to 60 s)
+        4. Fetch discovered accounts from the gateway
+        5. Sync accounts into the DB
         """
         # Load connection from DB
         with get_session_context() as session:
@@ -311,10 +386,11 @@ class ConnectionManager:
             broker_type = conn.broker_type
             config = dict(conn.config or {})
 
-            if broker_type != "ibkr":
+            if get_gateway_spec(broker_type) is None:
                 return ConnectorResult(
                     success=False,
-                    message=f"Unsupported broker type: {broker_type}",
+                    message=f"Unsupported broker type: {broker_type}. "
+                            f"Registered types: {', '.join(GATEWAY_REGISTRY.keys())}",
                 )
 
             # Mark as "connecting" immediately
@@ -324,7 +400,7 @@ class ConnectionManager:
 
         # 1. Spawn the gateway container
         try:
-            self._spawn_gateway(connection_id, config)
+            self._spawn_gateway(connection_id, broker_type, config)
         except Exception as e:
             with get_session_context() as session:
                 _update_connection_status(
@@ -334,7 +410,7 @@ class ConnectionManager:
             return ConnectorResult(success=False, message=f"Failed to spawn gateway: {e}")
 
         # 2. Wait for the gateway to become healthy / connected
-        client = self.get_gateway_client(connection_id)
+        client = self.get_gateway_client(connection_id, broker_type)
         connected = False
         last_error = ""
         for attempt in range(30):  # 30 × 2 s = 60 s max
@@ -389,21 +465,22 @@ class ConnectionManager:
     # ── Disconnect ───────────────────────────────────────────────────
 
     async def disconnect(self, connection_id: int) -> ConnectorResult:
-        """Disconnect by destroying the ibkr-gateway container."""
+        """Disconnect by destroying the gateway container."""
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
             if conn is None:
                 return ConnectorResult(success=False, message="Connection not found")
+            broker_type = conn.broker_type
 
-        # Gracefully tell the gateway to disconnect IBKR first
+        # Gracefully tell the gateway to disconnect first
         try:
-            client = self.get_gateway_client(connection_id)
+            client = self.get_gateway_client(connection_id, broker_type)
             await client.disconnect()
         except Exception:
             pass  # Container may already be gone
 
         # Destroy the container
-        self._destroy_gateway(connection_id)
+        self._destroy_gateway(connection_id, broker_type)
 
         with get_session_context() as session:
             _update_connection_status(
@@ -422,15 +499,16 @@ class ConnectionManager:
             if conn is None:
                 return ConnectionStatus.DISCONNECTED.value
             stored_status = conn.status
+            broker_type = conn.broker_type
 
         # Check if the container exists and is running
-        container = self._get_container(connection_id)
+        container = self._get_container(connection_id, broker_type)
         if not container or container.status != "running":
             actual = ConnectionStatus.DISCONNECTED
         else:
             # Ask the gateway if it's still connected to IBKR
             try:
-                client = self.get_gateway_client(connection_id)
+                client = self.get_gateway_client(connection_id, broker_type)
                 is_alive = await client.is_connected()
                 actual = ConnectionStatus.CONNECTED if is_alive else ConnectionStatus.DISCONNECTED
             except Exception:
@@ -451,7 +529,7 @@ class ConnectionManager:
         # disconnect cycle) are re-activated.
         if actual == ConnectionStatus.CONNECTED:
             try:
-                client = self.get_gateway_client(connection_id)
+                client = self.get_gateway_client(connection_id, broker_type)
                 accounts = await client.get_accounts()
                 if accounts:
                     with get_session_context() as session:
@@ -560,23 +638,24 @@ class ConnectionManager:
         # DB status with actually running containers.
 
     def _cleanup_stale_containers(self) -> None:
-        """Remove any ibkr-gateway containers left from a previous run."""
+        """Remove any gateway containers left from a previous run."""
         if not self._docker:
             return
-        try:
-            containers = self._docker.containers.list(
-                all=True,
-                filters={"label": "edgewalker.type=ibkr-gateway"},
-            )
-            for c in containers:
-                try:
-                    c.stop(timeout=5)
-                    c.remove(force=True)
-                    logger.info("Cleaned up stale gateway container %s", c.name)
-                except Exception as e:
-                    logger.warning("Failed to clean up container %s: %s", c.name, e)
-        except Exception as e:
-            logger.warning("Failed to list gateway containers: %s", e)
+        for spec in GATEWAY_REGISTRY.values():
+            try:
+                containers = self._docker.containers.list(
+                    all=True,
+                    filters={"label": f"edgewalker.type={spec.label}"},
+                )
+                for c in containers:
+                    try:
+                        c.stop(timeout=5)
+                        c.remove(force=True)
+                        logger.info("Cleaned up stale gateway container %s", c.name)
+                    except Exception as e:
+                        logger.warning("Failed to clean up container %s: %s", c.name, e)
+            except Exception as e:
+                logger.warning("Failed to list gateway containers: %s", e)
 
     async def start(self) -> None:
         """Start the connection manager."""

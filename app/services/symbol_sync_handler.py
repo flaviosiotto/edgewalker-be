@@ -456,8 +456,12 @@ def search_ibkr_symbols(
     asset_type: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search IBKR symbols live via a named connection's ibkr-gateway."""
+    """Search symbols live via a named connection's gateway.
+
+    .. deprecated:: Use ``search_gateway_symbols_by_id`` instead.
+    """
     from app.services.connection_manager import get_connection_manager
+    from app.services.gateway_client import gateway_url_for
 
     with get_session_context() as session:
         stmt = select(Connection).where(Connection.name == connection_name)
@@ -466,20 +470,21 @@ def search_ibkr_symbols(
         if connection is None:
             raise ValueError(f"Connection '{connection_name}' not found")
 
-        if connection.broker_type != "ibkr":
+        if connection.broker_type == "yahoo":
             raise ValueError(
-                f"Connection '{connection_name}' is of type "
-                f"'{connection.broker_type}', expected 'ibkr'"
+                f"Connection '{connection_name}' is of type 'yahoo' "
+                f"which does not support live symbol search."
             )
 
         connection_id = connection.id
+        broker_type = connection.broker_type
 
     mgr = get_connection_manager()
-    container = mgr._get_container(connection_id)
+    container = mgr._get_container(connection_id, broker_type)
     if container and container.status == "running":
         import httpx
 
-        url = f"http://ibkr-gw-{connection_id}:8080/search"
+        url = f"{gateway_url_for(connection_id, broker_type)}/search"
         params: dict[str, str] = {"query": query}
         if asset_type:
             params["asset_type"] = asset_type
@@ -496,7 +501,7 @@ def search_ibkr_symbols(
                     "asset_type": s.get("asset_type", ""),
                     "exchange": s.get("exchange"),
                     "currency": s.get("currency", "USD"),
-                    "broker_type": "ibkr",
+                    "broker_type": broker_type,
                     "con_id": s.get("con_id"),
                     "extra_data": {
                         k: v for k, v in s.items()
@@ -507,35 +512,35 @@ def search_ibkr_symbols(
             ]
         except Exception as e:
             raise RuntimeError(
-                f"IBKR symbol search via gateway failed: {e}. "
+                f"Symbol search via gateway failed: {e}. "
                 f"Is the connection '{connection_name}' connected?"
             )
 
     raise RuntimeError(
-        f"No ibkr-gateway container running for connection '{connection_name}'. "
+        f"No gateway container running for connection '{connection_name}'. "
         f"Please connect first."
     )
 
 
-def search_ibkr_symbols_by_id(
+def search_gateway_symbols_by_id(
     query: str,
     connection_id: int,
+    broker_type: str = "ibkr",
     asset_type: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search IBKR symbols live via a connection's ibkr-gateway (by numeric ID).
+    """Search symbols live via a connection's gateway (by numeric ID).
 
-    For futures searches, checks Redis first for cached contract data
+    For IBKR futures searches, checks Redis first for cached contract data
     (populated by ibkr-gateway).  Falls back to the gateway HTTP search.
     """
     import os, json, redis as sync_redis
+    from app.services.gateway_client import gateway_url_for
 
-    # ── Redis cache check (contracts populated by ibkr-gateway) ──
-    # When asking for futures, contract lists are cached in Redis by
-    # the gateway under  ibkr:contracts:{connection_id}:{SYMBOL}
+    # ── Redis cache check (contracts populated by gateway) ──
     redis_host = os.getenv("REDIS_HOST", "redis")
     redis_port = int(os.getenv("REDIS_PORT", "6379"))
-    cache_key = f"ibkr:contracts:{connection_id}:{query.upper()}"
+    cache_key = f"{broker_type}:contracts:{connection_id}:{query.upper()}"
     try:
         r = sync_redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
         cached = r.get(cache_key)
@@ -550,7 +555,7 @@ def search_ibkr_symbols_by_id(
                         "asset_type": s.get("asset_type", ""),
                         "exchange": s.get("exchange"),
                         "currency": s.get("currency", "USD"),
-                        "broker_type": "ibkr",
+                        "broker_type": broker_type,
                         "con_id": s.get("con_id"),
                         "extra_data": {
                             k: v for k, v in s.items()
@@ -563,15 +568,15 @@ def search_ibkr_symbols_by_id(
     except Exception:
         pass  # Redis unavailable — fall through to HTTP
 
-    # ── Live search via ibkr-gateway HTTP ──
+    # ── Live search via gateway HTTP ──
     from app.services.connection_manager import get_connection_manager
 
     mgr = get_connection_manager()
-    container = mgr._get_container(connection_id)
+    container = mgr._get_container(connection_id, broker_type)
     if container and container.status == "running":
         import httpx
 
-        url = f"http://ibkr-gw-{connection_id}:8080/search"
+        url = f"{gateway_url_for(connection_id, broker_type)}/search"
         params: dict[str, str] = {"query": query}
         if asset_type:
             params["asset_type"] = asset_type
@@ -588,7 +593,7 @@ def search_ibkr_symbols_by_id(
                     "asset_type": s.get("asset_type", ""),
                     "exchange": s.get("exchange"),
                     "currency": s.get("currency", "USD"),
-                    "broker_type": "ibkr",
+                    "broker_type": broker_type,
                     "con_id": s.get("con_id"),
                     "extra_data": {
                         k: v for k, v in s.items()
@@ -599,11 +604,15 @@ def search_ibkr_symbols_by_id(
             ]
         except Exception as e:
             raise RuntimeError(
-                f"IBKR symbol search via gateway failed: {e}. "
+                f"Symbol search via gateway failed: {e}. "
                 f"Is connection {connection_id} connected?"
             )
 
     raise RuntimeError(
-        f"No ibkr-gateway container running for connection {connection_id}. "
+        f"No gateway container running for connection {connection_id}. "
         f"Please connect first."
     )
+
+
+# Backwards-compatible alias
+search_ibkr_symbols_by_id = search_gateway_symbols_by_id

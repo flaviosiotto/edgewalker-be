@@ -189,18 +189,19 @@ def search_symbols_endpoint(
             with get_session_context() as session:
                 conn = session.get(Connection, connection_id)
 
-            if conn and conn.broker_type == "ibkr":
-                from app.services.symbol_sync_handler import search_ibkr_symbols_by_id
+            if conn and conn.broker_type in ("ibkr", "binance"):
+                from app.services.symbol_sync_handler import search_gateway_symbols_by_id
 
-                results = search_ibkr_symbols_by_id(
+                results = search_gateway_symbols_by_id(
                     query=query,
                     connection_id=connection_id,
+                    broker_type=conn.broker_type,
                     asset_type=asset_type.value if asset_type else None,
                     limit=limit,
                 )
                 return AvailableSymbolsResponse(
                     symbols=results,
-                    source="ibkr",
+                    source=conn.broker_type,
                     asset_type=asset_type.value if asset_type else "all",
                     count=len(results),
                 )
