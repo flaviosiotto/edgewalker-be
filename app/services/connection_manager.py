@@ -77,6 +77,7 @@ def _binance_env(config: dict[str, Any]) -> dict[str, str]:
         "BINANCE_API_KEY": str(config.get("api_key", "")),
         "BINANCE_API_SECRET": str(config.get("api_secret", "")),
         "BINANCE_TESTNET": str(config.get("testnet", False)).lower(),
+        "BINANCE_MARKET_TYPE": str(config.get("market_type", "futures")),
     }
 
 
