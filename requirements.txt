@@ -17,3 +17,14 @@ TA-Lib
 yfinance
 redis>=5.0.0
 docker>=7.0.0
+
+# OpenTelemetry observability (async export, zero-latency-impact)
+opentelemetry-api>=1.25.0
+opentelemetry-sdk>=1.25.0
+opentelemetry-exporter-otlp-proto-grpc>=1.25.0
+opentelemetry-instrumentation-fastapi>=0.46b0
+opentelemetry-instrumentation-httpx>=0.46b0
+opentelemetry-instrumentation-redis>=0.46b0
+opentelemetry-instrumentation-sqlalchemy>=0.46b0
+opentelemetry-instrumentation-psycopg2>=0.46b0
+opentelemetry-instrumentation-logging>=0.46b0

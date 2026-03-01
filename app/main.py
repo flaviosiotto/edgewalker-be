@@ -8,6 +8,7 @@ from pathlib import Path
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
+from app.observability import init_telemetry, instrument_app
 from app.db.database import create_db_and_tables
 from app.api.auth import router as auth_router
 from app.api.users import router as users_router
@@ -22,6 +23,11 @@ from app.services.market_price_cache import price_cache
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
+
+# ---------------------------------------------------------------------------
+# Telemetry + Logging (replaces manual logging.basicConfig)
+# ---------------------------------------------------------------------------
+init_telemetry("backend", log_level=settings.LOG_LEVEL)
 
 
 @asynccontextmanager
@@ -42,28 +48,7 @@ async def lifespan(app: FastAPI):
     await stop_connection_manager()
 
 
-_level_name = (settings.LOG_LEVEL or "INFO").upper().strip()
-_valid = {
-    "CRITICAL": logging.CRITICAL,
-    "ERROR": logging.ERROR,
-    "WARNING": logging.WARNING,
-    "INFO": logging.INFO,
-    "DEBUG": logging.DEBUG,
-    "NOTSET": logging.NOTSET,
-}
-logging.basicConfig(
-    level=_valid.get(_level_name, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logging.getLogger(__name__).info(f"Logging initialized with level {_level_name}")
-
-
-class _HealthCheckFilter(logging.Filter):
-    """Suppress noisy health-check access-log lines."""
-    def filter(self, record: logging.LogRecord) -> bool:
-        return "GET /health" not in record.getMessage()
-
-logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
+logging.getLogger(__name__).info("Backend observability initialized")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -74,6 +59,7 @@ app = FastAPI(
     openapi_url="/openapi.json",
     lifespan=lifespan
 )
+instrument_app(app)
 
 _swagger_ui_dir = Path(os.environ.get("SWAGGER_UI_DIR", "/opt/swagger-ui"))
 _has_local_swagger_ui = _swagger_ui_dir.exists() and _swagger_ui_dir.is_dir()
