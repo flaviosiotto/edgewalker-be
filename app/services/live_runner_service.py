@@ -180,6 +180,11 @@ class LiveRunnerService:
             "BACKEND_URL": os.getenv("BACKEND_URL", "http://backend:8000"),
             # Database URL for direct order/position persistence + config loading
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
+            # OpenTelemetry — send metrics/traces to the shared OTel Collector
+            "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv(
+                "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"
+            ),
+            "OTEL_SERVICE_NAME": f"strategy-runner-{strategy_id}",
         }
 
         # Strategy live session ID (for DB writes)
