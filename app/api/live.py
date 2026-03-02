@@ -7,6 +7,7 @@ Includes endpoints for orders, trades, positions, and reconciliation.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,6 +24,8 @@ from app.schemas.live_trading import (
     LiveTradeRead,
     ReconciliationReport,
 )
+import redis as _redis
+
 from app.services.live_runner_service import live_runner_service
 from app.services.live_trading_service import (
     get_live_order,
@@ -48,6 +51,71 @@ from app.services.strategy_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/live", tags=["Live Trading"])
+
+# Redis connection for subscribe-config writes
+_REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+_REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+_SUBSCRIBE_CONFIG_TTL_S = 14400  # 4h — aligned with shared/constants.py
+
+
+def _set_live_timeframes(
+    symbol: str,
+    connection_id: int | str,
+    timeframes: list[str],
+) -> None:
+    """Write ``live_timeframes`` into the subscribe-config Hash.
+
+    Also publishes ``subscribe:changed`` so the ticks-aggregator picks
+    up the new live timeframes immediately.
+    """
+    import json as _json
+    import time as _time
+
+    key = f"config:subscribe:{symbol.upper()}:{connection_id}"
+    r = _redis.Redis(host=_REDIS_HOST, port=_REDIS_PORT, decode_responses=True)
+    try:
+        r.hset(key, mapping={
+            "live_timeframes": _json.dumps(timeframes),
+            "updated_at": str(int(_time.time() * 1000)),
+        })
+        r.expire(key, _SUBSCRIBE_CONFIG_TTL_S)
+        r.publish(
+            "subscribe:changed",
+            _json.dumps({"symbol": symbol.upper(), "connection_id": str(connection_id)}),
+        )
+        logger.info(
+            "Set live_timeframes=%s for %s conn=%s",
+            timeframes, symbol, connection_id,
+        )
+    finally:
+        r.close()
+
+
+def _clear_live_timeframes(
+    symbol: str,
+    connection_id: int | str,
+) -> None:
+    """Remove ``live_timeframes`` from the subscribe-config Hash."""
+    import json as _json
+    import time as _time
+
+    key = f"config:subscribe:{symbol.upper()}:{connection_id}"
+    r = _redis.Redis(host=_REDIS_HOST, port=_REDIS_PORT, decode_responses=True)
+    try:
+        r.hset(key, mapping={
+            "live_timeframes": _json.dumps([]),
+            "updated_at": str(int(_time.time() * 1000)),
+        })
+        r.publish(
+            "subscribe:changed",
+            _json.dumps({"symbol": symbol.upper(), "connection_id": str(connection_id)}),
+        )
+        logger.info(
+            "Cleared live_timeframes for %s conn=%s",
+            symbol, connection_id,
+        )
+    finally:
+        r.close()
 
 
 # ─── REQUEST/RESPONSE MODELS ───
@@ -293,7 +361,21 @@ def start_live_strategy(
         sl.started_at = datetime.now(timezone.utc)
         session.add(sl)
         session.commit()
-        
+
+        # Write live_timeframes to Redis subscribe-config so
+        # ticks-aggregator starts publishing to live:bars:*
+        try:
+            _conn_id = account_config.get("connection_id") if account_config else None
+            if _conn_id:
+                _set_live_timeframes(
+                    request.symbol, _conn_id, [request.timeframe],
+                )
+        except Exception as lt_err:
+            logger.warning(
+                "Failed to set live_timeframes for strategy %s: %s",
+                strategy_id, lt_err,
+            )
+
         # Notify manager agent
         try:
             notify_manager_live_start(
@@ -357,7 +439,17 @@ def stop_live_strategy(
             strategy_id=strategy_id,
             remove=remove,
         )
-        
+
+        # Clear live_timeframes so ticks-aggregator stops writing live:bars
+        try:
+            if sl.connection_id and sl.symbol:
+                _clear_live_timeframes(sl.symbol, sl.connection_id)
+        except Exception as lt_err:
+            logger.warning(
+                "Failed to clear live_timeframes for strategy %s: %s",
+                strategy_id, lt_err,
+            )
+
         sl.status = LiveStatus.STOPPED.value
         sl.container_id = None
         sl.stopped_at = datetime.now(timezone.utc)
