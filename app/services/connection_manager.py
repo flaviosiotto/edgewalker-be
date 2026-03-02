@@ -293,6 +293,12 @@ class ConnectionManager:
             "CONNECTION_ID": str(connection_id),
             "DATA_DIR": "/opt/edgewalker/data",
             "LOG_LEVEL": "INFO",
+            # Forward OTel endpoint so dynamically spawned containers
+            # export metrics/traces to the collector.
+            "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv(
+                "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"
+            ),
+            "OTEL_SERVICE_NAME": f"{spec.label}-{connection_id}",
         }
         # Broker-specific env vars (from registry)
         env.update(spec.env_mapper(config))
