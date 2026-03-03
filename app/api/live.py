@@ -52,66 +52,33 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/live", tags=["Live Trading"])
 
-# Redis connection for subscribe-config writes
+# Redis connection for config-live cleanup on stop
 _REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 _REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-_SUBSCRIBE_CONFIG_TTL_S = 14400  # 4h — aligned with shared/constants.py
 
 
-def _set_live_timeframes(
+def _clear_live_config(
     symbol: str,
     connection_id: int | str,
-    timeframes: list[str],
 ) -> None:
-    """Write ``live_timeframes`` into the subscribe-config Hash.
+    """Delete the ``config-live:subscribe`` Hash (safety net on stop).
 
-    Also publishes ``subscribe:changed`` so the ticks-aggregator picks
-    up the new live timeframes immediately.
+    The strategy-runner writes and manages this Hash during its
+    lifecycle.  On stop the backend deletes it as a safety net in case
+    the runner was killed before it could clean up.
     """
     import json as _json
-    import time as _time
 
-    key = f"config:subscribe:{symbol.upper()}:{connection_id}"
+    key = f"config-live:subscribe:{symbol.upper()}:{connection_id}"
     r = _redis.Redis(host=_REDIS_HOST, port=_REDIS_PORT, decode_responses=True)
     try:
-        r.hset(key, mapping={
-            "live_timeframes": _json.dumps(timeframes),
-            "updated_at": str(int(_time.time() * 1000)),
-        })
-        r.expire(key, _SUBSCRIBE_CONFIG_TTL_S)
+        r.delete(key)
         r.publish(
             "subscribe:changed",
             _json.dumps({"symbol": symbol.upper(), "connection_id": str(connection_id)}),
         )
         logger.info(
-            "Set live_timeframes=%s for %s conn=%s",
-            timeframes, symbol, connection_id,
-        )
-    finally:
-        r.close()
-
-
-def _clear_live_timeframes(
-    symbol: str,
-    connection_id: int | str,
-) -> None:
-    """Remove ``live_timeframes`` from the subscribe-config Hash."""
-    import json as _json
-    import time as _time
-
-    key = f"config:subscribe:{symbol.upper()}:{connection_id}"
-    r = _redis.Redis(host=_REDIS_HOST, port=_REDIS_PORT, decode_responses=True)
-    try:
-        r.hset(key, mapping={
-            "live_timeframes": _json.dumps([]),
-            "updated_at": str(int(_time.time() * 1000)),
-        })
-        r.publish(
-            "subscribe:changed",
-            _json.dumps({"symbol": symbol.upper(), "connection_id": str(connection_id)}),
-        )
-        logger.info(
-            "Cleared live_timeframes for %s conn=%s",
+            "Deleted config-live Hash for %s conn=%s (safety net)",
             symbol, connection_id,
         )
     finally:
@@ -362,19 +329,9 @@ def start_live_strategy(
         session.add(sl)
         session.commit()
 
-        # Write live_timeframes to Redis subscribe-config so
-        # ticks-aggregator starts publishing to live:bars:*
-        try:
-            _conn_id = account_config.get("connection_id") if account_config else None
-            if _conn_id:
-                _set_live_timeframes(
-                    request.symbol, _conn_id, [request.timeframe],
-                )
-        except Exception as lt_err:
-            logger.warning(
-                "Failed to set live_timeframes for strategy %s: %s",
-                strategy_id, lt_err,
-            )
+        # NOTE: The runner writes its own config-live:subscribe Hash with
+        # live_timeframes and indicators.  The backend no longer sets
+        # live_timeframes — the runner owns the live pipeline config.
 
         # Notify manager agent
         try:
@@ -440,13 +397,13 @@ def stop_live_strategy(
             remove=remove,
         )
 
-        # Clear live_timeframes so ticks-aggregator stops writing live:bars
+        # Clear config-live Hash so ticks-aggregator stops writing live:bars
         try:
             if sl.connection_id and sl.symbol:
-                _clear_live_timeframes(sl.symbol, sl.connection_id)
+                _clear_live_config(sl.symbol, sl.connection_id)
         except Exception as lt_err:
             logger.warning(
-                "Failed to clear live_timeframes for strategy %s: %s",
+                "Failed to clear config-live Hash for strategy %s: %s",
                 strategy_id, lt_err,
             )
 
