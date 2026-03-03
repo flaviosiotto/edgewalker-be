@@ -20,7 +20,7 @@ from app.models.connection import Account, Connection, ConnectionStatus
 from app.models.live_trading import (
     LiveOrder,
     LivePosition,
-    LiveTrade,
+    LiveFill,
     OrderStatus,
     PositionStatus,
 )
@@ -29,7 +29,7 @@ from app.schemas.live_trading import (
     LiveOrderUpdate,
     LivePositionCreate,
     LivePositionUpdate,
-    LiveTradeCreate,
+    LiveFillCreate,
     ReconciliationItem,
     ReconciliationReport,
 )
@@ -133,18 +133,18 @@ def list_active_orders(session: Session, strategy_live_id: int) -> list[LiveOrde
 
 
 # ═════════════════════════════════════════════════════════════════════
-# TRADES
+# FILLS
 # ═════════════════════════════════════════════════════════════════════
 
 
-def create_live_trade(
+def create_live_fill(
     session: Session,
     strategy_live_id: int,
     account_id: int | None,
-    payload: LiveTradeCreate,
-) -> LiveTrade:
-    """Record a live trade / fill."""
-    trade = LiveTrade(
+    payload: LiveFillCreate,
+) -> LiveFill:
+    """Record a live fill (immutable event)."""
+    fill = LiveFill(
         strategy_live_id=strategy_live_id,
         account_id=account_id,
         order_id=payload.order_id,
@@ -154,31 +154,31 @@ def create_live_trade(
         price=payload.price,
         commission=payload.commission,
         realized_pnl=payload.realized_pnl,
-        trade_time=payload.trade_time,
-        broker_trade_id=payload.broker_trade_id,
+        fill_time=payload.fill_time,
+        broker_fill_id=payload.broker_fill_id,
         extra=payload.extra,
     )
-    session.add(trade)
+    session.add(fill)
     session.commit()
-    session.refresh(trade)
+    session.refresh(fill)
     logger.info(
-        "Recorded live trade %s: %s %s qty=%s @%s (strategy_live=%s)",
-        trade.id, trade.side, trade.symbol, trade.quantity, trade.price, strategy_live_id,
+        "Recorded live fill %s: %s %s qty=%s @%s (strategy_live=%s)",
+        fill.id, fill.side, fill.symbol, fill.quantity, fill.price, strategy_live_id,
     )
-    return trade
+    return fill
 
 
-def list_live_trades(
+def list_live_fills(
     session: Session,
     strategy_live_id: int,
     *,
     limit: int = 200,
-) -> list[LiveTrade]:
-    """List live trades for a strategy live session."""
+) -> list[LiveFill]:
+    """List live fills for a strategy live session."""
     stmt = (
-        select(LiveTrade)
-        .where(LiveTrade.strategy_live_id == strategy_live_id)
-        .order_by(LiveTrade.trade_time.desc())  # type: ignore[union-attr]
+        select(LiveFill)
+        .where(LiveFill.strategy_live_id == strategy_live_id)
+        .order_by(LiveFill.fill_time.desc())  # type: ignore[union-attr]
         .limit(limit)
     )
     return list(session.exec(stmt).all())
@@ -318,20 +318,20 @@ def list_strategy_orders(
     return list(session.exec(stmt).all())
 
 
-def list_strategy_trades(
+def list_strategy_fills(
     session: Session,
     strategy_id: int,
     *,
     limit: int = 500,
-) -> list[LiveTrade]:
-    """List trades across ALL sessions for a strategy."""
+) -> list[LiveFill]:
+    """List fills across ALL sessions for a strategy."""
     live_ids = _live_ids_for_strategy(session, strategy_id)
     if not live_ids:
         return []
     stmt = (
-        select(LiveTrade)
-        .where(LiveTrade.strategy_live_id.in_(live_ids))  # type: ignore[union-attr]
-        .order_by(LiveTrade.trade_time.desc())  # type: ignore[union-attr]
+        select(LiveFill)
+        .where(LiveFill.strategy_live_id.in_(live_ids))  # type: ignore[union-attr]
+        .order_by(LiveFill.fill_time.desc())  # type: ignore[union-attr]
         .limit(limit)
     )
     return list(session.exec(stmt).all())

@@ -149,23 +149,24 @@ class LiveOrder(SQLModel, table=True):
     strategy_live: Optional["StrategyLive"] = Relationship(
         sa_relationship=relationship("StrategyLive", back_populates="orders")
     )
-    trades: list["LiveTrade"] = Relationship(
+    fills: list["LiveFill"] = Relationship(
         sa_relationship=relationship(
-            "LiveTrade",
+            "LiveFill",
             back_populates="order",
             cascade="all, delete-orphan",
         )
     )
 
 
-class LiveTrade(SQLModel, table=True):
+class LiveFill(SQLModel, table=True):
     """
-    An executed fill / trade from a live order.
+    An executed fill from a live order (immutable event).
 
-    Each fill from the broker creates a LiveTrade record.
+    Pattern: Order (command) → Fill (event) → Position (state).
+    Each fill from the broker creates a LiveFill record.
     Multiple fills may belong to a single order (partial fills).
     """
-    __tablename__ = "live_trades"
+    __tablename__ = "live_fills"
     __allow_unmapped__ = True
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -197,24 +198,24 @@ class LiveTrade(SQLModel, table=True):
         ),
     )
 
-    # Broker-assigned trade / execution identifier
-    broker_trade_id: Optional[str] = Field(
+    # Broker-assigned fill / execution identifier
+    broker_fill_id: Optional[str] = Field(
         default=None,
         sa_column=Column(String(100), nullable=True, index=True),
     )
 
-    # Trade details
+    # Fill details
     symbol: str = Field(sa_column=Column(String(32), nullable=False))
     side: str = Field(sa_column=Column(String(10), nullable=False))  # buy / sell
     quantity: float = Field(sa_column=Column(Float, nullable=False))
     price: float = Field(sa_column=Column(Float, nullable=False))
     commission: Optional[float] = Field(default=0.0, sa_column=Column(Float, nullable=True))
 
-    # P&L (realized, computed at trade time)
+    # P&L (realized, computed at fill time)
     realized_pnl: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
 
     # Timestamps
-    trade_time: datetime = Field(
+    fill_time: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
     )
     created_at: datetime = Field(
@@ -227,10 +228,10 @@ class LiveTrade(SQLModel, table=True):
 
     # Relationships
     strategy_live: Optional["StrategyLive"] = Relationship(
-        sa_relationship=relationship("StrategyLive", back_populates="trades")
+        sa_relationship=relationship("StrategyLive", back_populates="fills")
     )
     order: LiveOrder | None = Relationship(
-        sa_relationship=relationship("LiveOrder", back_populates="trades")
+        sa_relationship=relationship("LiveOrder", back_populates="fills")
     )
 
 

@@ -73,43 +73,43 @@ class LiveOrderRead(BaseModel):
     cancelled_at: datetime | None = None
     updated_at: datetime
     extra: dict[str, Any] | None = None
-    trades: list["LiveTradeRead"] = []
+    fills: list["LiveFillRead"] = []
 
     class Config:
         from_attributes = True
 
 
-# ── Trade Schemas ────────────────────────────────────────────────────
+# ── Fill Schemas ─────────────────────────────────────────────────────
 
 
-class LiveTradeCreate(BaseModel):
-    """Create a live trade / fill record."""
+class LiveFillCreate(BaseModel):
+    """Create a live fill record (immutable event)."""
     symbol: str
     side: OrderSideType
     quantity: float
     price: float
     commission: float = 0.0
     realized_pnl: float | None = None
-    trade_time: datetime
+    fill_time: datetime
     order_id: int | None = None
-    broker_trade_id: str | None = None
+    broker_fill_id: str | None = None
     extra: dict[str, Any] | None = None
 
 
-class LiveTradeRead(BaseModel):
-    """Response schema for a live trade."""
+class LiveFillRead(BaseModel):
+    """Response schema for a live fill."""
     id: int
     strategy_live_id: int
     account_id: int | None = None
     order_id: int | None = None
-    broker_trade_id: str | None = None
+    broker_fill_id: str | None = None
     symbol: str
     side: str
     quantity: float
     price: float
     commission: float | None = None
     realized_pnl: float | None = None
-    trade_time: datetime
+    fill_time: datetime
     created_at: datetime
     extra: dict[str, Any] | None = None
 

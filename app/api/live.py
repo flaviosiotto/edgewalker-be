@@ -21,7 +21,7 @@ from app.schemas.live_trading import (
     LiveOrderRead,
     LiveOrderUpdate,
     LivePositionRead,
-    LiveTradeRead,
+    LiveFillRead,
     ReconciliationReport,
 )
 import redis as _redis
@@ -31,12 +31,12 @@ from app.services.live_trading_service import (
     get_live_order,
     list_active_orders,
     list_live_orders,
-    list_live_trades,
+    list_live_fills,
     list_open_positions,
     list_positions,
     list_strategy_orders,
     list_strategy_positions,
-    list_strategy_trades,
+    list_strategy_fills,
     reconcile_on_startup,
     update_live_order,
     validate_account_for_live,
@@ -450,6 +450,36 @@ def stop_live_strategy(
                 strategy_id, lt_err,
             )
 
+        # Close any open DB positions for this session — safety net for
+        # cases where the runner didn't close them (crash, gateway DNS
+        # failure, forced container removal, etc.).
+        try:
+            from app.models.live_trading import LivePosition, PositionStatus
+            from sqlmodel import select as _select
+            open_positions = session.exec(
+                _select(LivePosition)
+                .where(LivePosition.strategy_live_id == sl.id)
+                .where(LivePosition.status == PositionStatus.OPEN.value)
+            ).all()
+            for pos in open_positions:
+                pos.status = PositionStatus.CLOSED.value
+                pos.side = "flat"
+                pos.quantity = 0
+                pos.closed_at = datetime.now(timezone.utc)
+                pos.updated_at = datetime.now(timezone.utc)
+                pos.extra = {**(pos.extra or {}), "closed_by": "backend_stop"}
+                session.add(pos)
+            if open_positions:
+                logger.info(
+                    "Closed %d orphan open position(s) on strategy %s stop",
+                    len(open_positions), strategy_id,
+                )
+        except Exception as pos_err:
+            logger.warning(
+                "Failed to close orphan positions on stop for strategy %s: %s",
+                strategy_id, pos_err,
+            )
+
         sl.status = LiveStatus.STOPPED.value
         sl.container_id = None
         sl.stopped_at = datetime.now(timezone.utc)
@@ -628,20 +658,20 @@ def get_order(
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LIVE TRADES  (read-only — runner writes directly to DB)
+# LIVE FILLS  (read-only — runner writes directly to DB)
 # ═════════════════════════════════════════════════════════════════════
 
 
-@router.get("/sessions/{live_id}/trades", response_model=list[LiveTradeRead])
-def list_session_trades(
+@router.get("/sessions/{live_id}/fills", response_model=list[LiveFillRead])
+def list_session_fills(
     live_id: int,
     limit: int = Query(200, ge=1, le=1000),
     session: Session = Depends(get_session),
 ):
-    """List live trades / fills for a session."""
+    """List live fills for a session."""
     _get_live_or_404(session, live_id)
-    trades = list_live_trades(session, live_id, limit=limit)
-    return [LiveTradeRead.model_validate(t) for t in trades]
+    fills = list_live_fills(session, live_id, limit=limit)
+    return [LiveFillRead.model_validate(f) for f in fills]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -742,16 +772,16 @@ def list_all_strategy_orders(
     return [LiveOrderRead.model_validate(o) for o in orders]
 
 
-@router.get("/strategies/{strategy_id}/trades", response_model=list[LiveTradeRead])
-def list_all_strategy_trades(
+@router.get("/strategies/{strategy_id}/fills", response_model=list[LiveFillRead])
+def list_all_strategy_fills(
     strategy_id: int,
     limit: int = Query(500, ge=1, le=5000),
     session: Session = Depends(get_session),
 ):
-    """List trades across ALL live sessions for a strategy."""
+    """List fills across ALL live sessions for a strategy."""
     _get_strategy_or_404(session, strategy_id)
-    trades = list_strategy_trades(session, strategy_id, limit=limit)
-    return [LiveTradeRead.model_validate(t) for t in trades]
+    fills = list_strategy_fills(session, strategy_id, limit=limit)
+    return [LiveFillRead.model_validate(f) for f in fills]
 
 
 @router.get("/strategies/{strategy_id}/positions", response_model=list[LivePositionRead])

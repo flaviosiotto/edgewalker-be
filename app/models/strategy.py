@@ -12,7 +12,7 @@ from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
     from app.models.agent import Chat
-    from app.models.live_trading import LiveOrder, LiveTrade, LivePosition
+    from app.models.live_trading import LiveOrder, LiveFill, LivePosition
 
 
 class BacktestStatus(str, Enum):
@@ -245,9 +245,9 @@ class StrategyLive(SQLModel, table=True):
             cascade="all, delete-orphan",
         )
     )
-    trades: list["LiveTrade"] = Relationship(
+    fills: list["LiveFill"] = Relationship(
         sa_relationship=relationship(
-            "LiveTrade",
+            "LiveFill",
             back_populates="strategy_live",
             cascade="all, delete-orphan",
         )
