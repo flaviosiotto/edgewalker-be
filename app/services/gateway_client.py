@@ -32,20 +32,25 @@ DEFAULT_TIMEOUT = 30.0
 FETCH_TIMEOUT = 300.0  # Historical fetches can be slow
 
 # Prefix map: broker_type → container name prefix.
-# Must stay in sync with GATEWAY_REGISTRY in connection_manager.py.
-_BROKER_PREFIX: dict[str, str] = {
+# Must stay in sync with GATEWAY_PREFIXES in shared/constants.py
+# (runtime services) and GATEWAY_REGISTRY in connection_manager.py.
+GATEWAY_PREFIXES: dict[str, str] = {
     "ibkr": "ibkr-gw-",
     "binance": "binance-gw-",
 }
 
 
-def gateway_url_for(connection_id: int | str, broker_type: str = "ibkr") -> str:
+def gateway_url_for(connection_id: int | str, broker_type: str) -> str:
     """Build the gateway base URL for a given connection.
 
     On the Docker network the container is named
     ``<broker>-gw-{connection_id}`` and listens on ``GATEWAY_PORT``.
+
+    Raises ``ValueError`` if *broker_type* is empty.
     """
-    prefix = _BROKER_PREFIX.get(broker_type, f"{broker_type}-gw-")
+    if not broker_type:
+        raise ValueError("broker_type is required")
+    prefix = GATEWAY_PREFIXES.get(broker_type, f"{broker_type}-gw-")
     return f"http://{prefix}{connection_id}:{GATEWAY_PORT}"
 
 
@@ -56,7 +61,7 @@ class GatewayClient:
         self,
         connection_id: int | str,
         *,
-        broker_type: str = "ibkr",
+        broker_type: str,
         base_url: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
@@ -223,7 +228,3 @@ class GatewayClient:
         """List open orders from the gateway (for reconciliation)."""
         resp = await self._get("/orders")
         return resp.get("orders", [])
-
-
-# Backwards-compatible alias
-IBKRGatewayClient = GatewayClient

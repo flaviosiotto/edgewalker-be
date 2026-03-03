@@ -246,12 +246,12 @@ class ConnectionManager:
 
     # ── Container management ─────────────────────────────────────────
 
-    def _container_name(self, connection_id: int, broker_type: str = "ibkr") -> str:
+    def _container_name(self, connection_id: int, broker_type: str) -> str:
         spec = get_gateway_spec(broker_type)
         prefix = spec.prefix if spec else f"{broker_type}-gw-"
         return f"{prefix}{connection_id}"
 
-    def _get_container(self, connection_id: int, broker_type: str = "ibkr"):
+    def _get_container(self, connection_id: int, broker_type: str):
         """Get existing gateway container for a connection, if any."""
         if not self._docker:
             return None
@@ -352,7 +352,7 @@ class ConnectionManager:
             logger.error("Failed to spawn gateway container: %s", e)
             raise
 
-    def _destroy_gateway(self, connection_id: int, broker_type: str = "ibkr") -> None:
+    def _destroy_gateway(self, connection_id: int, broker_type: str) -> None:
         """Stop and remove the gateway container for a Connection."""
         container = self._get_container(connection_id, broker_type)
         if container:
@@ -366,7 +366,7 @@ class ConnectionManager:
 
     # ── Gateway client ───────────────────────────────────────────────
 
-    def get_gateway_client(self, connection_id: int, broker_type: str = "ibkr") -> GatewayClient:
+    def get_gateway_client(self, connection_id: int, broker_type: str) -> GatewayClient:
         """Get (or create) the HTTP client for a connection's gateway."""
         if connection_id not in _gateway_clients:
             _gateway_clients[connection_id] = GatewayClient(connection_id, broker_type=broker_type)
@@ -433,7 +433,7 @@ class ConnectionManager:
 
         if not connected:
             # Teardown on failure
-            self._destroy_gateway(connection_id)
+            self._destroy_gateway(connection_id, broker_type)
             with get_session_context() as session:
                 _update_connection_status(
                     session, connection_id, ConnectionStatus.ERROR,
@@ -513,7 +513,7 @@ class ConnectionManager:
         if not container or container.status != "running":
             actual = ConnectionStatus.DISCONNECTED
         else:
-            # Ask the gateway if it's still connected to IBKR
+            # Ask the gateway if it's still connected to the broker
             try:
                 client = self.get_gateway_client(connection_id, broker_type)
                 is_alive = await client.is_connected()
