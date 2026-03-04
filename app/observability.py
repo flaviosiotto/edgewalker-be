@@ -116,6 +116,18 @@ def init_telemetry(
 
     logging.getLogger("uvicorn.access").addFilter(HealthCheckFilter())
 
+    # Suppress noisy third-party loggers
+    for _noisy_logger in (
+        "urllib3",
+        "asyncio",
+        "websockets",
+        "hpack",
+        "httpcore",
+        "httpx",
+        "grpc",
+    ):
+        logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
     if not endpoint or not _OTEL_AVAILABLE:
         if not _OTEL_AVAILABLE:
@@ -140,6 +152,16 @@ def init_telemetry(
     meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
     from opentelemetry import metrics as otel_metrics
     otel_metrics.set_meter_provider(meter_provider)
+
+    # Suppress noisy SDK exporter logs when collector is unreachable
+    for _exporter_logger_name in (
+        "opentelemetry.exporter.otlp.proto.grpc.exporter",
+        "opentelemetry.exporter.otlp.proto.grpc._log_exporter",
+        "opentelemetry.sdk.trace.export",
+        "opentelemetry.sdk.metrics.export",
+        "opentelemetry.sdk._logs.export",
+    ):
+        logging.getLogger(_exporter_logger_name).setLevel(logging.CRITICAL)
 
     # Auto-instrumentation
     try:
