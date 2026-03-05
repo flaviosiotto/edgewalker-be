@@ -637,52 +637,19 @@ def list_session_fills(
 
 
 def _enrich_position(pos) -> LivePositionRead:
-    """Enrich a LivePosition DB model with computed real-time PnL fields.
+    """Enrich a LivePosition DB model with computed PnL fields.
 
-    Reads the last market price from the in-memory Redis cache and
-    computes:
-      - ``computed_unrealized_pnl`` = (last_price - avg_price) * qty * direction
-      - ``computed_market_value``   = last_price * qty
-      - ``total_commission``        = sum of commissions from fills
-      - ``net_pnl``                 = realized + unrealized - commissions
+    Computes:
+      - ``total_commission`` = sum of commissions from fills
+      - ``net_pnl``          = realized - commissions
     """
-    from app.services.market_price_cache import price_cache
-
     data = LivePositionRead.model_validate(pos)
 
     # Extract total commission from position extra
     total_comm = (pos.extra or {}).get("total_commission", 0) or 0
     data.total_commission = total_comm
 
-    if pos.status != "open" or pos.quantity == 0 or pos.avg_price is None:
-        data.net_pnl = (pos.realized_pnl or 0) - total_comm
-        return data
-
-    # Look up last market price
-    price_info = price_cache.get_last_price(pos.symbol)
-    if price_info and price_info.get("price") is not None:
-        last = price_info["price"]
-        data.last_price = last
-        data.price_age_seconds = price_info.get("age_seconds")
-        data.computed_market_value = last * pos.quantity
-
-        # Unrealized PnL
-        if pos.side == "long":
-            data.computed_unrealized_pnl = (last - pos.avg_price) * pos.quantity
-        elif pos.side == "short":
-            data.computed_unrealized_pnl = (pos.avg_price - last) * pos.quantity
-        else:
-            data.computed_unrealized_pnl = 0
-
-        # Net PnL = realized + unrealized - commissions
-        data.net_pnl = (
-            (pos.realized_pnl or 0)
-            + (data.computed_unrealized_pnl or 0)
-            - total_comm
-        )
-    else:
-        # No live price available — return DB values only
-        data.net_pnl = (pos.realized_pnl or 0) - total_comm
+    data.net_pnl = (pos.realized_pnl or 0) - total_comm
 
     return data
 
