@@ -5,7 +5,7 @@ connect / disconnect lifecycle and auto-discovers accounts.
 **Architecture (v2 — gateway-per-connection):**
 
 When the user clicks "Connect" the manager spawns a dedicated
-``<broker>-gateway`` Docker container for that Connection.  The container
+``gateway-v2`` Docker container for that Connection.  The container
 maintains the persistent broker connection(s) and exposes a REST API.
 All further operations (search, streaming, historical fetch, orders)
 are routed through that container via ``GatewayClient``.
@@ -94,21 +94,23 @@ class GatewaySpec:
     extra_hosts: dict[str, str] | None = None
 
 
+_GATEWAY_V2_IMAGE = os.getenv("GATEWAY_V2_IMAGE", "edgewalker-devops-gateway-v2:latest")
+
 GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
     "ibkr": GatewaySpec(
-        image=os.getenv("IBKR_GATEWAY_IMAGE", "edgewalker-devops-ibkr-gateway:latest"),
-        prefix="ibkr-gw-",
-        label="ibkr-gateway",
+        image=_GATEWAY_V2_IMAGE,
+        prefix="gw-v2-",
+        label="gateway-v2",
         env_mapper=_ibkr_env,
-        app_dir="ibkr-gateway/app",
+        app_dir="gateway-v2/app",
         extra_hosts={"host.docker.internal": "host-gateway"},
     ),
     "binance": GatewaySpec(
-        image=os.getenv("BINANCE_GATEWAY_IMAGE", "edgewalker-devops-binance-gateway:latest"),
-        prefix="binance-gw-",
-        label="binance-gateway",
+        image=_GATEWAY_V2_IMAGE,
+        prefix="gw-v2-",
+        label="gateway-v2",
         env_mapper=_binance_env,
-        app_dir="binance-gateway/app",
+        app_dir="gateway-v2/app",
     ),
 }
 
@@ -288,6 +290,7 @@ class ConnectionManager:
 
         # Common env vars (shared by all gateways)
         env = {
+            "BROKER_TYPE": broker_type,
             "REDIS_HOST": "redis",
             "REDIS_PORT": "6379",
             "CONNECTION_ID": str(connection_id),
@@ -593,7 +596,7 @@ class ConnectionManager:
     def _reset_connected_on_startup(self) -> None:
         """Reset all 'connected' statuses to 'disconnected' on boot.
 
-        Also cleans up any orphan ibkr-gateway containers that were left
+        Also cleans up any orphan gateway-v2 containers that were left
         running from a previous backend instance.
         """
         with get_session_context() as session:
