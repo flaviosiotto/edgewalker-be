@@ -235,6 +235,11 @@ class LiveRunnerService:
         
         # Volume mounts
         volumes = {
+            # Runner application source (dev: host-mounted for live code changes)
+            "/home/flavio/playground/edgewalker-runtime/strategy-runner/app": {
+                "bind": "/app/app",
+                "mode": "ro",
+            },
             # Shared schemas
             "/home/flavio/playground/edgewalker-runtime/shared": {
                 "bind": "/app/shared",
