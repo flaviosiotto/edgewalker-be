@@ -537,7 +537,6 @@ def trigger_rule_agent(
         chat_id: ID of the chat to use for the conversation
         rule_context: Context data from the rule evaluation including:
             - rule_name: Name of the triggered rule
-            - trigger_type: 'event' | 'time' | 'both'
             - timestamp: When the rule was triggered
             - bar_data: Current bar OHLCV data
             - indicators: Current indicator values
@@ -692,25 +691,6 @@ def notify_manager_live_start(
             k: v for k, v in account_config.items()
             if k not in ("password", "secret", "token")
         }
-
-    # Persist a system message in chat history
-    system_msg = N8nChatHistory(
-        session_id=live_chat.n8n_session_id,
-        message={
-            "type": "ai",
-            "text": (
-                f"🚀 **Strategia avviata in Live**\n\n"
-                f"- **Strategia**: {strategy.name}\n"
-                f"- **Simbolo**: {symbol}\n"
-                f"- **Timeframe**: {timeframe}\n"
-                f"- **Avvio**: {context['live_started_at']}\n\n"
-                f"Sono il manager di questa strategia. "
-                f"Riporterò le attività in tempo reale e risponderò alle domande."
-            ),
-        },
-    )
-    session.add(system_msg)
-    session.commit()
 
     # Fire webhook (fire-and-forget style, but log errors)
     chat_input = (

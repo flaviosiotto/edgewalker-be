@@ -43,7 +43,6 @@ from app.services.live_trading_service import (
 )
 from app.services.strategy_service import get_strategy
 from app.services.strategy_service import (
-    notify_manager_live_start,
     post_manager_message,
     get_or_create_live_chat,
 )
@@ -258,9 +257,13 @@ def start_live_strategy(
         )
     
     try:
+        live_chat = get_or_create_live_chat(session, strategy_id)
+
         # Create a new StrategyLive session
         sl = StrategyLive(
             strategy_id=strategy_id,
+            chat_id=live_chat.id,
+            manager_agent_id=strategy.manager_agent_id,
             status=LiveStatus.STARTING.value,
             symbol=request.symbol,
             timeframe=request.timeframe,
@@ -286,14 +289,12 @@ def start_live_strategy(
         
         # Resolve manager agent webhook URL for the runner
         _mgr_webhook: str | None = None
-        _mgr_session_id: str | None = None
+        _mgr_session_id: str | None = live_chat.n8n_session_id
         if strategy.manager_agent_id:
             from app.models.agent import Agent
             _mgr_agent = session.get(Agent, strategy.manager_agent_id)
             if _mgr_agent:
                 _mgr_webhook = _mgr_agent.n8n_webhook
-            _live_chat = get_or_create_live_chat(session, strategy_id)
-            _mgr_session_id = _live_chat.n8n_session_id
 
         result = live_runner_service.start_strategy(
             strategy_id=strategy_id,
@@ -333,21 +334,6 @@ def start_live_strategy(
         # live_timeframes and indicators.  The backend no longer sets
         # live_timeframes — the runner owns the live pipeline config.
 
-        # Notify manager agent
-        try:
-            notify_manager_live_start(
-                session=session,
-                strategy_id=strategy_id,
-                symbol=request.symbol,
-                timeframe=request.timeframe,
-                account_config=account_config,
-            )
-        except Exception as notify_err:
-            logger.warning(
-                "Failed to notify manager agent for strategy %s: %s",
-                strategy_id, notify_err,
-            )
-        
         return LiveStartResponse(
             status="started",
             container_id=result.get("container_id"),

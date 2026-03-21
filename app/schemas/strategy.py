@@ -17,6 +17,8 @@ class StrategyLiveRead(BaseModel):
     """Runtime state of a live strategy session."""
     id: int
     strategy_id: int
+    chat_id: Optional[int] = None
+    manager_agent_id: Optional[int] = None
     status: LiveStatus = "stopped"
     container_id: Optional[str] = None
     symbol: Optional[str] = None

@@ -240,6 +240,13 @@ class LiveRunnerService:
                 "bind": "/app/app",
                 "mode": "ro",
             },
+            # Edgewalker library source (runner image installs it in editable mode)
+            # so mounting the package keeps TradeAction/rule parsing in sync without
+            # rebuilding the image on every local library change.
+            "/home/flavio/playground/edgewalker/edgewalker": {
+                "bind": "/opt/edgewalker/edgewalker",
+                "mode": "ro",
+            },
             # Shared schemas
             "/home/flavio/playground/edgewalker-runtime/shared": {
                 "bind": "/app/shared",

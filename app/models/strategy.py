@@ -11,7 +11,7 @@ from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
-    from app.models.agent import Chat
+    from app.models.agent import Agent, Chat
     from app.models.live_trading import LiveOrder, LiveFill, LivePosition
 
 
@@ -161,6 +161,26 @@ class StrategyLive(SQLModel, table=True):
         )
     )
 
+    chat_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("chat.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+
+    manager_agent_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("agent.id_agent", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+
     status: str = Field(
         default=LiveStatus.STOPPED.value,
         sa_column=Column(String(20), nullable=False, index=True),
@@ -236,6 +256,14 @@ class StrategyLive(SQLModel, table=True):
     # Relationships
     strategy: Strategy = Relationship(
         sa_relationship=relationship("Strategy", back_populates="live_sessions")
+    )
+
+    chat: Optional["Chat"] = Relationship(
+        sa_relationship=relationship("Chat", foreign_keys="[StrategyLive.chat_id]")
+    )
+
+    manager_agent: Optional["Agent"] = Relationship(
+        sa_relationship=relationship("Agent", foreign_keys="[StrategyLive.manager_agent_id]")
     )
 
     orders: list["LiveOrder"] = Relationship(

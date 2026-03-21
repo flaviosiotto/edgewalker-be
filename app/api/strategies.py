@@ -252,17 +252,15 @@ def trigger_agent_endpoint(
     """Trigger an agent webhook when an ask_agent rule is activated.
     
     This endpoint is called during backtest execution when a rule with
-    action='ask_agent' has its conditions satisfied (event-based or time-based).
+    action='ask_agent' has its conditions satisfied.
     
     The rule_context should contain:
     - rule_name: Name of the triggered rule
-    - trigger_type: 'event' | 'time' | 'both'
     - timestamp: When the rule was triggered
     - bar_data: Current bar OHLCV data
     - indicators: Current indicator values
     - position: Current position info
-    - conditions_matched: List of matched conditions (for event triggers)
-    - time_trigger: Time trigger info (for time-based triggers)
+    - conditions_matched: List of matched conditions
     """
     result = trigger_rule_agent(
         session=session,
