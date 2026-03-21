@@ -18,6 +18,9 @@ from sqlmodel import Session
 from app.db.database import get_session
 from app.models.strategy import LiveStatus, StrategyLive
 from app.schemas.live_trading import (
+    LiveAlertCreate,
+    LiveAlertRead,
+    LiveAlertUpdate,
     LiveOrderRead,
     LiveOrderUpdate,
     LivePositionRead,
@@ -40,6 +43,13 @@ from app.services.live_trading_service import (
     reconcile_on_startup,
     update_live_order,
     validate_account_for_live,
+)
+from app.services.live_alert_service import (
+    create_live_alert,
+    delete_live_alert,
+    get_live_alert,
+    list_live_alerts,
+    update_live_alert,
 )
 from app.services.strategy_service import get_strategy
 from app.services.strategy_service import (
@@ -615,6 +625,73 @@ def list_session_fills(
     _get_live_or_404(session, live_id)
     fills = list_live_fills(session, live_id, limit=limit)
     return [LiveFillRead.model_validate(f) for f in fills]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LIVE ALERTS  (persistent source of truth for runner-managed alerts)
+# ═════════════════════════════════════════════════════════════════════
+
+
+@router.get("/sessions/{live_id}/alerts", response_model=list[LiveAlertRead])
+def list_session_alerts(
+    live_id: int,
+    enabled: bool | None = Query(None, description="Filter by enabled flag"),
+    status: str | None = Query(None, description="Filter by alert status"),
+    session: Session = Depends(get_session),
+):
+    """List persistent alerts for a live session."""
+    _get_live_or_404(session, live_id)
+    alerts = list_live_alerts(session, live_id, enabled=enabled, status=status)
+    return [LiveAlertRead.model_validate(a) for a in alerts]
+
+
+@router.post("/sessions/{live_id}/alerts", response_model=LiveAlertRead, status_code=status.HTTP_201_CREATED)
+def create_session_alert(
+    live_id: int,
+    payload: LiveAlertCreate,
+    session: Session = Depends(get_session),
+):
+    """Create a persistent alert for a live session."""
+    _get_live_or_404(session, live_id)
+    alert = create_live_alert(session, live_id, payload)
+    return LiveAlertRead.model_validate(alert)
+
+
+@router.get("/alerts/{alert_id}", response_model=LiveAlertRead)
+def get_alert(
+    alert_id: int,
+    session: Session = Depends(get_session),
+):
+    """Get a single persistent live alert by ID."""
+    alert = get_live_alert(session, alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    return LiveAlertRead.model_validate(alert)
+
+
+@router.patch("/alerts/{alert_id}", response_model=LiveAlertRead)
+def patch_alert(
+    alert_id: int,
+    payload: LiveAlertUpdate,
+    session: Session = Depends(get_session),
+):
+    """Update a persistent live alert."""
+    alert = update_live_alert(session, alert_id, payload)
+    if alert is None:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    return LiveAlertRead.model_validate(alert)
+
+
+@router.delete("/alerts/{alert_id}")
+def remove_alert(
+    alert_id: int,
+    session: Session = Depends(get_session),
+):
+    """Delete a persistent live alert."""
+    deleted = delete_live_alert(session, alert_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    return {"status": "deleted", "id": alert_id}
 
 
 # ═════════════════════════════════════════════════════════════════════

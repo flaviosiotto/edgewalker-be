@@ -5,7 +5,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Column, ForeignKey, String, Date, DateTime, Integer, Numeric, Text, Float
+from sqlalchemy import Column, ForeignKey, String, Date, DateTime, Integer, Numeric, Text, Float, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
@@ -13,6 +13,7 @@ from sqlmodel import Field, Relationship, SQLModel
 if TYPE_CHECKING:
     from app.models.agent import Agent, Chat
     from app.models.live_trading import LiveOrder, LiveFill, LivePosition
+    from app.models.strategy import LiveAlert
 
 
 class BacktestStatus(str, Enum):
@@ -286,6 +287,72 @@ class StrategyLive(SQLModel, table=True):
             back_populates="strategy_live",
             cascade="all, delete-orphan",
         )
+    )
+    alerts: list["LiveAlert"] = Relationship(
+        sa_relationship=relationship(
+            "LiveAlert",
+            back_populates="strategy_live",
+            cascade="all, delete-orphan",
+            order_by="LiveAlert.created_at.desc()",
+        )
+    )
+
+
+class LiveAlert(SQLModel, table=True):
+    """Persistent alert definition for a live strategy session."""
+    __tablename__ = "live_alert"
+    __allow_unmapped__ = True
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    strategy_live_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("strategy_live.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+
+    request_id: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(100), nullable=True, index=True),
+    )
+    name: str = Field(sa_column=Column(String(255), nullable=False))
+    trigger_type: str = Field(sa_column=Column(String(32), nullable=False, index=True))
+    trigger: Any = Field(sa_column=Column(JSONB, nullable=False))
+    recipient: str = Field(default="agent", sa_column=Column(String(32), nullable=False))
+    fire_mode: str = Field(default="once", sa_column=Column(String(16), nullable=False))
+    enabled: bool = Field(default=True, sa_column=Column(Boolean, nullable=False, server_default="true"))
+    status: str = Field(default="active", sa_column=Column(String(20), nullable=False, index=True))
+    message: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    expires_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    last_triggered_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    trigger_count: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
+    last_triggered_price: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    last_error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    target: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    metadata_json: Optional[Any] = Field(
+        default=None,
+        sa_column=Column("metadata", JSONB, nullable=True),
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+    strategy_live: "StrategyLive" = Relationship(
+        sa_relationship=relationship("StrategyLive", back_populates="alerts")
     )
 
 

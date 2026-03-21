@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 # ── Status literals ──────────────────────────────────────────────────
@@ -19,6 +19,9 @@ PositionStatusType = Literal["open", "closed"]
 OrderSideType = Literal["buy", "sell"]
 OrderTypeType = Literal["market", "limit", "stop", "stop_limit"]
 PositionSideType = Literal["long", "short", "flat"]
+AlertRecipientType = Literal["agent"]
+AlertFireModeType = Literal["once", "always"]
+AlertStatusType = Literal["active", "disabled", "expired", "triggered"]
 
 
 # ── Order Schemas ────────────────────────────────────────────────────
@@ -173,6 +176,75 @@ class LivePositionRead(BaseModel):
     total_commission: float | None = None
     net_pnl: float | None = None
     price_age_seconds: float | None = None
+
+    class Config:
+        from_attributes = True
+
+
+# ── Alert Schemas ────────────────────────────────────────────────────
+
+
+class LiveAlertCreate(BaseModel):
+    """Create a persistent live alert."""
+    request_id: str | None = None
+    name: str = Field(..., min_length=1, max_length=255)
+    trigger_type: str = Field(..., description="Trigger type: price_level or condition_group")
+    trigger: dict[str, Any] = Field(..., description="Trigger configuration payload")
+    recipient: AlertRecipientType = "agent"
+    fire_mode: AlertFireModeType = "once"
+    enabled: bool = True
+    status: AlertStatusType = "active"
+    message: str | None = None
+    expires_at: datetime | None = None
+    target: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class LiveAlertUpdate(BaseModel):
+    """Update a persistent live alert."""
+    request_id: str | None = None
+    name: str | None = Field(None, min_length=1, max_length=255)
+    trigger_type: str | None = None
+    trigger: dict[str, Any] | None = None
+    recipient: AlertRecipientType | None = None
+    fire_mode: AlertFireModeType | None = None
+    enabled: bool | None = None
+    status: AlertStatusType | None = None
+    message: str | None = None
+    expires_at: datetime | None = None
+    last_triggered_at: datetime | None = None
+    trigger_count: int | None = None
+    last_triggered_price: float | None = None
+    last_error: str | None = None
+    target: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class LiveAlertRead(BaseModel):
+    """Response schema for a persistent live alert."""
+    id: int
+    strategy_live_id: int
+    request_id: str | None = None
+    name: str
+    trigger_type: str
+    trigger: dict[str, Any]
+    recipient: str
+    fire_mode: str
+    enabled: bool
+    status: str
+    message: str | None = None
+    expires_at: datetime | None = None
+    last_triggered_at: datetime | None = None
+    trigger_count: int
+    last_triggered_price: float | None = None
+    last_error: str | None = None
+    target: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("metadata", "metadata_json"),
+    )
+    created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True
