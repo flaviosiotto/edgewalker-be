@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import BaseModel, Field
 
 
 # ── Status literals ──────────────────────────────────────────────────
@@ -239,10 +239,7 @@ class LiveAlertRead(BaseModel):
     last_triggered_price: float | None = None
     last_error: str | None = None
     target: dict[str, Any] | None = None
-    metadata: dict[str, Any] | None = Field(
-        default=None,
-        validation_alias=AliasChoices("metadata", "metadata_json"),
-    )
+    metadata: dict[str, Any] | None = Field(default=None, validation_alias="metadata_json")
     created_at: datetime
     updated_at: datetime
 
