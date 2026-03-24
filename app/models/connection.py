@@ -26,6 +26,8 @@ class BrokerType(str, Enum):
 class ConnectionStatus(str, Enum):
     """Connection status."""
     CONNECTED = "connected"
+    CONNECTING = "connecting"
+    AWAITING_AUTH = "awaiting_auth"
     DISCONNECTED = "disconnected"
     ERROR = "error"
 

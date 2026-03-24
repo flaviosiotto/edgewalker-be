@@ -39,6 +39,7 @@ from app.services.connection_service import (
     list_connections,
     update_connection,
 )
+from app.services.client_portal_service import is_client_portal_transport
 from app.services.connection_manager import get_connection_manager
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,19 @@ class ConnectDisconnectResponse(BaseModel):
     success: bool
     message: str | None = None
     accounts_discovered: int = 0
+    auth_required: bool = False
+    auth_url: str | None = None
+
+
+class ClientPortalAuthStatusResponse(BaseModel):
+    service_ready: bool
+    session_authenticated: bool = False
+    authenticated: bool
+    bridge_ready: bool = False
+    gateway_started: bool
+    connection_status: str
+    auth_url: str | None = None
+    message: str | None = None
 
 
 @router.post("/{connection_id}/connect", response_model=ConnectDisconnectResponse)
@@ -158,8 +172,62 @@ async def connect_endpoint(
         raise HTTPException(status_code=404, detail="Connection not found")
 
     manager = get_connection_manager()
+
+    if conn.broker_type == "ibkr" and is_client_portal_transport(conn.config or {}):
+        auth = await manager.begin_client_portal_auth(connection_id)
+        if auth["authenticated"]:
+            result = await manager.complete_client_portal_connect(connection_id)
+            return ConnectDisconnectResponse(
+                success=result.success,
+                message=result.message,
+                accounts_discovered=len(result.accounts) if result.accounts else 0,
+            )
+
+        return ConnectDisconnectResponse(
+            success=auth["service_ready"],
+            message=auth["message"],
+            auth_required=auth["service_ready"],
+            auth_url=auth["auth_url"],
+        )
+
     result = await manager.connect(connection_id)
 
+    return ConnectDisconnectResponse(
+        success=result.success,
+        message=result.message,
+        accounts_discovered=len(result.accounts) if result.accounts else 0,
+    )
+
+
+@router.get("/{connection_id}/client-portal/auth-status", response_model=ClientPortalAuthStatusResponse)
+async def client_portal_auth_status_endpoint(
+    connection_id: int,
+    session: Session = Depends(get_session),
+):
+    conn = get_connection(session, connection_id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.broker_type != "ibkr" or not is_client_portal_transport(conn.config or {}):
+        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR Client Portal")
+
+    manager = get_connection_manager()
+    payload = await manager.client_portal_auth_status(connection_id)
+    return ClientPortalAuthStatusResponse(**payload)
+
+
+@router.post("/{connection_id}/client-portal/connect", response_model=ConnectDisconnectResponse)
+async def complete_client_portal_connect_endpoint(
+    connection_id: int,
+    session: Session = Depends(get_session),
+):
+    conn = get_connection(session, connection_id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.broker_type != "ibkr" or not is_client_portal_transport(conn.config or {}):
+        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR Client Portal")
+
+    manager = get_connection_manager()
+    result = await manager.complete_client_portal_connect(connection_id)
     return ConnectDisconnectResponse(
         success=result.success,
         message=result.message,

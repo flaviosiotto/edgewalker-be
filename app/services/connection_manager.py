@@ -30,6 +30,12 @@ from sqlmodel import Session, select
 from app.db.database import get_session_context
 from app.models.connection import Account, Connection, ConnectionStatus
 from app.services.broker_connectors.base import ConnectorResult, DiscoveredAccount
+from app.services.client_portal_service import (
+    get_client_portal_auth_status,
+    is_client_portal_transport,
+    logout_client_portal_session,
+    resolve_client_portal_browser_url,
+)
 from app.services.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
@@ -64,10 +70,22 @@ HOST_PGID = os.getenv("PGID", "1000")
 
 def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
     """Build env vars for an ibkr-gateway container."""
+    transport = str(config.get("transport", "legacy"))
     return {
         "IBKR_HOST": str(config.get("host", "host.docker.internal")),
         "IBKR_PORT": str(config.get("port", 4001)),
         "IBKR_CLIENT_ID": str(config.get("client_id", 100)),
+        "IBKR_TRANSPORT": transport,
+        "CLIENT_PORTAL_ENABLED": str(config.get("client_portal_enabled", transport == "client_portal")).lower(),
+        "CLIENT_PORTAL_BASE_URL": str(
+            config.get("client_portal_base_url", os.getenv("CLIENT_PORTAL_BASE_URL", "https://ibkr-client-portal-gw:5000"))
+        ),
+        "CLIENT_PORTAL_BROWSER_URL": str(
+            config.get("client_portal_browser_url", os.getenv("CLIENT_PORTAL_BROWSER_URL", ""))
+        ),
+        "CLIENT_PORTAL_VERIFY_SSL": str(
+            config.get("client_portal_verify_ssl", os.getenv("CLIENT_PORTAL_VERIFY_SSL", "false"))
+        ).lower(),
     }
 
 
@@ -375,6 +393,85 @@ class ConnectionManager:
             _gateway_clients[connection_id] = GatewayClient(connection_id, broker_type=broker_type)
         return _gateway_clients[connection_id]
 
+    async def begin_client_portal_auth(self, connection_id: int) -> dict[str, Any]:
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                raise ValueError("Connection not found")
+            config = dict(conn.config or {})
+
+        auth = await get_client_portal_auth_status(config)
+        message = "Autenticazione IBKR richiesta nel popup Client Portal."
+        if auth["authenticated"]:
+            message = "Sessione Client Portal pronta per il gateway."
+        elif auth["service_ready"] and auth.get("session_authenticated") and not auth.get("bridge_ready"):
+            message = "Sessione Client Portal autenticata ma bridge brokerage non pronto. Attendi il completamento del login IBKR."
+        elif not auth["service_ready"]:
+            message = f"Client Portal non raggiungibile: {auth['message']}"
+
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is not None:
+                conn.status = ConnectionStatus.AWAITING_AUTH.value
+                conn.status_message = message
+                conn.updated_at = datetime.now(timezone.utc)
+                session.commit()
+
+        return {
+            "service_ready": auth["service_ready"],
+            "authenticated": auth["authenticated"],
+            "auth_url": resolve_client_portal_browser_url(config),
+            "message": message,
+        }
+
+    async def complete_client_portal_connect(self, connection_id: int) -> ConnectorResult:
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                return ConnectorResult(success=False, message="Connection not found")
+            config = dict(conn.config or {})
+
+        auth = await get_client_portal_auth_status(config)
+        if not auth["service_ready"]:
+            return ConnectorResult(success=False, message=f"Client Portal non raggiungibile: {auth['message']}")
+        if not auth["authenticated"]:
+            wait_message = auth.get("message") or "Client Portal non autenticato"
+            if auth.get("session_authenticated") and not auth.get("bridge_ready"):
+                wait_message = "Autorizzazione 2FA ricevuta, ma il bridge brokerage IBKR non e' ancora pronto. Attendi qualche secondo e riprova."
+            with get_session_context() as session:
+                conn = session.get(Connection, connection_id)
+                if conn is not None:
+                    conn.status = ConnectionStatus.AWAITING_AUTH.value
+                    conn.status_message = wait_message
+                    conn.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+            return ConnectorResult(success=False, message=wait_message)
+
+        return await self.connect(connection_id)
+
+    async def client_portal_auth_status(self, connection_id: int) -> dict[str, Any]:
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                raise ValueError("Connection not found")
+            broker_type = conn.broker_type
+            config = dict(conn.config or {})
+            status_value = conn.status
+
+        auth = await get_client_portal_auth_status(config)
+        container = self._get_container(connection_id, broker_type)
+        gateway_started = bool(container and container.status == "running")
+        return {
+            "service_ready": auth["service_ready"],
+            "session_authenticated": auth.get("session_authenticated", False),
+            "authenticated": auth["authenticated"],
+            "bridge_ready": auth.get("bridge_ready", False),
+            "gateway_started": gateway_started,
+            "connection_status": status_value,
+            "auth_url": resolve_client_portal_browser_url(config),
+            "message": auth["message"],
+        }
+
     # ── Connect ──────────────────────────────────────────────────────
 
     async def connect(self, connection_id: int) -> ConnectorResult:
@@ -404,7 +501,7 @@ class ConnectionManager:
                 )
 
             # Mark as "connecting" immediately
-            conn.status = "connecting"
+            conn.status = ConnectionStatus.CONNECTING.value
             conn.status_message = "Spawning gateway container…"
             session.commit()
 
@@ -481,6 +578,7 @@ class ConnectionManager:
             if conn is None:
                 return ConnectorResult(success=False, message="Connection not found")
             broker_type = conn.broker_type
+            config = dict(conn.config or {})
 
         # Gracefully tell the gateway to disconnect first
         try:
@@ -488,6 +586,12 @@ class ConnectionManager:
             await client.disconnect()
         except Exception:
             pass  # Container may already be gone
+
+        if is_client_portal_transport(config):
+            try:
+                await logout_client_portal_session(config)
+            except Exception:
+                pass
 
         # Destroy the container
         self._destroy_gateway(connection_id, broker_type)
@@ -510,6 +614,10 @@ class ConnectionManager:
                 return ConnectionStatus.DISCONNECTED.value
             stored_status = conn.status
             broker_type = conn.broker_type
+            config = dict(conn.config or {})
+
+        if is_client_portal_transport(config) and stored_status == ConnectionStatus.AWAITING_AUTH.value:
+            return stored_status
 
         # Check if the container exists and is running
         container = self._get_container(connection_id, broker_type)
