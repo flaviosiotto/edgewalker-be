@@ -16,7 +16,9 @@ from pydantic import BaseModel
 from sqlmodel import Session
 
 from app.db.database import get_session
+from app.models.agent import Agent, Chat
 from app.models.strategy import LiveStatus, StrategyLive
+from app.schemas.chat import ChatRead
 from app.schemas.live_trading import (
     LiveAlertCreate,
     LiveAlertRead,
@@ -55,6 +57,8 @@ from app.services.strategy_service import get_strategy
 from app.services.strategy_service import (
     post_manager_message,
     get_or_create_live_chat,
+    list_live_session_chats,
+    resolve_strategy_manager_agent_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -206,6 +210,28 @@ def _get_live_or_404(session: Session, live_id: int) -> StrategyLive:
             detail=f"Live session {live_id} not found",
         )
     return sl
+
+
+def _serialize_chat_read(
+    session: Session,
+    chat: Chat,
+    fallback_agent_id: int | None = None,
+) -> ChatRead:
+    resolved_agent_id = chat.id_agent or fallback_agent_id
+    agent = session.get(Agent, resolved_agent_id) if resolved_agent_id else None
+    return ChatRead(
+        id=chat.id,
+        id_agent=resolved_agent_id,
+        agent_name=agent.agent_name if agent else chat.agent_name,
+        agent_webhook_url=agent.n8n_webhook if agent else chat.agent_webhook_url,
+        user_id=chat.user_id,
+        strategy_id=chat.strategy_id,
+        nome=chat.nome,
+        descrizione=chat.descrizione,
+        chat_type=chat.chat_type,
+        created_at=chat.created_at,
+        n8n_session_id=chat.n8n_session_id,
+    )
 
 
 # ─── ENDPOINTS ───
@@ -883,7 +909,22 @@ def get_manager_live_chat(
     session: Session = Depends(get_session),
 ):
     """Get (or create) the dedicated Live chat for a strategy."""
-    from app.schemas.chat import ChatRead
-
     chat = get_or_create_live_chat(session, strategy_id)
-    return ChatRead.model_validate(chat)
+    fallback_agent_id = resolve_strategy_manager_agent_id(session, strategy_id)
+    return _serialize_chat_read(session, chat, fallback_agent_id)
+
+
+@router.get("/sessions/{live_id}/chats", response_model=list[ChatRead])
+def list_live_session_chats_endpoint(
+    live_id: int,
+    session: Session = Depends(get_session),
+):
+    """List chats relevant to a live session for the LiveStrategy page."""
+    live_session = _get_live_or_404(session, live_id)
+    fallback_agent_id = resolve_strategy_manager_agent_id(
+        session,
+        live_session.strategy_id,
+        live_session=live_session,
+    )
+    chats = list_live_session_chats(session, live_id)
+    return [_serialize_chat_read(session, chat, fallback_agent_id) for chat in chats]

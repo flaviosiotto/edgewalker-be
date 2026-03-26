@@ -30,18 +30,22 @@ def resolve_client_portal_browser_url(config: dict[str, Any] | None = None) -> s
     browser_url = str(
         config.get(
             "client_portal_browser_url",
-            os.getenv("CLIENT_PORTAL_BROWSER_URL", "https://localhost:5000/sso/Login?forwardTo=22&RL=1&ip2loc=US"),
+            os.getenv("CLIENT_PORTAL_BROWSER_URL", "https://localhost:5000/"),
         )
     )
     normalized = browser_url.rstrip("/")
-    if normalized.endswith("/ibkr-client-portal"):
+    if (
+        not normalized
+        or normalized.endswith("/ibkr-client-portal")
+        or normalized.endswith("/sso/Login?forwardTo=22&RL=1&ip2loc=US")
+    ):
         parts = urlsplit(browser_url)
         return urlunsplit(
             (
                 parts.scheme or "https",
                 parts.netloc or "localhost:5000",
-                "/sso/Login",
-                "forwardTo=22&RL=1&ip2loc=US",
+                "/",
+                "",
                 "",
             )
         )
@@ -69,10 +73,6 @@ def _extract_authenticated(payload: Any) -> bool:
 
     if isinstance(payload.get("authenticated"), bool):
         return payload["authenticated"]
-    if isinstance(payload.get("connected"), bool):
-        return payload["connected"]
-    if payload.get("ssoExpires"):
-        return True
 
     nested = payload.get("iserver")
     if isinstance(nested, dict):
@@ -81,6 +81,47 @@ def _extract_authenticated(payload: Any) -> bool:
             return auth_status["authenticated"]
 
     return False
+
+
+def _extract_status_flags(payload: Any) -> dict[str, bool]:
+    flags = {
+        "connected": False,
+        "authenticated": False,
+        "established": False,
+        "competing": False,
+    }
+
+    if not isinstance(payload, dict):
+        return flags
+
+    source = payload
+    nested = payload.get("iserver")
+    if isinstance(nested, dict):
+        auth_status = nested.get("authStatus")
+        if isinstance(auth_status, dict):
+            source = auth_status
+
+    for key in flags:
+        if isinstance(source.get(key), bool):
+            flags[key] = source[key]
+
+    return flags
+
+
+def _extract_gateway_session_ready(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    session = payload.get("session")
+    sso_expires = payload.get("ssoExpires")
+    user_id = payload.get("userId")
+    return bool(session or sso_expires or user_id)
+
+
+def _extract_competing(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return bool(payload.get("competing"))
 
 
 def _extract_accounts(payload: Any) -> list[dict[str, Any]]:
@@ -114,56 +155,109 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
 
     result: dict[str, Any] = {
         "service_ready": False,
+        "gateway_session_ready": False,
+        "connected": False,
         "session_authenticated": False,
         "authenticated": False,
+        "established": False,
+        "competing": False,
         "bridge_ready": False,
+        "ready_to_connect": False,
         "accounts": [],
         "auth_url": browser_url,
         "base_url": base_url,
         "message": None,
         "payload": None,
+        "tickle_payload": None,
     }
 
     try:
         async with httpx.AsyncClient(base_url=base_url, verify=verify_ssl, timeout=10.0, follow_redirects=True) as client:
             payload = None
+            tickle_payload = None
             response = await client.get("/v1/api/iserver/auth/status")
-            if response.status_code != 401:
-                response.raise_for_status()
-                payload = response.json()
             result["service_ready"] = True
-            result["payload"] = payload
-            session_authenticated = _extract_authenticated(payload)
-            result["session_authenticated"] = session_authenticated
-            result["message"] = payload.get("message") if isinstance(payload, dict) else None
 
-            accounts_response = await client.get("/v1/api/portfolio/accounts")
-            if accounts_response.status_code != 401:
-                accounts_response.raise_for_status()
-                result["accounts"] = _extract_accounts(accounts_response.json())
+            if response.status_code == 401:
+                # Gateway SSO session not established yet.  Return immediately
+                # WITHOUT hitting tickle / portfolio / iserver endpoints.
+                # The gateway is a single-session proxy: every API request it
+                # forwards to api.ibkr.com carries (and overwrites) the same
+                # server-side cookie jar used by the browser's SSO flow.
+                # Sending extra 401-bound requests during login corrupts the
+                # x-sess-uuid cookies and prevents the 2FA handshake from
+                # completing — the Authenticator loop never reaches Dispatcher.
+                result["message"] = "Sessione Client Portal non autenticata. Completa il login nel popup."
+                return result
+
+            response.raise_for_status()
+            payload = response.json()
+            result["payload"] = payload
 
             try:
-                bridge_response = await client.get("/v1/api/iserver/accounts")
-                if bridge_response.status_code != 401:
-                    bridge_response.raise_for_status()
-                    result["bridge_ready"] = _extract_bridge_ready(bridge_response.json())
-            except httpx.HTTPStatusError as bridge_exc:
-                if bridge_exc.response.status_code == 400 and "no bridge" in bridge_exc.response.text.lower():
-                    result["bridge_ready"] = False
-                    if result["accounts"]:
-                        result["message"] = "Sessione Client Portal autenticata ma bridge brokerage non pronto. Attendi il completamento del login IBKR."
-                elif bridge_exc.response.status_code != 401:
+                tickle_response = await client.get("/v1/api/tickle")
+                if tickle_response.status_code != 401:
+                    tickle_response.raise_for_status()
+                    tickle_payload = tickle_response.json()
+            except httpx.HTTPStatusError as tickle_exc:
+                if tickle_exc.response.status_code != 401:
                     raise
 
-            result["authenticated"] = bool(session_authenticated and result["bridge_ready"])
+            flags = _extract_status_flags(tickle_payload if tickle_payload is not None else payload)
+            session_authenticated = flags["authenticated"]
+            competing = flags["competing"]
+            result["tickle_payload"] = tickle_payload
+            result["gateway_session_ready"] = _extract_gateway_session_ready(tickle_payload)
+            result["connected"] = flags["connected"]
+            result["session_authenticated"] = session_authenticated
+            result["authenticated"] = flags["authenticated"]
+            result["established"] = flags["established"]
+            result["competing"] = competing
+            result["message"] = payload.get("message") if isinstance(payload, dict) else None
 
-            if not result["authenticated"] and response.status_code == 401:
-                result["message"] = "Sessione Client Portal non autenticata. Completa il login nel popup."
+            if competing:
+                result["message"] = (
+                    "Client Portal segnala una sessione concorrente. Chiudi eventuali altre sessioni IBKR/TWS/Client Portal e riprova."
+                )
+
+            # Only query heavy endpoints once authenticated — during login
+            # these would all return 401 and further pollute the cookie jar.
+            if session_authenticated:
+                accounts_response = await client.get("/v1/api/portfolio/accounts")
+                if accounts_response.status_code != 401:
+                    accounts_response.raise_for_status()
+                    result["accounts"] = _extract_accounts(accounts_response.json())
+
+                try:
+                    bridge_response = await client.get("/v1/api/iserver/accounts")
+                    if bridge_response.status_code != 401:
+                        bridge_response.raise_for_status()
+                        result["bridge_ready"] = _extract_bridge_ready(bridge_response.json())
+                except httpx.HTTPStatusError as bridge_exc:
+                    if bridge_exc.response.status_code == 400 and "no bridge" in bridge_exc.response.text.lower():
+                        result["bridge_ready"] = False
+                        if not competing:
+                            result["message"] = "Sessione Client Portal autenticata ma bridge brokerage non pronto. Attendi il completamento del login IBKR."
+                    elif bridge_exc.response.status_code != 401:
+                        raise
+
+            result["ready_to_connect"] = bool(result["gateway_session_ready"] and result["bridge_ready"])
+
+            if not session_authenticated and not result["message"]:
+                if result["gateway_session_ready"]:
+                    result["message"] = "Login Client Portal completato. In attesa dell'apertura della brokerage session IBKR."
+                else:
+                    result["message"] = "Sessione Client Portal non autenticata. Completa il login nel popup."
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
             result["service_ready"] = True
+            result["gateway_session_ready"] = False
+            result["connected"] = False
             result["session_authenticated"] = False
             result["authenticated"] = False
+            result["established"] = False
+            result["competing"] = False
+            result["ready_to_connect"] = False
             result["message"] = "Sessione Client Portal non autenticata. Completa il login nel popup."
         else:
             result["message"] = str(exc)

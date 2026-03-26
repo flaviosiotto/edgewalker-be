@@ -283,6 +283,39 @@ class ConnectionManager:
             logger.warning("Docker error checking container: %s", e)
             return None
 
+    def _restart_client_portal_gateway(self) -> None:
+        """Restart the shared Client Portal gateway to clear sticky auth state."""
+        if not self._docker:
+            return
+
+        candidates = []
+        try:
+            candidates = self._docker.containers.list(
+                all=True,
+                filters={"label": "com.docker.compose.service=ibkr-client-portal-gw"},
+            )
+        except Exception as e:
+            logger.warning("Docker error listing Client Portal gateway containers: %s", e)
+            return
+
+        if not candidates:
+            try:
+                candidates = [
+                    container
+                    for container in self._docker.containers.list(all=True)
+                    if "ibkr-client-portal-gw" in container.name
+                ]
+            except Exception as e:
+                logger.warning("Docker error scanning Client Portal gateway containers: %s", e)
+                return
+
+        for container in candidates:
+            try:
+                logger.info("Restarting shared Client Portal gateway container %s", container.name)
+                container.restart(timeout=10)
+            except Exception as e:
+                logger.warning("Could not restart Client Portal gateway container %s: %s", container.name, e)
+
     def _spawn_gateway(self, connection_id: int, broker_type: str, config: dict[str, Any]) -> None:
         """Spawn a gateway container for the given Connection.
 
@@ -402,8 +435,10 @@ class ConnectionManager:
 
         auth = await get_client_portal_auth_status(config)
         message = "Autenticazione IBKR richiesta nel popup Client Portal."
-        if auth["authenticated"]:
+        if auth["ready_to_connect"]:
             message = "Sessione Client Portal pronta per il gateway."
+        elif auth["gateway_session_ready"] and not auth["authenticated"]:
+            message = "Login Client Portal completato. In attesa dell'apertura della brokerage session IBKR."
         elif auth["service_ready"] and auth.get("session_authenticated") and not auth.get("bridge_ready"):
             message = "Sessione Client Portal autenticata ma bridge brokerage non pronto. Attendi il completamento del login IBKR."
         elif not auth["service_ready"]:
@@ -420,6 +455,7 @@ class ConnectionManager:
         return {
             "service_ready": auth["service_ready"],
             "authenticated": auth["authenticated"],
+            "ready_to_connect": auth["ready_to_connect"],
             "auth_url": resolve_client_portal_browser_url(config),
             "message": message,
         }
@@ -434,9 +470,11 @@ class ConnectionManager:
         auth = await get_client_portal_auth_status(config)
         if not auth["service_ready"]:
             return ConnectorResult(success=False, message=f"Client Portal non raggiungibile: {auth['message']}")
-        if not auth["authenticated"]:
+        if not auth["ready_to_connect"]:
             wait_message = auth.get("message") or "Client Portal non autenticato"
-            if auth.get("session_authenticated") and not auth.get("bridge_ready"):
+            if auth.get("gateway_session_ready") and not auth.get("authenticated"):
+                wait_message = "Login Client Portal completato, ma la brokerage session IBKR non e' ancora pronta. Attendi qualche secondo e riprova."
+            elif auth.get("session_authenticated") and not auth.get("bridge_ready"):
                 wait_message = "Autorizzazione 2FA ricevuta, ma il bridge brokerage IBKR non e' ancora pronto. Attendi qualche secondo e riprova."
             with get_session_context() as session:
                 conn = session.get(Connection, connection_id)
@@ -463,9 +501,14 @@ class ConnectionManager:
         gateway_started = bool(container and container.status == "running")
         return {
             "service_ready": auth["service_ready"],
+            "gateway_session_ready": auth.get("gateway_session_ready", False),
+            "connected": auth.get("connected", False),
             "session_authenticated": auth.get("session_authenticated", False),
             "authenticated": auth["authenticated"],
+            "established": auth.get("established", False),
+            "competing": auth.get("competing", False),
             "bridge_ready": auth.get("bridge_ready", False),
+            "ready_to_connect": auth.get("ready_to_connect", False),
             "gateway_started": gateway_started,
             "connection_status": status_value,
             "auth_url": resolve_client_portal_browser_url(config),
@@ -592,6 +635,7 @@ class ConnectionManager:
                 await logout_client_portal_session(config)
             except Exception:
                 pass
+            self._restart_client_portal_gateway()
 
         # Destroy the container
         self._destroy_gateway(connection_id, broker_type)

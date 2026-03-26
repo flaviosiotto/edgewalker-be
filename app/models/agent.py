@@ -112,6 +112,14 @@ class Chat(SQLModel, table=True):
         )
     )
 
+    @property
+    def agent_name(self) -> Optional[str]:
+        return self.agent.agent_name if self.agent else None
+
+    @property
+    def agent_webhook_url(self) -> Optional[str]:
+        return self.agent.n8n_webhook if self.agent else None
+
 
 from app.models.n8n_chat_history import N8nChatHistory  # noqa: E402
 from app.models.strategy import Strategy  # noqa: E402
