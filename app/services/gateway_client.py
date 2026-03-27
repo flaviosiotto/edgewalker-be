@@ -229,3 +229,9 @@ class GatewayClient:
         """List open orders from the gateway (for reconciliation)."""
         resp = await self._get("/orders")
         return resp.get("orders", [])
+
+    async def list_positions(self, account: str | None = None) -> list[dict]:
+        """List current positions from the gateway (for reconciliation)."""
+        params = {"account": account} if account else None
+        resp = await self._get("/positions", params=params)
+        return resp.get("positions", [])

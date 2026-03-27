@@ -53,6 +53,7 @@ from app.services.live_alert_service import (
     list_live_alerts,
     update_live_alert,
 )
+from app.services.gateway_client import GatewayClient
 from app.services.strategy_service import get_strategy
 from app.services.strategy_service import (
     post_manager_message,
@@ -68,6 +69,7 @@ router = APIRouter(prefix="/live", tags=["Live Trading"])
 # Redis connection for config-live cleanup on stop
 _REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 _REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+_CHECKPOINT_LIMIT = 100
 
 
 def _clear_live_config(
@@ -212,6 +214,80 @@ def _get_live_or_404(session: Session, live_id: int) -> StrategyLive:
     return sl
 
 
+def _append_live_checkpoint(
+    session: Session,
+    live_id: int,
+    *,
+    source: str,
+    kind: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Persist a lightweight debug checkpoint on the live session."""
+    sl = session.get(StrategyLive, live_id)
+    if sl is None:
+        return
+
+    metrics = sl.metrics if isinstance(sl.metrics, dict) else {}
+    checkpoints = metrics.get("debug_checkpoints")
+    if not isinstance(checkpoints, list):
+        checkpoints = []
+
+    checkpoints.append({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "kind": kind,
+        "message": message,
+        "details": details or {},
+    })
+    metrics["debug_checkpoints"] = checkpoints[-_CHECKPOINT_LIMIT:]
+
+    sl.metrics = metrics
+    sl.updated_at = datetime.now(timezone.utc)
+    session.add(sl)
+    session.commit()
+
+
+def _get_live_checkpoints(sl: StrategyLive, limit: int = 100) -> list[dict[str, Any]]:
+    metrics = sl.metrics if isinstance(sl.metrics, dict) else {}
+    checkpoints = metrics.get("debug_checkpoints")
+    if not isinstance(checkpoints, list):
+        return []
+    return checkpoints[-limit:]
+
+
+def _mark_live_error(session: Session, live_id: int, message: str) -> None:
+    sl = session.get(StrategyLive, live_id)
+    if sl is None:
+        return
+    sl.status = LiveStatus.ERROR.value
+    sl.error_message = message
+    sl.updated_at = datetime.now(timezone.utc)
+    session.add(sl)
+    session.commit()
+
+
+async def _fetch_broker_snapshot(
+    *,
+    connection_id: int,
+    broker_type: str,
+    broker_account_id: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Fetch a normalized broker snapshot through the common gateway API."""
+    client = GatewayClient(connection_id=connection_id, broker_type=broker_type)
+
+    orders = await client.list_open_orders()
+    positions = await client.list_positions(account=broker_account_id)
+
+    if broker_account_id:
+        orders = [
+            order for order in orders
+            if not order.get("account") or str(order.get("account")) == str(broker_account_id)
+        ]
+
+    return orders, positions
+
+
 def _serialize_chat_read(
     session: Session,
     chat: Chat,
@@ -238,7 +314,7 @@ def _serialize_chat_read(
 
 
 @router.post("/strategies/{strategy_id}/start", response_model=LiveStartResponse)
-def start_live_strategy(
+async def start_live_strategy(
     strategy_id: int,
     request: LiveStartRequest,
     session: Session = Depends(get_session),
@@ -310,12 +386,88 @@ def start_live_strategy(
         session.add(sl)
         session.commit()
         session.refresh(sl)
+
+        _append_live_checkpoint(
+            session,
+            sl.id,
+            source="backend",
+            kind="live_session_created",
+            message="Live session created before broker-aware reconciliation.",
+            details={
+                "strategy_id": strategy_id,
+                "strategy_live_id": sl.id,
+                "symbol": request.symbol,
+                "timeframe": request.timeframe,
+                "connection_id": connection.id if connection else None,
+                "account_id": request.account_id,
+                "broker_type": broker_type,
+            },
+        )
+
+        try:
+            broker_orders, broker_positions = await _fetch_broker_snapshot(
+                connection_id=connection.id,
+                broker_type=broker_type,
+                broker_account_id=account.account_id,
+            )
+        except Exception as exc:
+            error_message = (
+                "Broker snapshot unavailable before runner start. "
+                f"Start aborted to avoid running without alignment: {exc}"
+            )
+            _mark_live_error(session, sl.id, error_message)
+            _append_live_checkpoint(
+                session,
+                sl.id,
+                source="backend",
+                kind="broker_snapshot_failed",
+                message="Failed to fetch broker snapshot before start.",
+                details={
+                    "connection_id": connection.id,
+                    "broker_type": broker_type,
+                    "broker_account_id": account.account_id,
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=error_message,
+            ) from exc
+
+        _append_live_checkpoint(
+            session,
+            sl.id,
+            source="backend",
+            kind="broker_snapshot_fetched",
+            message="Fetched broker snapshot through the common gateway before start.",
+            details={
+                "connection_id": connection.id,
+                "broker_type": broker_type,
+                "broker_account_id": account.account_id,
+                "orders_count": len(broker_orders),
+                "positions_count": len(broker_positions),
+            },
+        )
         
         # Run reconciliation before starting
         recon_report = reconcile_on_startup(
             session,
             strategy_live_id=sl.id,
             account_id=request.account_id,
+            broker_orders=broker_orders,
+            broker_positions=broker_positions,
+        )
+        _append_live_checkpoint(
+            session,
+            sl.id,
+            source="backend",
+            kind="pre_start_reconciliation",
+            message="Completed broker-aware reconciliation before runner start.",
+            details={
+                "items_count": len(recon_report.items),
+                "summary": recon_report.summary,
+                "issues": [item.issue for item in recon_report.items[:20]],
+            },
         )
         if recon_report.items:
             logger.info(
@@ -365,6 +517,18 @@ def start_live_strategy(
         sl.started_at = datetime.now(timezone.utc)
         session.add(sl)
         session.commit()
+
+        _append_live_checkpoint(
+            session,
+            sl.id,
+            source="backend",
+            kind="runner_start_requested",
+            message="Runner container started after broker-aware reconciliation.",
+            details={
+                "container_id": result.get("container_id"),
+                "container_name": result.get("container_name"),
+            },
+        )
 
         # NOTE: The runner writes its own config-live:subscribe Hash with
         # live_timeframes and indicators.  The backend no longer sets
@@ -810,13 +974,29 @@ def list_all_strategy_positions(
     return [_enrich_position(p) for p in positions]
 
 
+@router.get("/sessions/{live_id}/checkpoints")
+def list_live_checkpoints(
+    live_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    session: Session = Depends(get_session),
+):
+    """Read persisted checkpoints for debugging startup, reconcile, and order flow."""
+    sl = _get_live_or_404(session, live_id)
+    checkpoints = _get_live_checkpoints(sl, limit=limit)
+    return {
+        "live_id": sl.id,
+        "count": len(checkpoints),
+        "checkpoints": checkpoints,
+    }
+
+
 # ═════════════════════════════════════════════════════════════════════
 # RECONCILIATION
 # ═════════════════════════════════════════════════════════════════════
 
 
 @router.post("/sessions/{live_id}/reconcile", response_model=ReconciliationReport)
-def reconcile_session(
+async def reconcile_session(
     live_id: int,
     broker_orders: list[dict[str, Any]] | None = None,
     broker_positions: list[dict[str, Any]] | None = None,
@@ -831,12 +1011,67 @@ def reconcile_session(
     """
     sl = _get_live_or_404(session, live_id)
 
+    if broker_orders is None or broker_positions is None:
+        if sl.account_id is None or sl.connection_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Live session has no account/connection configured for broker-aware reconciliation.",
+            )
+
+        try:
+            account, connection = validate_account_for_live(session, sl.account_id)
+            broker_orders, broker_positions = await _fetch_broker_snapshot(
+                connection_id=connection.id,
+                broker_type=connection.broker_type,
+                broker_account_id=account.account_id,
+            )
+            _append_live_checkpoint(
+                session,
+                sl.id,
+                source="backend",
+                kind="manual_broker_snapshot_fetched",
+                message="Fetched broker snapshot for explicit reconciliation.",
+                details={
+                    "orders_count": len(broker_orders),
+                    "positions_count": len(broker_positions),
+                    "connection_id": connection.id,
+                    "broker_type": connection.broker_type,
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except Exception as exc:
+            _append_live_checkpoint(
+                session,
+                sl.id,
+                source="backend",
+                kind="manual_broker_snapshot_failed",
+                message="Failed to fetch broker snapshot for reconciliation.",
+                details={"error": str(exc)},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Broker snapshot unavailable for reconciliation: {exc}",
+            ) from exc
+
     report = reconcile_on_startup(
         session,
         strategy_live_id=sl.id,
         account_id=sl.account_id,
         broker_orders=broker_orders,
         broker_positions=broker_positions,
+    )
+    _append_live_checkpoint(
+        session,
+        sl.id,
+        source="backend",
+        kind="manual_reconciliation",
+        message="Manual broker-aware reconciliation completed.",
+        details={
+            "items_count": len(report.items),
+            "summary": report.summary,
+            "issues": [item.issue for item in report.items[:20]],
+        },
     )
     return report
 
