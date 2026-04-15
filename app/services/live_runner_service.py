@@ -2,7 +2,7 @@
 Live Strategy Runner Service.
 
 Manages Docker containers for live strategy execution.
-Each strategy runs in its own container (1:1 mapping).
+Each live instance runs in its own container.
 
 The containers:
 - Use the strategy-runner image
@@ -30,7 +30,7 @@ DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "edgewalker-devops_default")
 RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "edgewalker-devops-strategy-runner:latest")
 
 # Container naming convention
-CONTAINER_PREFIX = "edgewalker-strategy-"
+CONTAINER_PREFIX = "edgewalker-live-"
 
 # Redis settings
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
@@ -98,19 +98,28 @@ class LiveRunnerService:
             self._client = docker.from_env()
         return self._client
     
-    def _container_name(self, strategy_id: int) -> str:
-        """Generate container name for a strategy."""
-        return f"{CONTAINER_PREFIX}{strategy_id}"
+    def _container_name(self, live_id: int) -> str:
+        """Generate container name for a live instance."""
+        return f"{CONTAINER_PREFIX}{live_id}"
     
-    def _get_container(self, strategy_id: int) -> Container | None:
-        """Get container for a strategy if it exists."""
+    def _get_container(self, live_id: int) -> Container | None:
+        """Get container for a live instance if it exists."""
         try:
-            return self.client.containers.get(self._container_name(strategy_id))
+            return self.client.containers.get(self._container_name(live_id))
         except NotFound:
             return None
+
+    def _find_container_by_live_id(self, live_id: int) -> Container | None:
+        """Find a container by live-id label as a fallback during migrations."""
+        containers = self.client.containers.list(
+            all=True,
+            filters={"label": f"edgewalker.live_id={live_id}"},
+        )
+        return containers[0] if containers else None
     
-    def start_strategy(
+    def start_live_instance(
         self,
+        live_id: int,
         strategy_id: int,
         strategy_config: dict[str, Any],
         symbol: str,
@@ -122,13 +131,14 @@ class LiveRunnerService:
         manager_webhook_url: str | None = None,
         manager_chat_session_id: str | None = None,
         strategy_live_id: int | None = None,
+        legacy_strategy_route: bool = False,
     ) -> dict[str, Any]:
         """
         Start a live strategy runner container.
         
         Args:
             strategy_id: Database ID of the strategy
-            strategy_config: Strategy definition (YAML-like dict) — kept for reference,
+            strategy_config: Strategy definition (YAML-like dict) - kept for reference,
                 runner loads config from DB via STRATEGY_LIVE_ID
             symbol: Trading symbol to subscribe to
             timeframe: Bar timeframe for subscription (default: 5s)
@@ -143,11 +153,12 @@ class LiveRunnerService:
         Returns:
             Dict with container info and status
         """
-        container_name = self._container_name(strategy_id)
+        container_name = self._container_name(live_id)
         
         # Check if container already exists
-        existing = self._get_container(strategy_id)
+        existing = self._get_container(live_id) or self._find_container_by_live_id(live_id)
         if existing:
+            existing.reload()
             if existing.status == "running":
                 return {
                     "status": "already_running",
@@ -167,8 +178,9 @@ class LiveRunnerService:
             "REDIS_HOST": REDIS_HOST,
             "REDIS_PORT": REDIS_PORT,
             "STRATEGY_ID": str(strategy_id),
+            "STRATEGY_LIVE_ID": str(live_id),
             "SYMBOL": symbol,
-            # Single live:bars stream — runner derives from DB config if STRATEGY_LIVE_ID is set
+            # Single live:bars stream - runner derives from DB config if STRATEGY_LIVE_ID is set
             "STREAMS": f"live:bars:{symbol}:{timeframe}{conn_suffix}",
             "CONSUMER_GROUP": f"cg:strategy-{strategy_id}",
             "CONSUMER_ID": f"runner-{strategy_id}",
@@ -180,16 +192,12 @@ class LiveRunnerService:
             "BACKEND_URL": os.getenv("BACKEND_URL", "http://backend:8000"),
             # Database URL for direct order/position persistence + config loading
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
-            # OpenTelemetry — send metrics/traces to the shared OTel Collector
+            # OpenTelemetry - send metrics/traces to the shared OTel Collector
             "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv(
                 "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"
             ),
             "OTEL_SERVICE_NAME": f"strategy-runner-{strategy_id}",
         }
-
-        # Strategy live session ID (for DB writes)
-        if strategy_live_id:
-            env["STRATEGY_LIVE_ID"] = str(strategy_live_id)
 
         # Manager agent webhook (so the runner can call the agent directly)
         if manager_webhook_url:
@@ -221,17 +229,28 @@ class LiveRunnerService:
         # Priority must be higher than the backend's generic /api route
         labels = {
             "traefik.enable": "true",
-            f"traefik.http.routers.runner-{strategy_id}.rule": f"PathPrefix(`/api/runners/{strategy_id}`)",
-            f"traefik.http.routers.runner-{strategy_id}.entrypoints": "http",
-            f"traefik.http.routers.runner-{strategy_id}.priority": "200",
-            f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": f"/api/runners/{strategy_id}",
-            f"traefik.http.routers.runner-{strategy_id}.middlewares": f"runner-{strategy_id}-strip",
-            f"traefik.http.services.runner-{strategy_id}.loadbalancer.server.port": "8080",
+            f"traefik.http.routers.live-runner-{live_id}.rule": f"PathPrefix(`/api/live/instances/{live_id}/runner`)",
+            f"traefik.http.routers.live-runner-{live_id}.entrypoints": "http",
+            f"traefik.http.routers.live-runner-{live_id}.priority": "200",
+            f"traefik.http.middlewares.live-runner-{live_id}-strip.stripprefix.prefixes": f"/api/live/instances/{live_id}/runner",
+            f"traefik.http.routers.live-runner-{live_id}.middlewares": f"live-runner-{live_id}-strip",
+            f"traefik.http.services.live-runner-{live_id}.loadbalancer.server.port": "8080",
             # Custom labels for identification
             "edgewalker.type": "strategy-runner",
             "edgewalker.strategy_id": str(strategy_id),
+            "edgewalker.live_id": str(live_id),
             "edgewalker.symbol": symbol,
         }
+
+        if legacy_strategy_route:
+            labels.update({
+                f"traefik.http.routers.runner-{strategy_id}.rule": f"PathPrefix(`/api/runners/{strategy_id}`)",
+                f"traefik.http.routers.runner-{strategy_id}.entrypoints": "http",
+                f"traefik.http.routers.runner-{strategy_id}.priority": "200",
+                f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": f"/api/runners/{strategy_id}",
+                f"traefik.http.routers.runner-{strategy_id}.middlewares": f"runner-{strategy_id}-strip",
+                f"traefik.http.services.runner-{strategy_id}.loadbalancer.server.port": "8080",
+            })
         
         # Volume mounts
         volumes = {
@@ -278,7 +297,7 @@ class LiveRunnerService:
                 extra_hosts={"host.docker.internal": "host-gateway"},
             )
             
-            logger.info(f"Started strategy runner container: {container_name} ({container.short_id})")
+            logger.info("Started live runner container: %s (%s)", container_name, container.short_id)
             
             return {
                 "status": "started",
@@ -289,21 +308,21 @@ class LiveRunnerService:
             }
             
         except APIError as e:
-            logger.error(f"Failed to start container {container_name}: {e}")
+            logger.error("Failed to start container %s: %s", container_name, e)
             raise RuntimeError(f"Failed to start strategy runner: {e}")
-    
-    def stop_strategy(self, strategy_id: int, remove: bool = True) -> dict[str, Any]:
+
+    def stop_live_instance(self, live_id: int, remove: bool = True) -> dict[str, Any]:
         """
         Stop a live strategy runner container.
         
         Args:
-            strategy_id: Database ID of the strategy
+            live_id: Database ID of the live instance
             remove: Whether to remove the container after stopping
             
         Returns:
             Dict with operation status
         """
-        container = self._get_container(strategy_id)
+        container = self._get_container(live_id) or self._find_container_by_live_id(live_id)
         
         if not container:
             return {"status": "not_found"}
@@ -324,13 +343,13 @@ class LiveRunnerService:
             logger.error(f"Failed to stop container: {e}")
             raise RuntimeError(f"Failed to stop strategy runner: {e}")
     
-    def get_strategy_status(self, strategy_id: int) -> dict[str, Any]:
+    def get_live_instance_status(self, live_id: int) -> dict[str, Any]:
         """
         Get status of a strategy runner container.
         
         Returns container state, health, and runtime info.
         """
-        container = self._get_container(strategy_id)
+        container = self._get_container(live_id) or self._find_container_by_live_id(live_id)
         
         if not container:
             return {
@@ -354,18 +373,17 @@ class LiveRunnerService:
             "labels": container.labels,
         }
     
-    def list_running_strategies(self) -> list[dict[str, Any]]:
+    def list_live_instances(self, include_all: bool = False) -> list[dict[str, Any]]:
         """
-        List all running strategy runner containers.
+        List live strategy runner containers.
         
         Returns list of container info dicts.
         """
-        containers = self.client.containers.list(
-            filters={
-                "label": "edgewalker.type=strategy-runner",
-                "status": "running",
-            }
-        )
+        filters: dict[str, Any] = {"label": "edgewalker.type=strategy-runner"}
+        if not include_all:
+            filters["status"] = "running"
+
+        containers = self.client.containers.list(filters=filters)
         
         result = []
         for container in containers:
@@ -373,6 +391,7 @@ class LiveRunnerService:
                 "container_id": container.short_id,
                 "container_name": container.name,
                 "strategy_id": container.labels.get("edgewalker.strategy_id"),
+                "live_id": container.labels.get("edgewalker.live_id"),
                 "symbol": container.labels.get("edgewalker.symbol"),
                 "status": container.status,
             })
@@ -381,7 +400,7 @@ class LiveRunnerService:
     
     def get_container_logs(
         self,
-        strategy_id: int,
+        live_id: int,
         tail: int = 100,
         since: str | None = None,
     ) -> str:
@@ -389,17 +408,17 @@ class LiveRunnerService:
         Get logs from a strategy runner container.
         
         Args:
-            strategy_id: Database ID of the strategy
+            live_id: Database ID of the live instance
             tail: Number of lines to return from end
             since: Return logs since this timestamp
             
         Returns:
             Log output as string
         """
-        container = self._get_container(strategy_id)
+        container = self._get_container(live_id) or self._find_container_by_live_id(live_id)
         
         if not container:
-            raise ValueError(f"Container for strategy {strategy_id} not found")
+            raise ValueError(f"Container for live instance {live_id} not found")
         
         kwargs = {"tail": tail, "timestamps": True}
         if since:

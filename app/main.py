@@ -19,6 +19,7 @@ from app.api.marketdata import router as marketdata_router
 from app.api.live import router as live_router
 from app.api.connections import router as connections_router
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
+from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
@@ -36,10 +37,14 @@ async def lifespan(app: FastAPI):
     # Start connection manager (broker connect/disconnect lifecycle)
     await start_connection_manager()
     logging.getLogger(__name__).info("Started connection manager")
+
+    await start_live_runner_monitor()
+    logging.getLogger(__name__).info("Started live runner monitor")
     
     yield
     
     # Cleanup
+    await stop_live_runner_monitor()
     await stop_connection_manager()
 
 

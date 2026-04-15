@@ -13,12 +13,22 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.db.database import get_session
 from app.models.agent import Agent, Chat
-from app.models.strategy import LiveStatus, StrategyLive
+from app.models.connection import Account, Connection
+from app.models.live_trading import LiveFill, LivePosition, PositionStatus
+from app.models.strategy import LiveStatus, Strategy, StrategyLive
 from app.schemas.chat import ChatRead
+from app.schemas.live_strategy import (
+    LivePerformanceSummary,
+    LiveStrategyCreate,
+    LiveStrategyDetailRead,
+    LiveStrategyStartResponse,
+    LiveStrategyStopResponse,
+    LiveStrategySummaryRead,
+)
 from app.schemas.live_trading import (
     LiveAlertCreate,
     LiveAlertRead,
@@ -267,6 +277,313 @@ def _mark_live_error(session: Session, live_id: int, message: str) -> None:
     session.commit()
 
 
+def _load_container_info_for_live(sl: StrategyLive) -> dict[str, Any]:
+    if sl.id is None:
+        return {"status": "not_found", "running": False}
+    return live_runner_service.get_live_instance_status(sl.id)
+
+
+def _derive_sync_state(sl: StrategyLive, container_info: dict[str, Any]) -> str:
+    container_status = container_info.get("status")
+    if container_status == "not_found":
+        if sl.status in {
+            LiveStatus.RUNNING.value,
+            LiveStatus.STARTING.value,
+            LiveStatus.STOPPING.value,
+        }:
+            return "missing_container"
+        return "aligned"
+
+    if sl.status == LiveStatus.RUNNING.value and container_status != "running":
+        return "stale"
+    if sl.status == LiveStatus.STARTING.value and container_status not in {"created", "running", "restarting"}:
+        return "stale"
+    if sl.status == LiveStatus.STOPPING.value and container_status not in {"exited", "dead", "not_found"}:
+        return "stale"
+    return "aligned"
+
+
+def _compute_live_performance_summary(session: Session, sl: StrategyLive) -> LivePerformanceSummary:
+    positions = session.exec(
+        select(LivePosition)
+        .where(LivePosition.strategy_live_id == sl.id)
+        .order_by(LivePosition.updated_at.desc())
+    ).all()
+    fills = session.exec(
+        select(LiveFill)
+        .where(LiveFill.strategy_live_id == sl.id)
+        .order_by(LiveFill.fill_time.desc())
+    ).all()
+
+    open_positions = [pos for pos in positions if pos.status == PositionStatus.OPEN.value]
+    closed_positions = [pos for pos in positions if pos.status == PositionStatus.CLOSED.value]
+
+    realized_pnl = sum((pos.realized_pnl or 0.0) for pos in closed_positions)
+    unrealized_pnl = sum((pos.unrealized_pnl or 0.0) for pos in open_positions)
+    total_trades = len(closed_positions)
+    wins = sum(1 for pos in closed_positions if (pos.realized_pnl or 0.0) > 0)
+    win_rate = (wins / total_trades * 100.0) if total_trades else None
+    position_side = open_positions[0].side if open_positions else "flat"
+
+    last_activity_candidates = [sl.started_at, sl.updated_at]
+    if fills:
+        last_activity_candidates.append(fills[0].fill_time)
+    if positions:
+        last_activity_candidates.append(positions[0].updated_at)
+
+    last_activity_at = max(ts for ts in last_activity_candidates if ts is not None)
+
+    return LivePerformanceSummary(
+        total_pnl=realized_pnl + unrealized_pnl,
+        total_trades=total_trades,
+        win_rate=win_rate,
+        position_side=position_side if position_side in {"long", "short", "flat"} else "flat",
+        has_open_position=bool(open_positions),
+        open_positions=len(open_positions),
+        last_activity_at=last_activity_at,
+    )
+
+
+def _serialize_live_summary(session: Session, sl: StrategyLive) -> LiveStrategySummaryRead:
+    strategy = session.get(Strategy, sl.strategy_id)
+    account = session.get(Account, sl.account_id) if sl.account_id else None
+    connection = session.get(Connection, sl.connection_id) if sl.connection_id else None
+    container_info = _load_container_info_for_live(sl)
+
+    account_display: str | None = None
+    if account is not None:
+        account_display = account.display_name or account.account_id
+        if connection is not None:
+            account_display = f"{account_display} ({connection.name})"
+
+    return LiveStrategySummaryRead(
+        id=sl.id,
+        strategy_id=sl.strategy_id,
+        strategy_name=strategy.name if strategy else f"Strategy {sl.strategy_id}",
+        status=sl.status,
+        sync_state=_derive_sync_state(sl, container_info),
+        symbol=sl.symbol,
+        timeframe=sl.timeframe,
+        account_id=sl.account_id,
+        account_display=account_display,
+        connection_id=sl.connection_id,
+        connection_name=connection.name if connection else None,
+        container_id=container_info.get("container_id") or sl.container_id,
+        container_name=container_info.get("container_name"),
+        container_status=container_info.get("status"),
+        container_health=container_info.get("health_status"),
+        started_at=sl.started_at,
+        stopped_at=sl.stopped_at,
+        error_message=sl.error_message,
+        performance_summary=_compute_live_performance_summary(session, sl),
+        created_at=sl.created_at,
+        updated_at=sl.updated_at,
+    )
+
+
+def _serialize_live_detail(session: Session, sl: StrategyLive) -> LiveStrategyDetailRead:
+    summary = _serialize_live_summary(session, sl)
+    return LiveStrategyDetailRead(
+        **summary.model_dump(),
+        chat_id=sl.chat_id,
+        manager_agent_id=sl.manager_agent_id,
+        definition=sl.definition,
+        metrics=sl.metrics if isinstance(sl.metrics, dict) else None,
+        layout_config=sl.layout_config if isinstance(sl.layout_config, dict) else None,
+    )
+
+
+async def _start_live_instance_internal(
+    session: Session,
+    *,
+    strategy_id: int,
+    symbol: str,
+    timeframe: str,
+    eval_in_progress: bool,
+    debug_rules: bool,
+    account_id: int,
+    legacy_strategy_route: bool = False,
+) -> tuple[StrategyLive, dict[str, Any]]:
+    strategy = _get_strategy_or_404(session, strategy_id)
+
+    account, connection = validate_account_for_live(session, account_id)
+    account_config = {
+        "account_id": account.account_id,
+        "db_account_id": account.id,
+        "connection_id": connection.id,
+        "connection_name": connection.name,
+        **(connection.config or {}),
+    }
+    broker_type = connection.broker_type
+
+    live_chat = get_or_create_live_chat(session, strategy_id)
+
+    sl = StrategyLive(
+        strategy_id=strategy_id,
+        chat_id=live_chat.id,
+        manager_agent_id=strategy.manager_agent_id,
+        status=LiveStatus.STARTING.value,
+        symbol=symbol,
+        timeframe=timeframe,
+        account_id=account_id,
+        connection_id=connection.id,
+        definition=strategy.definition,
+    )
+    session.add(sl)
+    session.commit()
+    session.refresh(sl)
+
+    _append_live_checkpoint(
+        session,
+        sl.id,
+        source="backend",
+        kind="live_session_created",
+        message="Live session created before broker-aware reconciliation.",
+        details={
+            "strategy_id": strategy_id,
+            "strategy_live_id": sl.id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "connection_id": connection.id,
+            "account_id": account_id,
+            "broker_type": broker_type,
+        },
+    )
+
+    broker_orders, broker_positions = await _fetch_broker_snapshot(
+        connection_id=connection.id,
+        broker_type=broker_type,
+        broker_account_id=account.account_id,
+    )
+
+    _append_live_checkpoint(
+        session,
+        sl.id,
+        source="backend",
+        kind="broker_snapshot_fetched",
+        message="Fetched broker snapshot through the common gateway before start.",
+        details={
+            "connection_id": connection.id,
+            "broker_type": broker_type,
+            "broker_account_id": account.account_id,
+            "orders_count": len(broker_orders),
+            "positions_count": len(broker_positions),
+        },
+    )
+
+    recon_report = reconcile_on_startup(
+        session,
+        strategy_live_id=sl.id,
+        account_id=account_id,
+        broker_orders=broker_orders,
+        broker_positions=broker_positions,
+    )
+    _append_live_checkpoint(
+        session,
+        sl.id,
+        source="backend",
+        kind="pre_start_reconciliation",
+        message="Completed broker-aware reconciliation before runner start.",
+        details={
+            "items_count": len(recon_report.items),
+            "summary": recon_report.summary,
+            "issues": [item.issue for item in recon_report.items[:20]],
+        },
+    )
+
+    manager_webhook_url: str | None = None
+    manager_chat_session_id: str | None = live_chat.n8n_session_id
+    if strategy.manager_agent_id:
+        manager_agent = session.get(Agent, strategy.manager_agent_id)
+        if manager_agent:
+            manager_webhook_url = manager_agent.n8n_webhook
+
+    result = live_runner_service.start_live_instance(
+        live_id=sl.id,
+        strategy_id=strategy_id,
+        strategy_config=sl.definition,
+        symbol=symbol,
+        timeframe=timeframe,
+        eval_in_progress=eval_in_progress,
+        debug_rules=debug_rules,
+        account_config=account_config,
+        broker_type=broker_type,
+        manager_webhook_url=manager_webhook_url,
+        manager_chat_session_id=manager_chat_session_id,
+        strategy_live_id=sl.id,
+        legacy_strategy_route=legacy_strategy_route,
+    )
+
+    sl.status = LiveStatus.RUNNING.value
+    sl.container_id = result.get("container_id")
+    sl.started_at = datetime.now(timezone.utc)
+    sl.error_message = None
+    session.add(sl)
+    session.commit()
+    session.refresh(sl)
+
+    _append_live_checkpoint(
+        session,
+        sl.id,
+        source="backend",
+        kind="runner_start_requested",
+        message="Runner container started after broker-aware reconciliation.",
+        details={
+            "container_id": result.get("container_id"),
+            "container_name": result.get("container_name"),
+            "legacy_strategy_route": legacy_strategy_route,
+        },
+    )
+
+    return sl, result
+
+
+def _stop_live_instance_internal(
+    session: Session,
+    sl: StrategyLive,
+    *,
+    remove: bool = True,
+) -> dict[str, Any]:
+    sl.status = LiveStatus.STOPPING.value
+    session.add(sl)
+    session.commit()
+
+    result = live_runner_service.stop_live_instance(sl.id, remove=remove)
+
+    try:
+        if sl.connection_id and sl.symbol:
+            _clear_live_config(sl.symbol, sl.connection_id)
+    except Exception as lt_err:
+        logger.warning(
+            "Failed to clear config-live Hash for live instance %s: %s",
+            sl.id, lt_err,
+        )
+
+    open_positions = session.exec(
+        select(LivePosition)
+        .where(LivePosition.strategy_live_id == sl.id)
+        .where(LivePosition.status == PositionStatus.OPEN.value)
+    ).all()
+    for pos in open_positions:
+        pos.status = PositionStatus.CLOSED.value
+        pos.side = "flat"
+        pos.quantity = 0
+        pos.closed_at = datetime.now(timezone.utc)
+        pos.updated_at = datetime.now(timezone.utc)
+        pos.extra = {**(pos.extra or {}), "closed_by": "backend_stop"}
+        session.add(pos)
+
+    sl.status = LiveStatus.STOPPED.value
+    sl.container_id = None
+    sl.stopped_at = datetime.now(timezone.utc)
+    sl.updated_at = datetime.now(timezone.utc)
+    session.add(sl)
+    session.commit()
+    session.refresh(sl)
+
+    return result
+
+
 async def _fetch_broker_snapshot(
     *,
     connection_id: int,
@@ -286,6 +603,130 @@ async def _fetch_broker_snapshot(
         ]
 
     return orders, positions
+
+
+@router.get("/instances", response_model=list[LiveStrategySummaryRead])
+def list_live_instances(
+    status_filter: str | None = Query(None, alias="status"),
+    strategy_id: int | None = Query(None),
+    account_id: int | None = Query(None),
+    connection_id: int | None = Query(None),
+    include_stopped: bool = Query(True),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+):
+    stmt = select(StrategyLive)
+    if status_filter:
+        stmt = stmt.where(StrategyLive.status == status_filter)
+    elif not include_stopped:
+        stmt = stmt.where(StrategyLive.status != LiveStatus.STOPPED.value)
+    if strategy_id is not None:
+        stmt = stmt.where(StrategyLive.strategy_id == strategy_id)
+    if account_id is not None:
+        stmt = stmt.where(StrategyLive.account_id == account_id)
+    if connection_id is not None:
+        stmt = stmt.where(StrategyLive.connection_id == connection_id)
+
+    stmt = stmt.order_by(StrategyLive.started_at.desc(), StrategyLive.id.desc()).offset(offset).limit(limit)
+    sessions = session.exec(stmt).all()
+    return [_serialize_live_summary(session, sl) for sl in sessions]
+
+
+@router.get("/instances/{live_id}", response_model=LiveStrategyDetailRead)
+def get_live_instance(
+    live_id: int,
+    session: Session = Depends(get_session),
+):
+    sl = _get_live_or_404(session, live_id)
+    return _serialize_live_detail(session, sl)
+
+
+@router.post("/instances", response_model=LiveStrategyStartResponse, status_code=status.HTTP_201_CREATED)
+async def create_live_instance(
+    payload: LiveStrategyCreate,
+    session: Session = Depends(get_session),
+):
+    try:
+        sl, result = await _start_live_instance_internal(
+            session,
+            strategy_id=payload.strategy_id,
+            symbol=payload.symbol,
+            timeframe=payload.timeframe,
+            eval_in_progress=payload.eval_in_progress,
+            debug_rules=payload.debug_rules,
+            account_id=payload.account_id,
+            legacy_strategy_route=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to create live instance for strategy %s", payload.strategy_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    return LiveStrategyStartResponse(
+        live_id=sl.id,
+        strategy_id=sl.strategy_id,
+        status=result.get("status", "started"),
+        container_id=result.get("container_id"),
+        container_name=result.get("container_name"),
+        symbol=sl.symbol,
+        timeframe=sl.timeframe,
+        message=result.get("message"),
+    )
+
+
+@router.post("/instances/{live_id}/stop", response_model=LiveStrategyStopResponse)
+def stop_live_instance(
+    live_id: int,
+    remove: bool = True,
+    session: Session = Depends(get_session),
+):
+    sl = _get_live_or_404(session, live_id)
+    try:
+        result = _stop_live_instance_internal(session, sl, remove=remove)
+    except Exception as exc:
+        sl.status = LiveStatus.ERROR.value
+        sl.error_message = str(exc)
+        sl.updated_at = datetime.now(timezone.utc)
+        session.add(sl)
+        session.commit()
+        logger.exception("Failed to stop live instance %s", live_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    return LiveStrategyStopResponse(
+        live_id=sl.id,
+        strategy_id=sl.strategy_id,
+        status=result.get("status", "stopped"),
+        message=result.get("status") == "not_found" and "Live instance was not running (container not found)" or "Live instance stopped successfully",
+    )
+
+
+@router.get("/instances/{live_id}/status", response_model=LiveStrategySummaryRead)
+def get_live_instance_status(
+    live_id: int,
+    session: Session = Depends(get_session),
+):
+    sl = _get_live_or_404(session, live_id)
+    return _serialize_live_summary(session, sl)
+
+
+@router.get("/instances/{live_id}/logs")
+def get_live_instance_logs(
+    live_id: int,
+    tail: int = 100,
+    session: Session = Depends(get_session),
+):
+    sl = _get_live_or_404(session, live_id)
+    try:
+        logs = live_runner_service.get_container_logs(live_id=live_id, tail=tail)
+        return {
+            "live_id": live_id,
+            "strategy_id": sl.strategy_id,
+            "logs": logs,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 def _serialize_chat_read(
@@ -313,253 +754,52 @@ def _serialize_chat_read(
 # ─── ENDPOINTS ───
 
 
-@router.post("/strategies/{strategy_id}/start", response_model=LiveStartResponse)
+@router.post("/strategies/{strategy_id}/start", response_model=LiveStartResponse, deprecated=True)
 async def start_live_strategy(
     strategy_id: int,
     request: LiveStartRequest,
     session: Session = Depends(get_session),
 ):
-    """
-    Start a live strategy runner.
-    
-    Creates a Docker container for the strategy that:
-    - Subscribes to Redis for real-time market data
-    - Executes the strategy logic (same as backtest)
-    - Exposes an HTTP endpoint for status/control
-    
-    The container is routed via Traefik at /api/runners/{strategy_id}/
-    """
-    strategy = _get_strategy_or_404(session, strategy_id)
-    
-    # Check if already running via current_live
-    current = _get_current_live(strategy)
-    if current and current.status == LiveStatus.RUNNING.value:
-        return LiveStartResponse(
-            status="already_running",
-            container_id=current.container_id,
-            symbol=current.symbol,
-            timeframe=current.timeframe,
-            message="Strategy is already running",
-        )
-    
-    # Account is mandatory for live trading
+    """Legacy start endpoint kept as a shim over the live-instance API."""
     if request.account_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="account_id è obbligatorio per il live trading",
         )
-    
-    # Validate account
-    account_config: dict[str, Any] | None = None
-    broker_type: str | None = None
+
     try:
-        account, connection = validate_account_for_live(session, request.account_id)
-        account_config = {
-            "account_id": account.account_id,
-            "db_account_id": account.id,
-            "connection_id": connection.id,
-            "connection_name": connection.name,
-            **(connection.config or {}),
-        }
-        broker_type = connection.broker_type
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
-    
-    try:
-        live_chat = get_or_create_live_chat(session, strategy_id)
-
-        # Create a new StrategyLive session
-        sl = StrategyLive(
+        sl, result = await _start_live_instance_internal(
+            session,
             strategy_id=strategy_id,
-            chat_id=live_chat.id,
-            manager_agent_id=strategy.manager_agent_id,
-            status=LiveStatus.STARTING.value,
-            symbol=request.symbol,
-            timeframe=request.timeframe,
-            account_id=request.account_id,
-            connection_id=connection.id if connection else None,
-            definition=strategy.definition,  # snapshot, decoupled from design
-        )
-        session.add(sl)
-        session.commit()
-        session.refresh(sl)
-
-        _append_live_checkpoint(
-            session,
-            sl.id,
-            source="backend",
-            kind="live_session_created",
-            message="Live session created before broker-aware reconciliation.",
-            details={
-                "strategy_id": strategy_id,
-                "strategy_live_id": sl.id,
-                "symbol": request.symbol,
-                "timeframe": request.timeframe,
-                "connection_id": connection.id if connection else None,
-                "account_id": request.account_id,
-                "broker_type": broker_type,
-            },
-        )
-
-        try:
-            broker_orders, broker_positions = await _fetch_broker_snapshot(
-                connection_id=connection.id,
-                broker_type=broker_type,
-                broker_account_id=account.account_id,
-            )
-        except Exception as exc:
-            error_message = (
-                "Broker snapshot unavailable before runner start. "
-                f"Start aborted to avoid running without alignment: {exc}"
-            )
-            _mark_live_error(session, sl.id, error_message)
-            _append_live_checkpoint(
-                session,
-                sl.id,
-                source="backend",
-                kind="broker_snapshot_failed",
-                message="Failed to fetch broker snapshot before start.",
-                details={
-                    "connection_id": connection.id,
-                    "broker_type": broker_type,
-                    "broker_account_id": account.account_id,
-                    "error": str(exc),
-                },
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=error_message,
-            ) from exc
-
-        _append_live_checkpoint(
-            session,
-            sl.id,
-            source="backend",
-            kind="broker_snapshot_fetched",
-            message="Fetched broker snapshot through the common gateway before start.",
-            details={
-                "connection_id": connection.id,
-                "broker_type": broker_type,
-                "broker_account_id": account.account_id,
-                "orders_count": len(broker_orders),
-                "positions_count": len(broker_positions),
-            },
-        )
-        
-        # Run reconciliation before starting
-        recon_report = reconcile_on_startup(
-            session,
-            strategy_live_id=sl.id,
-            account_id=request.account_id,
-            broker_orders=broker_orders,
-            broker_positions=broker_positions,
-        )
-        _append_live_checkpoint(
-            session,
-            sl.id,
-            source="backend",
-            kind="pre_start_reconciliation",
-            message="Completed broker-aware reconciliation before runner start.",
-            details={
-                "items_count": len(recon_report.items),
-                "summary": recon_report.summary,
-                "issues": [item.issue for item in recon_report.items[:20]],
-            },
-        )
-        if recon_report.items:
-            logger.info(
-                "Pre-start reconciliation for strategy_live %s: %s",
-                sl.id, recon_report.summary,
-            )
-        
-        # Resolve manager agent webhook URL for the runner
-        _mgr_webhook: str | None = None
-        _mgr_session_id: str | None = live_chat.n8n_session_id
-        if strategy.manager_agent_id:
-            from app.models.agent import Agent
-            _mgr_agent = session.get(Agent, strategy.manager_agent_id)
-            if _mgr_agent:
-                _mgr_webhook = _mgr_agent.n8n_webhook
-
-        result = live_runner_service.start_strategy(
-            strategy_id=strategy_id,
-            strategy_config=sl.definition,
             symbol=request.symbol,
             timeframe=request.timeframe,
             eval_in_progress=request.eval_in_progress,
             debug_rules=request.debug_rules,
-            account_config=account_config,
-            broker_type=broker_type,
-            manager_webhook_url=_mgr_webhook,
-            manager_chat_session_id=_mgr_session_id,
-            strategy_live_id=sl.id,
+            account_id=request.account_id,
+            legacy_strategy_route=True,
         )
-        
-        if result["status"] == "already_running":
-            sl.status = LiveStatus.RUNNING.value
-            sl.container_id = result.get("container_id")
-            session.add(sl)
-            session.commit()
-            
-            return LiveStartResponse(
-                status="already_running",
-                container_id=result.get("container_id"),
-                container_name=result.get("container_name"),
-                message="Strategy is already running",
-            )
-        
-        # Update StrategyLive with running state
-        sl.status = LiveStatus.RUNNING.value
-        sl.container_id = result.get("container_id")
-        sl.started_at = datetime.now(timezone.utc)
-        session.add(sl)
-        session.commit()
-
-        _append_live_checkpoint(
-            session,
-            sl.id,
-            source="backend",
-            kind="runner_start_requested",
-            message="Runner container started after broker-aware reconciliation.",
-            details={
-                "container_id": result.get("container_id"),
-                "container_name": result.get("container_name"),
-            },
-        )
-
-        # NOTE: The runner writes its own config-live:subscribe Hash with
-        # live_timeframes and indicators.  The backend no longer sets
-        # live_timeframes — the runner owns the live pipeline config.
-
-        return LiveStartResponse(
-            status="started",
-            container_id=result.get("container_id"),
-            container_name=result.get("container_name"),
-            symbol=request.symbol,
-            timeframe=request.timeframe,
-        )
-        
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except HTTPException:
         raise
-    except Exception as e:
-        # Update StrategyLive with error state
-        if sl and sl.id:
-            sl.status = LiveStatus.ERROR.value
-            sl.error_message = str(e)
-            session.add(sl)
-            session.commit()
-        
-        logger.exception(f"Failed to start strategy {strategy_id}")
+    except Exception as exc:
+        logger.exception("Failed to start legacy live strategy %s", strategy_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
-        )
+            detail=str(exc),
+        ) from exc
+
+    return LiveStartResponse(
+        status=result.get("status", "started"),
+        container_id=result.get("container_id"),
+        container_name=result.get("container_name"),
+        symbol=sl.symbol,
+        timeframe=sl.timeframe,
+        message=result.get("message"),
+    )
 
 
-@router.post("/strategies/{strategy_id}/stop", response_model=LiveStopResponse)
+@router.post("/strategies/{strategy_id}/stop", response_model=LiveStopResponse, deprecated=True)
 def stop_live_strategy(
     strategy_id: int,
     remove: bool = True,
@@ -572,62 +812,9 @@ def stop_live_strategy(
     """
     strategy = _get_strategy_or_404(session, strategy_id)
     sl = _require_current_live(strategy)
-    
+
     try:
-        sl.status = LiveStatus.STOPPING.value
-        session.add(sl)
-        session.commit()
-        
-        result = live_runner_service.stop_strategy(
-            strategy_id=strategy_id,
-            remove=remove,
-        )
-
-        # Clear config-live Hash so ticks-aggregator stops writing live:bars
-        try:
-            if sl.connection_id and sl.symbol:
-                _clear_live_config(sl.symbol, sl.connection_id)
-        except Exception as lt_err:
-            logger.warning(
-                "Failed to clear config-live Hash for strategy %s: %s",
-                strategy_id, lt_err,
-            )
-
-        # Close any open DB positions for this session — safety net for
-        # cases where the runner didn't close them (crash, gateway DNS
-        # failure, forced container removal, etc.).
-        try:
-            from app.models.live_trading import LivePosition, PositionStatus
-            from sqlmodel import select as _select
-            open_positions = session.exec(
-                _select(LivePosition)
-                .where(LivePosition.strategy_live_id == sl.id)
-                .where(LivePosition.status == PositionStatus.OPEN.value)
-            ).all()
-            for pos in open_positions:
-                pos.status = PositionStatus.CLOSED.value
-                pos.side = "flat"
-                pos.quantity = 0
-                pos.closed_at = datetime.now(timezone.utc)
-                pos.updated_at = datetime.now(timezone.utc)
-                pos.extra = {**(pos.extra or {}), "closed_by": "backend_stop"}
-                session.add(pos)
-            if open_positions:
-                logger.info(
-                    "Closed %d orphan open position(s) on strategy %s stop",
-                    len(open_positions), strategy_id,
-                )
-        except Exception as pos_err:
-            logger.warning(
-                "Failed to close orphan positions on stop for strategy %s: %s",
-                strategy_id, pos_err,
-            )
-
-        sl.status = LiveStatus.STOPPED.value
-        sl.container_id = None
-        sl.stopped_at = datetime.now(timezone.utc)
-        session.add(sl)
-        session.commit()
+        result = _stop_live_instance_internal(session, sl, remove=remove)
         
         if result["status"] == "not_found":
             return LiveStopResponse(
@@ -645,6 +832,7 @@ def stop_live_strategy(
     except Exception as e:
         sl.status = LiveStatus.ERROR.value
         sl.error_message = str(e)
+        sl.updated_at = datetime.now(timezone.utc)
         session.add(sl)
         session.commit()
         
@@ -655,7 +843,7 @@ def stop_live_strategy(
         )
 
 
-@router.get("/strategies/{strategy_id}/status", response_model=LiveStatusResponse)
+@router.get("/strategies/{strategy_id}/status", response_model=LiveStatusResponse, deprecated=True)
 def get_live_strategy_status(
     strategy_id: int,
     session: Session = Depends(get_session),
@@ -669,7 +857,7 @@ def get_live_strategy_status(
     sl = _get_current_live(strategy)
     
     # Get container status
-    container_info = live_runner_service.get_strategy_status(strategy_id)
+    container_info = _load_container_info_for_live(sl) if sl else {"status": "not_found"}
     
     # Sync DB if container state differs
     if sl and container_info["status"] == "not_found" and sl.status == LiveStatus.RUNNING.value:
@@ -696,7 +884,7 @@ def get_live_strategy_status(
     )
 
 
-@router.get("/strategies/{strategy_id}/logs", response_model=LiveLogsResponse)
+@router.get("/strategies/{strategy_id}/logs", response_model=LiveLogsResponse, deprecated=True)
 def get_live_strategy_logs(
     strategy_id: int,
     tail: int = 100,
@@ -705,9 +893,12 @@ def get_live_strategy_logs(
     """
     Get logs from a live strategy runner container.
     """
+    strategy = _get_strategy_or_404(session, strategy_id)
+    sl = _require_current_live(strategy)
+
     try:
         logs = live_runner_service.get_container_logs(
-            strategy_id=strategy_id,
+            live_id=sl.id,
             tail=tail,
         )
         
@@ -729,13 +920,13 @@ def get_live_strategy_logs(
         )
 
 
-@router.get("/strategies", response_model=list[RunningStrategyInfo])
+@router.get("/strategies", response_model=list[RunningStrategyInfo], deprecated=True)
 def list_running_strategies():
     """
     List all running live strategy containers.
     """
     try:
-        result = live_runner_service.list_running_strategies()
+        result = live_runner_service.list_live_instances()
         return [RunningStrategyInfo(**info) for info in result]
         
     except Exception as e:
@@ -747,7 +938,7 @@ def list_running_strategies():
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LIVE ORDERS  (read-only — submission via runner: POST /api/runners/{id}/orders)
+# LIVE ORDERS  (read-only - submission via runner: POST /api/runners/{id}/orders)
 # ═════════════════════════════════════════════════════════════════════
 
 
@@ -781,7 +972,7 @@ def update_order(
     payload: LiveOrderUpdate,
     session: Session = Depends(get_session),
 ):
-    """Update a live order (status, fill info — manual corrections)."""
+    """Update a live order (status, fill info - manual corrections)."""
     order = update_live_order(session, order_id, payload)
     if order is None:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
@@ -801,7 +992,7 @@ def get_order(
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LIVE FILLS  (read-only — runner writes directly to DB)
+# LIVE FILLS  (read-only - runner writes directly to DB)
 # ═════════════════════════════════════════════════════════════════════
 
 
