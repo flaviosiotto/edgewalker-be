@@ -7,6 +7,12 @@ from app.core.config import settings
 
 DATABASE_URL = settings.DATABASE_URL
 
+if DATABASE_URL.startswith("sqlite"):
+    raise RuntimeError(
+        "SQLite is not supported by this backend because the schema uses PostgreSQL-specific "
+        "types such as JSONB. Set DATABASE_URL to a PostgreSQL connection string before startup."
+    )
+
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
@@ -24,6 +30,7 @@ def create_db_and_tables():
     from app.models.n8n_chat_history import N8nChatHistory  # noqa: F401
     from app.models.strategy import Strategy, BacktestResult, BacktestTrade  # noqa: F401
     from app.models.connection import Connection, Account  # noqa: F401
+    from app.models.live_trading import LiveOrder, LiveFill, LivePosition  # noqa: F401
     from app.models.marketdata import SymbolCache, SymbolSyncLog  # noqa: F401
 
     SQLModel.metadata.create_all(engine)
