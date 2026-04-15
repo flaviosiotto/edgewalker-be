@@ -15,6 +15,7 @@ env:
   IMAGE_NAME: ${{ vars.DOCKERHUB_REPOSITORY }}
   DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
   DOKPLOY_APPLICATION_ID: ${{ vars.DOKPLOY_APPLICATION_ID }}
+  DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
 
 jobs:
   build-push-deploy:
@@ -81,9 +82,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Trigger Dokploy deployment
-        if: ${{ env.DOKPLOY_URL != '' && env.DOKPLOY_APPLICATION_ID != '' && secrets.DOKPLOY_API_KEY != '' }}
-        env:
-          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+        if: ${{ env.DOKPLOY_URL != '' && env.DOKPLOY_APPLICATION_ID != '' && env.DOKPLOY_API_KEY != '' }}
         run: |
           set -eu
           curl -fsS -X POST "${DOKPLOY_URL}/api/application.deploy" \
