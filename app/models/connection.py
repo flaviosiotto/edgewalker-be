@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from sqlalchemy import Column, ForeignKey, Integer, String, DateTime, Text
+from sqlalchemy import Column, ForeignKey, Integer, String, DateTime, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
@@ -52,7 +52,7 @@ class Connection(SQLModel, table=True):
     # Connection settings (host, port, client_id, api_key, …)
     config: Any = Field(
         default_factory=dict,
-        sa_column=Column(JSONB, nullable=False, server_default="'{}'"),
+        sa_column=Column(JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     )
 
     # Status
