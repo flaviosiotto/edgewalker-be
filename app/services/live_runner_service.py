@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 # Docker network for internal communication
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "edgewalker-devops_default")
 
+# Host paths used for Docker bind mounts when spawning runner containers.
+EDGEWALKER_PATH = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
+RUNTIME_PATH = os.getenv("RUNTIME_PATH", "/home/flavio/playground/edgewalker-runtime")
+
 # Strategy runner image
 RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "edgewalker-devops-strategy-runner:latest")
 
@@ -40,6 +44,14 @@ REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 N8N_INTERNAL_URL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
 # n8n path prefix used by Traefik (stripped before forwarding to n8n)
 N8N_PATH_PREFIX = os.getenv("N8N_PATH_PREFIX", "/n8n")
+
+
+def _docker_runtime_requirements() -> str:
+    return (
+        "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST) "
+        f"and the Docker network '{DOCKER_NETWORK}' must exist; host paths "
+        f"EDGEWALKER_PATH={EDGEWALKER_PATH} and RUNTIME_PATH={RUNTIME_PATH} must be valid absolute paths on the Docker host"
+    )
 
 
 def _rewrite_webhook_for_docker(url: str) -> str:
@@ -95,7 +107,10 @@ class LiveRunnerService:
     def client(self) -> docker.DockerClient:
         """Get or create Docker client."""
         if self._client is None:
-            self._client = docker.from_env()
+            try:
+                self._client = docker.from_env()
+            except Exception as e:
+                raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}") from e
         return self._client
     
     def _container_name(self, live_id: int) -> str:
@@ -255,28 +270,28 @@ class LiveRunnerService:
         # Volume mounts
         volumes = {
             # Runner application source (dev: host-mounted for live code changes)
-            "/home/flavio/playground/edgewalker-runtime/strategy-runner/app": {
+            f"{RUNTIME_PATH}/strategy-runner/app": {
                 "bind": "/app/app",
                 "mode": "ro",
             },
             # Edgewalker library source (runner image installs it in editable mode)
             # so mounting the package keeps TradeAction/rule parsing in sync without
             # rebuilding the image on every local library change.
-            "/home/flavio/playground/edgewalker/edgewalker": {
+            f"{EDGEWALKER_PATH}/edgewalker": {
                 "bind": "/opt/edgewalker/edgewalker",
                 "mode": "ro",
             },
             # Shared schemas
-            "/home/flavio/playground/edgewalker-runtime/shared": {
+            f"{RUNTIME_PATH}/shared": {
                 "bind": "/app/shared",
                 "mode": "ro",
             },
             # Strategy configs and artifacts
-            "/home/flavio/playground/edgewalker/strategies": {
+            f"{EDGEWALKER_PATH}/strategies": {
                 "bind": "/opt/edgewalker/strategies",
                 "mode": "ro",
             },
-            "/home/flavio/playground/edgewalker/artifacts": {
+            f"{EDGEWALKER_PATH}/artifacts": {
                 "bind": "/opt/edgewalker/artifacts",
                 "mode": "ro",
             },

@@ -33,6 +33,15 @@ BACKTEST_IMAGE = os.getenv("BACKTEST_IMAGE", "edgewalker-devops-strategy-backtes
 CONTAINER_PREFIX = "edgewalker-backtest-"
 
 
+def _docker_runtime_requirements() -> str:
+    edgewalker_path = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
+    return (
+        "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST), "
+        f"the Docker network '{DOCKER_NETWORK}' must exist, and EDGEWALKER_PATH={edgewalker_path} "
+        "must be a valid absolute path on the Docker host"
+    )
+
+
 class BacktestRunnerService:
     """Service for managing backtest runner containers.
 
@@ -47,7 +56,10 @@ class BacktestRunnerService:
     def client(self) -> docker.DockerClient:
         """Get or create Docker client."""
         if self._client is None:
-            self._client = docker.from_env()
+            try:
+                self._client = docker.from_env()
+            except Exception as e:
+                raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}") from e
         return self._client
 
     def _container_name(self, backtest_id: int) -> str:

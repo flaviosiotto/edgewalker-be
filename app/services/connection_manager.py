@@ -62,6 +62,14 @@ HOST_PUID = os.getenv("PUID", "1000")
 HOST_PGID = os.getenv("PGID", "1000")
 
 
+def _docker_runtime_requirements() -> str:
+    return (
+        "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST), "
+        f"the Docker network '{DOCKER_NETWORK}' must exist, and host paths EDGEWALKER_PATH={EDGEWALKER_PATH} "
+        f"and RUNTIME_PATH={RUNTIME_PATH} must be valid absolute paths on the Docker host"
+    )
+
+
 # ── Gateway Registry ─────────────────────────────────────────────────
 # Each broker type maps to its Docker image, container prefix, label,
 # and a function that builds the environment dict from Connection.config.
@@ -261,7 +269,11 @@ class ConnectionManager:
         try:
             self._docker = docker.from_env()
         except Exception as e:
-            logger.warning("Docker not available: %s — gateway management disabled", e)
+            logger.warning(
+                "Docker not available: %s — gateway management disabled (%s)",
+                e,
+                _docker_runtime_requirements(),
+            )
             self._docker = None
 
     # ── Container management ─────────────────────────────────────────
@@ -323,7 +335,7 @@ class ConnectionManager:
         ``GATEWAY_REGISTRY`` entry for *broker_type*.
         """
         if not self._docker:
-            raise RuntimeError("Docker is not available")
+            raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}")
 
         spec = get_gateway_spec(broker_type)
         if spec is None:
