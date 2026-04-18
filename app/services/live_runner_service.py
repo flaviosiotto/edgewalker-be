@@ -29,6 +29,7 @@ DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "edgewalker-devops_default")
 # Host paths used for Docker bind mounts when spawning runner containers.
 EDGEWALKER_PATH = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
 RUNTIME_PATH = os.getenv("RUNTIME_PATH", "/home/flavio/playground/edgewalker-runtime")
+SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
 
 # Strategy runner image
 RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "edgewalker-devops-strategy-runner:latest")
@@ -269,23 +270,6 @@ class LiveRunnerService:
         
         # Volume mounts
         volumes = {
-            # Runner application source (dev: host-mounted for live code changes)
-            f"{RUNTIME_PATH}/strategy-runner/app": {
-                "bind": "/app/app",
-                "mode": "ro",
-            },
-            # Edgewalker library source (runner image installs it in editable mode)
-            # so mounting the package keeps TradeAction/rule parsing in sync without
-            # rebuilding the image on every local library change.
-            f"{EDGEWALKER_PATH}/edgewalker": {
-                "bind": "/opt/edgewalker/edgewalker",
-                "mode": "ro",
-            },
-            # Shared schemas
-            f"{RUNTIME_PATH}/shared": {
-                "bind": "/app/shared",
-                "mode": "ro",
-            },
             # Strategy configs and artifacts
             f"{EDGEWALKER_PATH}/strategies": {
                 "bind": "/opt/edgewalker/strategies",
@@ -296,6 +280,25 @@ class LiveRunnerService:
                 "mode": "ro",
             },
         }
+
+        if SPAWN_CODE_MOUNTS:
+            volumes.update({
+                # Runner application source (local dev: host-mounted for live code changes)
+                f"{RUNTIME_PATH}/strategy-runner/app": {
+                    "bind": "/app/app",
+                    "mode": "ro",
+                },
+                # Edgewalker library source overlay for local development.
+                f"{EDGEWALKER_PATH}/edgewalker": {
+                    "bind": "/opt/edgewalker/edgewalker",
+                    "mode": "ro",
+                },
+                # Shared schemas overlay for local development.
+                f"{RUNTIME_PATH}/shared": {
+                    "bind": "/app/shared",
+                    "mode": "ro",
+                },
+            })
         
         try:
             # Create and start container

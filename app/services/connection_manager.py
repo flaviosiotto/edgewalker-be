@@ -60,6 +60,14 @@ if not os.path.isabs(EDGEWALKER_PATH) or not os.path.isabs(RUNTIME_PATH):
 # on mounted volumes match the host user (avoids root-owned data).
 HOST_PUID = os.getenv("PUID", "1000")
 HOST_PGID = os.getenv("PGID", "1000")
+SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
+
+# Shared Redis settings propagated to dynamically spawned gateway containers.
+REDIS_URL = os.getenv("REDIS_URL", "")
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = os.getenv("REDIS_PORT", "6379")
+REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
 
 def _docker_runtime_requirements() -> str:
@@ -356,8 +364,8 @@ class ConnectionManager:
         # Common env vars (shared by all gateways)
         env = {
             "BROKER_TYPE": broker_type,
-            "REDIS_HOST": "redis",
-            "REDIS_PORT": "6379",
+            "REDIS_HOST": REDIS_HOST,
+            "REDIS_PORT": REDIS_PORT,
             "CONNECTION_ID": str(connection_id),
             "DATA_DIR": "/opt/edgewalker/data",
             "LOG_LEVEL": "INFO",
@@ -368,6 +376,12 @@ class ConnectionManager:
             ),
             "OTEL_SERVICE_NAME": f"{spec.label}-{connection_id}",
         }
+        if REDIS_URL:
+            env["REDIS_URL"] = REDIS_URL
+        if REDIS_USERNAME:
+            env["REDIS_USERNAME"] = REDIS_USERNAME
+        if REDIS_PASSWORD:
+            env["REDIS_PASSWORD"] = REDIS_PASSWORD
         # Broker-specific env vars (from registry)
         env.update(spec.env_mapper(config))
 
@@ -382,17 +396,21 @@ class ConnectionManager:
                 "bind": "/opt/edgewalker/data",
                 "mode": "rw",
             },
-            # Shared module (constants, schemas) — dev overlay
-            f"{RUNTIME_PATH}/shared": {
-                "bind": "/app/shared",
-                "mode": "ro",
-            },
-            # Application code — dev overlay (live reload)
-            f"{RUNTIME_PATH}/{spec.app_dir}": {
-                "bind": "/app/app",
-                "mode": "ro",
-            },
         }
+
+        if SPAWN_CODE_MOUNTS:
+            volumes.update({
+                # Shared module (constants, schemas) — local dev overlay
+                f"{RUNTIME_PATH}/shared": {
+                    "bind": "/app/shared",
+                    "mode": "ro",
+                },
+                # Application code — local dev overlay (live reload)
+                f"{RUNTIME_PATH}/{spec.app_dir}": {
+                    "bind": "/app/app",
+                    "mode": "ro",
+                },
+            })
 
         labels = {
             "edgewalker.type": spec.label,
