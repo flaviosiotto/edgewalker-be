@@ -120,11 +120,13 @@ class GatewaySpec:
     extra_hosts: dict[str, str] | None = None
 
 
-_GATEWAY_V2_IMAGE = os.getenv("GATEWAY_V2_IMAGE", "edgewalker-devops-gateway-v2:latest")
+_DEFAULT_GATEWAY_V2_IMAGE = os.getenv("GATEWAY_V2_IMAGE", "edgewalker-devops-gateway-v2:latest")
+_IBKR_GATEWAY_IMAGE = os.getenv("IBKR_GATEWAY_IMAGE", _DEFAULT_GATEWAY_V2_IMAGE)
+_BINANCE_GATEWAY_IMAGE = os.getenv("BINANCE_GATEWAY_IMAGE", _DEFAULT_GATEWAY_V2_IMAGE)
 
 GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
     "ibkr": GatewaySpec(
-        image=_GATEWAY_V2_IMAGE,
+        image=_IBKR_GATEWAY_IMAGE,
         prefix="gw-v2-",
         label="gateway-v2",
         env_mapper=_ibkr_env,
@@ -132,7 +134,7 @@ GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
         extra_hosts={"host.docker.internal": "host-gateway"},
     ),
     "binance": GatewaySpec(
-        image=_GATEWAY_V2_IMAGE,
+        image=_BINANCE_GATEWAY_IMAGE,
         prefix="gw-v2-",
         label="gateway-v2",
         env_mapper=_binance_env,
