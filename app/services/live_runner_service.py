@@ -40,6 +40,9 @@ CONTAINER_PREFIX = "edgewalker-live-"
 # Redis settings
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
+REDIS_URL = os.getenv("REDIS_URL", "")
+REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
 # n8n internal address (Docker service name + internal port)
 N8N_INTERNAL_URL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
@@ -214,6 +217,13 @@ class LiveRunnerService:
             ),
             "OTEL_SERVICE_NAME": f"strategy-runner-{strategy_id}",
         }
+
+        if REDIS_URL:
+            env["REDIS_URL"] = REDIS_URL
+        if REDIS_USERNAME:
+            env["REDIS_USERNAME"] = REDIS_USERNAME
+        if REDIS_PASSWORD:
+            env["REDIS_PASSWORD"] = REDIS_PASSWORD
 
         # Manager agent webhook (so the runner can call the agent directly)
         if manager_webhook_url:
