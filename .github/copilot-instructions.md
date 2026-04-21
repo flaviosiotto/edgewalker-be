@@ -62,7 +62,6 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --root-path /api
 Key settings in `core/config.py` (Pydantic BaseSettings):
 - `DATABASE_URL` – PostgreSQL connection string
 - `SECRET_KEY`, `ALGORITHM` – JWT auth
-- `MARKETDATA_DIR` – Path to partitioned OHLCV data (read from edgewalker)
 - `N8N_*` – n8n integration settings
 
 ## API Structure

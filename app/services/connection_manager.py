@@ -56,10 +56,13 @@ if not os.path.isabs(EDGEWALKER_PATH) or not os.path.isabs(RUNTIME_PATH):
         EDGEWALKER_PATH, RUNTIME_PATH,
     )
 
-# Host UID/GID — gateway containers run as this user so written files
-# on mounted volumes match the host user (avoids root-owned data).
-HOST_PUID = os.getenv("PUID", "1000")
-HOST_PGID = os.getenv("PGID", "1000")
+# Optional container user override for dynamically spawned gateways.
+# In local dev we often set PUID/PGID to keep host-written files owned by the
+# workstation user. In production bind mounts may be owned by root or another
+# service account, so forcing 1000:1000 by default can break parquet writes.
+HOST_PUID = os.getenv("PUID", "").strip()
+HOST_PGID = os.getenv("PGID", "").strip()
+SPAWN_CONTAINER_USER = os.getenv("SPAWN_CONTAINER_USER", "").strip()
 SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
 
 # Shared Redis settings propagated to dynamically spawned gateway containers.
@@ -74,8 +77,17 @@ def _docker_runtime_requirements() -> str:
     return (
         "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST), "
         f"the Docker network '{DOCKER_NETWORK}' must exist, and host paths EDGEWALKER_PATH={EDGEWALKER_PATH} "
-        f"and RUNTIME_PATH={RUNTIME_PATH} must be valid absolute paths on the Docker host"
+        f"and RUNTIME_PATH={RUNTIME_PATH} must be valid absolute paths on the Docker host; "
+        "if bind-mounted data paths are not writable by the spawned container user, parquet writes will fail"
     )
+
+
+def _spawn_container_user() -> str | None:
+    if SPAWN_CONTAINER_USER:
+        return SPAWN_CONTAINER_USER
+    if HOST_PUID and HOST_PGID:
+        return f"{HOST_PUID}:{HOST_PGID}"
+    return None
 
 
 # ── Gateway Registry ─────────────────────────────────────────────────
@@ -421,6 +433,7 @@ class ConnectionManager:
         extra_hosts = spec.extra_hosts or {}
 
         try:
+            user = _spawn_container_user()
             self._docker.containers.run(
                 image=spec.image,
                 name=container_name,
@@ -429,7 +442,7 @@ class ConnectionManager:
                 labels=labels,
                 extra_hosts=extra_hosts or None,
                 network=DOCKER_NETWORK,
-                user=f"{HOST_PUID}:{HOST_PGID}",
+                user=user,
                 detach=True,
                 restart_policy={"Name": "unless-stopped"},
             )

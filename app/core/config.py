@@ -23,10 +23,6 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
     
-    # Market data directory (base path for partitioned datasets)
-    # Structure: <MARKETDATA_DIR>/<connection_id>-conn/<symbol>/<timeframe>/<date>/ext.parquet
-    MARKETDATA_DIR: str = "/data"
-    
     # Sync settings
     SYNC_POLL_INTERVAL_SECONDS: int = 60  # How often to check if sources need sync
     SYNC_STARTUP_ENABLED: bool = True      # Run sync at startup
