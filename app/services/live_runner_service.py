@@ -49,6 +49,17 @@ N8N_INTERNAL_URL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
 # n8n path prefix used by Traefik (stripped before forwarding to n8n)
 N8N_PATH_PREFIX = os.getenv("N8N_PATH_PREFIX", "/n8n")
 
+# CORS for live runner APIs exposed directly through Traefik
+RUNNER_CORS_ALLOWED_ORIGINS = os.getenv(
+    "RUNNER_CORS_ALLOWED_ORIGINS",
+    "https://edgewalker.tech",
+)
+RUNNER_CORS_ALLOW_CREDENTIALS = os.getenv("RUNNER_CORS_ALLOW_CREDENTIALS", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
 
 def _docker_runtime_requirements() -> str:
     return (
@@ -234,6 +245,10 @@ class LiveRunnerService:
             env["REDIS_USERNAME"] = REDIS_USERNAME
         if REDIS_PASSWORD:
             env["REDIS_PASSWORD"] = REDIS_PASSWORD
+        if os.getenv("CORS_ALLOWED_ORIGINS"):
+            env["CORS_ALLOWED_ORIGINS"] = os.getenv("CORS_ALLOWED_ORIGINS", "")
+        if os.getenv("CORS_ALLOW_CREDENTIALS"):
+            env["CORS_ALLOW_CREDENTIALS"] = os.getenv("CORS_ALLOW_CREDENTIALS", "")
 
         # Manager agent webhook (so the runner can call the agent directly)
         if manager_webhook_url:
@@ -269,7 +284,12 @@ class LiveRunnerService:
             f"traefik.http.routers.live-runner-{live_id}.entrypoints": "web,websecure",
             f"traefik.http.routers.live-runner-{live_id}.priority": "200",
             f"traefik.http.middlewares.live-runner-{live_id}-strip.stripprefix.prefixes": f"/live/instances/{live_id}/runner",
-            f"traefik.http.routers.live-runner-{live_id}.middlewares": f"live-runner-{live_id}-strip",
+            f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
+            f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+            f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolallowheaders": "*",
+            f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolallowcredentials": str(RUNNER_CORS_ALLOW_CREDENTIALS).lower(),
+            f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.addvaryheader": "true",
+            f"traefik.http.routers.live-runner-{live_id}.middlewares": f"live-runner-{live_id}-strip,live-runner-{live_id}-cors",
             f"traefik.http.services.live-runner-{live_id}.loadbalancer.server.port": "8080",
             # Custom labels for identification
             "edgewalker.type": "strategy-runner",
@@ -284,7 +304,12 @@ class LiveRunnerService:
                 f"traefik.http.routers.runner-{strategy_id}.entrypoints": "web,websecure",
                 f"traefik.http.routers.runner-{strategy_id}.priority": "200",
                 f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": f"/runners/{strategy_id}",
-                f"traefik.http.routers.runner-{strategy_id}.middlewares": f"runner-{strategy_id}-strip",
+                f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
+                f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+                f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolallowheaders": "*",
+                f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolallowcredentials": str(RUNNER_CORS_ALLOW_CREDENTIALS).lower(),
+                f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.addvaryheader": "true",
+                f"traefik.http.routers.runner-{strategy_id}.middlewares": f"runner-{strategy_id}-strip,runner-{strategy_id}-cors",
                 f"traefik.http.services.runner-{strategy_id}.loadbalancer.server.port": "8080",
             })
         
