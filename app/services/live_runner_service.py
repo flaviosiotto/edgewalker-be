@@ -18,7 +18,7 @@ import os
 from typing import Any
 
 import docker
-from docker.errors import NotFound, APIError
+from docker.errors import APIError, NotFound
 from docker.models.containers import Container
 
 logger = logging.getLogger(__name__)
@@ -31,8 +31,8 @@ EDGEWALKER_PATH = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalk
 RUNTIME_PATH = os.getenv("RUNTIME_PATH", "/home/flavio/playground/edgewalker-runtime")
 SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
 
-# Strategy runner image
-RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "edgewalker-devops-strategy-runner:latest")
+# Strategy runner image must be explicitly configured by environment.
+RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "").strip()
 
 # Container naming convention
 CONTAINER_PREFIX = "edgewalker-live-"
@@ -55,6 +55,16 @@ def _docker_runtime_requirements() -> str:
         "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST) "
         f"and the Docker network '{DOCKER_NETWORK}' must exist; host paths "
         f"EDGEWALKER_PATH={EDGEWALKER_PATH} and RUNTIME_PATH={RUNTIME_PATH} must be valid absolute paths on the Docker host"
+    )
+
+
+def _get_required_runner_image() -> str:
+    """Return configured RUNNER_IMAGE or fail with a clear error."""
+    if RUNNER_IMAGE:
+        return RUNNER_IMAGE
+    raise RuntimeError(
+        "Missing required environment variable RUNNER_IMAGE for backend. "
+        "Set it to the strategy runner image tag (example: edgewalker-strategy-runner:latest)."
     )
 
 
@@ -255,10 +265,10 @@ class LiveRunnerService:
         # Priority must be higher than the backend's generic /api route
         labels = {
             "traefik.enable": "true",
-            f"traefik.http.routers.live-runner-{live_id}.rule": f"PathPrefix(`/api/live/instances/{live_id}/runner`)",
-            f"traefik.http.routers.live-runner-{live_id}.entrypoints": "http",
+            f"traefik.http.routers.live-runner-{live_id}.rule": f"PathPrefix(`/live/instances/{live_id}/runner`)",
+            f"traefik.http.routers.live-runner-{live_id}.entrypoints": "web,websecure",
             f"traefik.http.routers.live-runner-{live_id}.priority": "200",
-            f"traefik.http.middlewares.live-runner-{live_id}-strip.stripprefix.prefixes": f"/api/live/instances/{live_id}/runner",
+            f"traefik.http.middlewares.live-runner-{live_id}-strip.stripprefix.prefixes": f"/live/instances/{live_id}/runner",
             f"traefik.http.routers.live-runner-{live_id}.middlewares": f"live-runner-{live_id}-strip",
             f"traefik.http.services.live-runner-{live_id}.loadbalancer.server.port": "8080",
             # Custom labels for identification
@@ -270,10 +280,10 @@ class LiveRunnerService:
 
         if legacy_strategy_route:
             labels.update({
-                f"traefik.http.routers.runner-{strategy_id}.rule": f"PathPrefix(`/api/runners/{strategy_id}`)",
-                f"traefik.http.routers.runner-{strategy_id}.entrypoints": "http",
+                f"traefik.http.routers.runner-{strategy_id}.rule": f"PathPrefix(`/runners/{strategy_id}`)",
+                f"traefik.http.routers.runner-{strategy_id}.entrypoints": "web,websecure",
                 f"traefik.http.routers.runner-{strategy_id}.priority": "200",
-                f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": f"/api/runners/{strategy_id}",
+                f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": f"/runners/{strategy_id}",
                 f"traefik.http.routers.runner-{strategy_id}.middlewares": f"runner-{strategy_id}-strip",
                 f"traefik.http.services.runner-{strategy_id}.loadbalancer.server.port": "8080",
             })
@@ -310,10 +320,12 @@ class LiveRunnerService:
                 },
             })
         
+        image_name = _get_required_runner_image()
+
         try:
             # Create and start container
             container = self.client.containers.run(
-                image=RUNNER_IMAGE,
+                image=image_name,
                 name=container_name,
                 environment=env,
                 labels=labels,
@@ -331,13 +343,14 @@ class LiveRunnerService:
                 "status": "started",
                 "container_id": container.short_id,
                 "container_name": container_name,
+                "image": image_name,
                 "symbol": symbol,
                 "timeframe": timeframe,
             }
             
         except APIError as e:
             logger.error("Failed to start container %s: %s", container_name, e)
-            raise RuntimeError(f"Failed to start strategy runner: {e}")
+            raise RuntimeError(f"Failed to start strategy runner (image={image_name}): {e}")
 
     def stop_live_instance(self, live_id: int, remove: bool = True) -> dict[str, Any]:
         """
