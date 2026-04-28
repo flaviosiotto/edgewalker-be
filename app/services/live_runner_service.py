@@ -49,11 +49,33 @@ N8N_INTERNAL_URL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
 # n8n path prefix used by Traefik (stripped before forwarding to n8n)
 N8N_PATH_PREFIX = os.getenv("N8N_PATH_PREFIX", "/n8n")
 
-# CORS for live runner APIs exposed directly through Traefik
-RUNNER_CORS_ALLOWED_ORIGINS = os.getenv(
-    "RUNNER_CORS_ALLOWED_ORIGINS",
-    "https://edgewalker.tech",
+# CORS for live runner APIs exposed directly through Traefik and the spawned runner app.
+# By default reuse BACKEND_CORS_ORIGINS so the backend and runner share one source of truth.
+def _parse_cors_origins(value: str | None, default: list[str]) -> list[str]:
+    if not value:
+        return default
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, list):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+DEFAULT_CORS_ORIGINS = _parse_cors_origins(
+    os.getenv("BACKEND_CORS_ORIGINS"),
+    ["https://edgewalker.tech"],
 )
+
+RUNNER_CORS_ALLOWED_ORIGIN_LIST = _parse_cors_origins(
+    os.getenv("RUNNER_CORS_ALLOWED_ORIGINS"),
+    DEFAULT_CORS_ORIGINS,
+)
+RUNNER_CORS_ALLOWED_ORIGINS = ",".join(RUNNER_CORS_ALLOWED_ORIGIN_LIST)
 RUNNER_CORS_ALLOW_CREDENTIALS = os.getenv("RUNNER_CORS_ALLOW_CREDENTIALS", "true").lower() in (
     "true",
     "1",
@@ -245,10 +267,8 @@ class LiveRunnerService:
             env["REDIS_USERNAME"] = REDIS_USERNAME
         if REDIS_PASSWORD:
             env["REDIS_PASSWORD"] = REDIS_PASSWORD
-        if os.getenv("CORS_ALLOWED_ORIGINS"):
-            env["CORS_ALLOWED_ORIGINS"] = os.getenv("CORS_ALLOWED_ORIGINS", "")
-        if os.getenv("CORS_ALLOW_CREDENTIALS"):
-            env["CORS_ALLOW_CREDENTIALS"] = os.getenv("CORS_ALLOW_CREDENTIALS", "")
+        env["CORS_ALLOWED_ORIGINS"] = RUNNER_CORS_ALLOWED_ORIGINS
+        env["CORS_ALLOW_CREDENTIALS"] = str(RUNNER_CORS_ALLOW_CREDENTIALS).lower()
 
         # Manager agent webhook (so the runner can call the agent directly)
         if manager_webhook_url:
