@@ -16,10 +16,12 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.db.database import get_session
+from app.core.config import settings
 from app.models.agent import Agent, Chat
 from app.models.connection import Account, Connection
 from app.models.live_trading import LiveFill, LivePosition, PositionStatus
 from app.models.strategy import LiveStatus, Strategy, StrategyLive
+from app.models.user import User
 from app.schemas.chat import ChatRead
 from app.schemas.live_strategy import (
     LivePerformanceSummary,
@@ -71,6 +73,7 @@ from app.services.strategy_service import (
     list_live_session_chats,
     resolve_strategy_manager_agent_id,
 )
+from app.utils.auth_utils import create_user_delegated_token, get_current_active_user, get_current_admin_user
 
 logger = logging.getLogger(__name__)
 
@@ -186,9 +189,9 @@ class LiveLayoutResponse(BaseModel):
 # ─── HELPERS ───
 
 
-def _get_strategy_or_404(session: Session, strategy_id: int):
+def _get_strategy_or_404(session: Session, strategy_id: int, user_id: int | None = None):
     """Fetch strategy or raise 404."""
-    strategy = get_strategy(session, strategy_id)
+    strategy = get_strategy(session, strategy_id, user_id)
     if not strategy:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -213,7 +216,7 @@ def _require_current_live(strategy) -> StrategyLive:
     return sl
 
 
-def _get_live_or_404(session: Session, live_id: int) -> StrategyLive:
+def _get_live_or_404(session: Session, live_id: int, user_id: int | None = None) -> StrategyLive:
     """Fetch a StrategyLive by ID or raise 404."""
     sl = session.get(StrategyLive, live_id)
     if sl is None:
@@ -221,6 +224,8 @@ def _get_live_or_404(session: Session, live_id: int) -> StrategyLive:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Live session {live_id} not found",
         )
+    if user_id is not None:
+        _ = get_strategy(session, sl.strategy_id, user_id)
     return sl
 
 
@@ -402,11 +407,12 @@ async def _start_live_instance_internal(
     eval_in_progress: bool,
     debug_rules: bool,
     account_id: int,
+    user_id: int,
     legacy_strategy_route: bool = False,
 ) -> tuple[StrategyLive, dict[str, Any]]:
-    strategy = _get_strategy_or_404(session, strategy_id)
+    strategy = _get_strategy_or_404(session, strategy_id, user_id)
 
-    account, connection = validate_account_for_live(session, account_id)
+    account, connection = validate_account_for_live(session, account_id, user_id)
     account_config = {
         "account_id": account.account_id,
         "db_account_id": account.id,
@@ -416,7 +422,7 @@ async def _start_live_instance_internal(
     }
     broker_type = connection.broker_type
 
-    live_chat = get_or_create_live_chat(session, strategy_id)
+    live_chat = get_or_create_live_chat(session, strategy_id, user_id)
 
     sl = StrategyLive(
         strategy_id=strategy_id,
@@ -493,10 +499,30 @@ async def _start_live_instance_internal(
 
     manager_webhook_url: str | None = None
     manager_chat_session_id: str | None = live_chat.n8n_session_id
+    runner_auth_token = create_user_delegated_token(
+        session,
+        user_id=user_id,
+        audience=settings.RUNNER_TOKEN_AUDIENCE,
+        purpose="runner_backend",
+        extra_claims={"strategy_id": strategy_id, "live_id": sl.id},
+    )
+    manager_webhook_auth_token: str | None = None
     if strategy.manager_agent_id:
         manager_agent = session.get(Agent, strategy.manager_agent_id)
         if manager_agent:
             manager_webhook_url = manager_agent.n8n_webhook
+            manager_webhook_auth_token = create_user_delegated_token(
+                session,
+                user_id=user_id,
+                audience=settings.N8N_TOKEN_AUDIENCE,
+                purpose="n8n_runner_webhook",
+                extra_claims={
+                    "agent_id": manager_agent.id_agent,
+                    "chat_id": live_chat.id,
+                    "strategy_id": strategy_id,
+                    "live_id": sl.id,
+                },
+            )
 
     result = live_runner_service.start_live_instance(
         live_id=sl.id,
@@ -509,6 +535,8 @@ async def _start_live_instance_internal(
         account_config=account_config,
         broker_type=broker_type,
         manager_webhook_url=manager_webhook_url,
+        backend_auth_token=runner_auth_token,
+        manager_webhook_auth_token=manager_webhook_auth_token,
         manager_chat_session_id=manager_chat_session_id,
         strategy_live_id=sl.id,
         legacy_strategy_route=legacy_strategy_route,
@@ -615,8 +643,9 @@ def list_live_instances(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
-    stmt = select(StrategyLive)
+    stmt = select(StrategyLive).join(Strategy, StrategyLive.strategy_id == Strategy.id).where(Strategy.user_id == current_user.id)
     if status_filter:
         stmt = stmt.where(StrategyLive.status == status_filter)
     elif not include_stopped:
@@ -637,8 +666,9 @@ def list_live_instances(
 def get_live_instance(
     live_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
-    sl = _get_live_or_404(session, live_id)
+    sl = _get_live_or_404(session, live_id, current_user.id)
     return _serialize_live_detail(session, sl)
 
 
@@ -646,6 +676,7 @@ def get_live_instance(
 async def create_live_instance(
     payload: LiveStrategyCreate,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     try:
         sl, result = await _start_live_instance_internal(
@@ -656,6 +687,7 @@ async def create_live_instance(
             eval_in_progress=payload.eval_in_progress,
             debug_rules=payload.debug_rules,
             account_id=payload.account_id,
+            user_id=current_user.id,
             legacy_strategy_route=False,
         )
     except ValueError as exc:
@@ -681,8 +713,9 @@ def stop_live_instance(
     live_id: int,
     remove: bool = True,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
-    sl = _get_live_or_404(session, live_id)
+    sl = _get_live_or_404(session, live_id, current_user.id)
     try:
         result = _stop_live_instance_internal(session, sl, remove=remove)
     except Exception as exc:
@@ -706,8 +739,9 @@ def stop_live_instance(
 def get_live_instance_status(
     live_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
-    sl = _get_live_or_404(session, live_id)
+    sl = _get_live_or_404(session, live_id, current_user.id)
     return _serialize_live_summary(session, sl)
 
 
@@ -716,8 +750,9 @@ def get_live_instance_logs(
     live_id: int,
     tail: int = 100,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
-    sl = _get_live_or_404(session, live_id)
+    sl = _get_live_or_404(session, live_id, current_user.id)
     try:
         logs = live_runner_service.get_container_logs(live_id=live_id, tail=tail)
         return {
@@ -759,6 +794,7 @@ async def start_live_strategy(
     strategy_id: int,
     request: LiveStartRequest,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Legacy start endpoint kept as a shim over the live-instance API."""
     if request.account_id is None:
@@ -776,6 +812,7 @@ async def start_live_strategy(
             eval_in_progress=request.eval_in_progress,
             debug_rules=request.debug_rules,
             account_id=request.account_id,
+            user_id=current_user.id,
             legacy_strategy_route=True,
         )
     except ValueError as exc:
@@ -804,13 +841,14 @@ def stop_live_strategy(
     strategy_id: int,
     remove: bool = True,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Stop a live strategy runner.
     
     Stops and optionally removes the Docker container.
     """
-    strategy = _get_strategy_or_404(session, strategy_id)
+    strategy = _get_strategy_or_404(session, strategy_id, current_user.id)
     sl = _require_current_live(strategy)
 
     try:
@@ -847,13 +885,14 @@ def stop_live_strategy(
 def get_live_strategy_status(
     strategy_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Get status of a live strategy runner.
     
     Returns both database state and container state.
     """
-    strategy = _get_strategy_or_404(session, strategy_id)
+    strategy = _get_strategy_or_404(session, strategy_id, current_user.id)
     sl = _get_current_live(strategy)
     
     # Get container status
@@ -889,11 +928,12 @@ def get_live_strategy_logs(
     strategy_id: int,
     tail: int = 100,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Get logs from a live strategy runner container.
     """
-    strategy = _get_strategy_or_404(session, strategy_id)
+    strategy = _get_strategy_or_404(session, strategy_id, current_user.id)
     sl = _require_current_live(strategy)
 
     try:
@@ -921,11 +961,12 @@ def get_live_strategy_logs(
 
 
 @router.get("/strategies", response_model=list[RunningStrategyInfo], deprecated=True)
-def list_running_strategies():
+def list_running_strategies(current_user: User = Depends(get_current_admin_user)):
     """
     List all running live strategy containers.
     """
     try:
+        _ = current_user
         result = live_runner_service.list_live_instances()
         return [RunningStrategyInfo(**info) for info in result]
         
@@ -948,9 +989,10 @@ def list_session_orders(
     status: str | None = Query(None, description="Filter by order status"),
     limit: int = Query(100, ge=1, le=1000),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List live orders for a session."""
-    _get_live_or_404(session, live_id)
+    _get_live_or_404(session, live_id, current_user.id)
     orders = list_live_orders(session, live_id, status=status, limit=limit)
     return [LiveOrderRead.model_validate(o) for o in orders]
 
@@ -959,9 +1001,10 @@ def list_session_orders(
 def list_session_active_orders(
     live_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List active (pending/submitted/partially_filled) orders for a session."""
-    _get_live_or_404(session, live_id)
+    _get_live_or_404(session, live_id, current_user.id)
     orders = list_active_orders(session, live_id)
     return [LiveOrderRead.model_validate(o) for o in orders]
 
@@ -971,8 +1014,13 @@ def update_order(
     order_id: int,
     payload: LiveOrderUpdate,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Update a live order (status, fill info - manual corrections)."""
+    existing_order = get_live_order(session, order_id)
+    if existing_order is None:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+    _get_live_or_404(session, existing_order.strategy_live_id, current_user.id)
     order = update_live_order(session, order_id, payload)
     if order is None:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
@@ -983,11 +1031,13 @@ def update_order(
 def get_order(
     order_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Get a single live order by ID."""
     order = get_live_order(session, order_id)
     if order is None:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+    _get_live_or_404(session, order.strategy_live_id, current_user.id)
     return LiveOrderRead.model_validate(order)
 
 
@@ -1001,9 +1051,10 @@ def list_session_fills(
     live_id: int,
     limit: int = Query(200, ge=1, le=1000),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List live fills for a session."""
-    _get_live_or_404(session, live_id)
+    _get_live_or_404(session, live_id, current_user.id)
     fills = list_live_fills(session, live_id, limit=limit)
     return [LiveFillRead.model_validate(f) for f in fills]
 
@@ -1019,9 +1070,10 @@ def list_session_alerts(
     enabled: bool | None = Query(None, description="Filter by enabled flag"),
     status: str | None = Query(None, description="Filter by alert status"),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List persistent alerts for a live session."""
-    _get_live_or_404(session, live_id)
+    _get_live_or_404(session, live_id, current_user.id)
     alerts = list_live_alerts(session, live_id, enabled=enabled, status=status)
     return [LiveAlertRead.model_validate(a) for a in alerts]
 
@@ -1031,9 +1083,10 @@ def create_session_alert(
     live_id: int,
     payload: LiveAlertCreate,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Create a persistent alert for a live session."""
-    _get_live_or_404(session, live_id)
+    _get_live_or_404(session, live_id, current_user.id)
     alert = create_live_alert(session, live_id, payload)
     return LiveAlertRead.model_validate(alert)
 
@@ -1042,11 +1095,13 @@ def create_session_alert(
 def get_alert(
     alert_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Get a single persistent live alert by ID."""
     alert = get_live_alert(session, alert_id)
     if alert is None:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    _get_live_or_404(session, alert.strategy_live_id, current_user.id)
     return LiveAlertRead.model_validate(alert)
 
 
@@ -1055,8 +1110,13 @@ def patch_alert(
     alert_id: int,
     payload: LiveAlertUpdate,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Update a persistent live alert."""
+    existing_alert = get_live_alert(session, alert_id)
+    if existing_alert is None:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    _get_live_or_404(session, existing_alert.strategy_live_id, current_user.id)
     alert = update_live_alert(session, alert_id, payload)
     if alert is None:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
@@ -1067,8 +1127,13 @@ def patch_alert(
 def remove_alert(
     alert_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Delete a persistent live alert."""
+    existing_alert = get_live_alert(session, alert_id)
+    if existing_alert is None:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    _get_live_or_404(session, existing_alert.strategy_live_id, current_user.id)
     deleted = delete_live_alert(session, alert_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
@@ -1104,9 +1169,10 @@ def list_session_positions(
     status: str | None = Query(None, description="Filter by status: open/closed"),
     limit: int = Query(100, ge=1, le=1000),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List live positions for a session (enriched with real-time PnL)."""
-    _get_live_or_404(session, live_id)
+    _get_live_or_404(session, live_id, current_user.id)
     positions = list_positions(session, live_id, status=status, limit=limit)
     return [_enrich_position(p) for p in positions]
 
@@ -1115,9 +1181,10 @@ def list_session_positions(
 def list_session_open_positions(
     live_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List open positions for a session (enriched with real-time PnL)."""
-    _get_live_or_404(session, live_id)
+    _get_live_or_404(session, live_id, current_user.id)
     positions = list_open_positions(session, live_id)
     return [_enrich_position(p) for p in positions]
 
@@ -1133,9 +1200,10 @@ def list_all_strategy_orders(
     status: str | None = Query(None, description="Filter by order status"),
     limit: int = Query(200, ge=1, le=2000),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List orders across ALL live sessions for a strategy."""
-    _get_strategy_or_404(session, strategy_id)
+    _get_strategy_or_404(session, strategy_id, current_user.id)
     orders = list_strategy_orders(session, strategy_id, status=status, limit=limit)
     return [LiveOrderRead.model_validate(o) for o in orders]
 
@@ -1145,9 +1213,10 @@ def list_all_strategy_fills(
     strategy_id: int,
     limit: int = Query(500, ge=1, le=5000),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List fills across ALL live sessions for a strategy."""
-    _get_strategy_or_404(session, strategy_id)
+    _get_strategy_or_404(session, strategy_id, current_user.id)
     fills = list_strategy_fills(session, strategy_id, limit=limit)
     return [LiveFillRead.model_validate(f) for f in fills]
 
@@ -1158,9 +1227,10 @@ def list_all_strategy_positions(
     status: str | None = Query(None, description="Filter by status: open/closed"),
     limit: int = Query(200, ge=1, le=2000),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List positions across ALL live sessions for a strategy (enriched with PnL)."""
-    _get_strategy_or_404(session, strategy_id)
+    _get_strategy_or_404(session, strategy_id, current_user.id)
     positions = list_strategy_positions(session, strategy_id, status=status, limit=limit)
     return [_enrich_position(p) for p in positions]
 
@@ -1170,9 +1240,10 @@ def list_live_checkpoints(
     live_id: int,
     limit: int = Query(100, ge=1, le=500),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Read persisted checkpoints for debugging startup, reconcile, and order flow."""
-    sl = _get_live_or_404(session, live_id)
+    sl = _get_live_or_404(session, live_id, current_user.id)
     checkpoints = _get_live_checkpoints(sl, limit=limit)
     return {
         "live_id": sl.id,
@@ -1192,6 +1263,7 @@ async def reconcile_session(
     broker_orders: list[dict[str, Any]] | None = None,
     broker_positions: list[dict[str, Any]] | None = None,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Run reconciliation between DB state and broker state for a live session.
@@ -1200,7 +1272,7 @@ async def reconcile_session(
     Optionally accepts broker state; if not provided, reconciles
     only local DB state (cancels stale orders, etc.).
     """
-    sl = _get_live_or_404(session, live_id)
+    sl = _get_live_or_404(session, live_id, current_user.id)
 
     if broker_orders is None or broker_positions is None:
         if sl.account_id is None or sl.connection_id is None:
@@ -1210,7 +1282,7 @@ async def reconcile_session(
             )
 
         try:
-            account, connection = validate_account_for_live(session, sl.account_id)
+            account, connection = validate_account_for_live(session, sl.account_id, current_user.id)
             broker_orders, broker_positions = await _fetch_broker_snapshot(
                 connection_id=connection.id,
                 broker_type=connection.broker_type,
@@ -1277,10 +1349,11 @@ def update_live_layout_endpoint(
     live_id: int,
     payload: LayoutConfigUpdate,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Update only the UI layout configuration for a live session."""
     from app.services.strategy_service import update_live_layout
-    sl = update_live_layout(session, live_id, payload)
+    sl = update_live_layout(session, live_id, payload, current_user.id)
     return LiveLayoutResponse(
         live_id=sl.id,
         layout_config=sl.layout_config,
@@ -1312,6 +1385,7 @@ def post_manager_message_endpoint(
     strategy_id: int,
     payload: ManagerMessageRequest,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Post a message to the strategy's Live chat.
 
@@ -1319,12 +1393,13 @@ def post_manager_message_endpoint(
     trade actions, status updates, or errors to the manager agent's
     live chat.
     """
-    _ = get_strategy(session, strategy_id)
+    _ = get_strategy(session, strategy_id, current_user.id)
     chat = post_manager_message(
         session=session,
         strategy_id=strategy_id,
         message=payload.message,
         sender=payload.sender,
+        user_id=current_user.id,
     )
     return ManagerMessageResponse(status="ok", chat_id=chat.id)
 
@@ -1333,10 +1408,11 @@ def post_manager_message_endpoint(
 def get_manager_live_chat(
     strategy_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Get (or create) the dedicated Live chat for a strategy."""
-    chat = get_or_create_live_chat(session, strategy_id)
-    fallback_agent_id = resolve_strategy_manager_agent_id(session, strategy_id)
+    chat = get_or_create_live_chat(session, strategy_id, current_user.id)
+    fallback_agent_id = resolve_strategy_manager_agent_id(session, strategy_id, user_id=current_user.id)
     return _serialize_chat_read(session, chat, fallback_agent_id)
 
 
@@ -1344,13 +1420,15 @@ def get_manager_live_chat(
 def list_live_session_chats_endpoint(
     live_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List chats relevant to a live session for the LiveStrategy page."""
-    live_session = _get_live_or_404(session, live_id)
+    live_session = _get_live_or_404(session, live_id, current_user.id)
     fallback_agent_id = resolve_strategy_manager_agent_id(
         session,
         live_session.strategy_id,
         live_session=live_session,
+        user_id=current_user.id,
     )
-    chats = list_live_session_chats(session, live_id)
+    chats = list_live_session_chats(session, live_id, current_user.id)
     return [_serialize_chat_read(session, chat, fallback_agent_id) for chat in chats]

@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from sqlmodel import Session
 
 from app.db.database import get_session
+from app.models.user import User
 from app.schemas.connection import (
     AccountListResponse,
     AccountRead,
@@ -41,6 +42,7 @@ from app.services.connection_service import (
 )
 from app.services.client_portal_service import is_client_portal_transport
 from app.services.connection_manager import get_connection_manager
+from app.utils.auth_utils import get_current_active_user
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,7 @@ router = APIRouter(prefix="/connections", tags=["Connections & Accounts"])
 async def list_connections_endpoint(
     active_only: bool = False,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List all broker connections.
 
@@ -66,7 +69,7 @@ async def list_connections_endpoint(
     # Re-read after potential status updates
     session.expire_all()
 
-    conns = list_connections(session, active_only=active_only)
+    conns = list_connections(session, current_user.id, active_only=active_only)
     return ConnectionListResponse(
         connections=[ConnectionRead.model_validate(c) for c in conns],
         count=len(conns),
@@ -77,13 +80,14 @@ async def list_connections_endpoint(
 async def get_connection_endpoint(
     connection_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Get a single connection with its accounts.
 
     If the connection is marked as *connected* it is probed against
     the broker to verify its real status before returning.
     """
-    conn = get_connection(session, connection_id)
+    conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
@@ -99,10 +103,12 @@ async def get_connection_endpoint(
 def create_connection_endpoint(
     payload: ConnectionCreate,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Create a new broker connection."""
     conn = create_connection(
         session,
+        user_id=current_user.id,
         name=payload.name,
         broker_type=payload.broker_type,
         config=payload.config,
@@ -116,11 +122,13 @@ def update_connection_endpoint(
     connection_id: int,
     payload: ConnectionUpdate,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Update a broker connection."""
     conn = update_connection(
         session,
         connection_id,
+        user_id=current_user.id,
         **payload.model_dump(exclude_unset=True),
     )
     if conn is None:
@@ -132,9 +140,10 @@ def update_connection_endpoint(
 def delete_connection_endpoint(
     connection_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Delete a broker connection (cascades to accounts)."""
-    if not delete_connection(session, connection_id):
+    if not delete_connection(session, connection_id, current_user.id):
         raise HTTPException(status_code=404, detail="Connection not found")
 
 
@@ -170,9 +179,10 @@ class ClientPortalAuthStatusResponse(BaseModel):
 async def connect_endpoint(
     connection_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Connect to the broker and auto-discover accounts."""
-    conn = get_connection(session, connection_id)
+    conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
@@ -208,8 +218,9 @@ async def connect_endpoint(
 async def client_portal_auth_status_endpoint(
     connection_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
-    conn = get_connection(session, connection_id)
+    conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
     if conn.broker_type != "ibkr" or not is_client_portal_transport(conn.config or {}):
@@ -224,8 +235,9 @@ async def client_portal_auth_status_endpoint(
 async def complete_client_portal_connect_endpoint(
     connection_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
-    conn = get_connection(session, connection_id)
+    conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
     if conn.broker_type != "ibkr" or not is_client_portal_transport(conn.config or {}):
@@ -244,9 +256,10 @@ async def complete_client_portal_connect_endpoint(
 async def disconnect_endpoint(
     connection_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Disconnect from the broker."""
-    conn = get_connection(session, connection_id)
+    conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
@@ -267,12 +280,13 @@ def list_accounts_endpoint(
     connection_id: int,
     active_only: bool = False,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List accounts for a connection."""
-    conn = get_connection(session, connection_id)
+    conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
-    accts = list_accounts(session, connection_id, active_only=active_only)
+    accts = list_accounts(session, connection_id, user_id=current_user.id, active_only=active_only)
     return AccountListResponse(
         accounts=[AccountRead.model_validate(a) for a in accts],
         count=len(accts),
@@ -283,9 +297,10 @@ def list_accounts_endpoint(
 def list_all_accounts_endpoint(
     active_only: bool = False,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """List all accounts across all connections."""
-    accts = list_all_accounts(session, active_only=active_only)
+    accts = list_all_accounts(session, current_user.id, active_only=active_only)
     return AccountListResponse(
         accounts=[AccountRead.model_validate(a) for a in accts],
         count=len(accts),
@@ -296,9 +311,10 @@ def list_all_accounts_endpoint(
 def get_account_endpoint(
     account_id: int,
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Get a single account."""
-    account = get_account(session, account_id)
+    account = get_account(session, account_id, current_user.id)
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
     return AccountRead.model_validate(account)
@@ -320,13 +336,14 @@ def search_connection_symbols(
     ),
     limit: int = Query(50, ge=1, le=500, description="Maximum number of results"),
     session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """Search symbols via a connection's gateway.
 
     Requires the connection to have a running gateway container
     (broker types with gateway support: ibkr, binance, etc.).
     """
-    conn = get_connection(session, connection_id)
+    conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 

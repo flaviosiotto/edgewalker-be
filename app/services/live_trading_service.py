@@ -367,6 +367,7 @@ def list_strategy_positions(
 def validate_account_for_live(
     session: Session,
     account_id: int,
+    user_id: int | None = None,
 ) -> tuple[Account, Connection]:
     """
     Validate that an account exists, is active, and its connection is
@@ -385,6 +386,9 @@ def validate_account_for_live(
     connection = session.get(Connection, account.connection_id)
     if connection is None:
         raise ValueError(f"Connection for account {account.account_id} not found")
+
+    if user_id is not None and connection.user_id != user_id:
+        raise ValueError(f"Account {account_id} not found")
 
     if connection.status != ConnectionStatus.CONNECTED.value:
         raise ValueError(

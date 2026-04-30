@@ -5,7 +5,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Column, ForeignKey, String, Date, DateTime, Integer, Numeric, Text, Float, Boolean
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
@@ -54,10 +54,20 @@ class Strategy(SQLModel, table=True):
     """Design-time strategy definition. No runtime/live state here."""
     __tablename__ = "strategies"
     __allow_unmapped__ = True
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_strategies_user_name"),)
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    name: str = Field(sa_column=Column(String(255), unique=True, nullable=False, index=True))
+    user_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("user.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+
+    name: str = Field(sa_column=Column(String(255), nullable=False, index=True))
     description: Optional[str] = Field(default=None, sa_column=Column(String(2000), nullable=True))
 
     # Declarative strategy syntax/config

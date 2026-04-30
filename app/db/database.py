@@ -28,6 +28,7 @@ def create_db_and_tables():
     from app.models.user import User  # noqa: F401
     from app.models.agent import Agent, Chat  # noqa: F401
     from app.models.n8n_chat_history import N8nChatHistory  # noqa: F401
+    from app.models.password_reset_token import PasswordResetToken  # noqa: F401
     from app.models.strategy import Strategy, BacktestResult, BacktestTrade  # noqa: F401
     from app.models.connection import Connection, Account  # noqa: F401
     from app.models.live_trading import LiveOrder, LiveFill, LivePosition  # noqa: F401

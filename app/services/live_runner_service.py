@@ -191,6 +191,8 @@ class LiveRunnerService:
         account_config: dict[str, Any] | None = None,
         broker_type: str | None = None,
         manager_webhook_url: str | None = None,
+        backend_auth_token: str | None = None,
+        manager_webhook_auth_token: str | None = None,
         manager_chat_session_id: str | None = None,
         strategy_live_id: int | None = None,
         legacy_strategy_route: bool = False,
@@ -269,10 +271,14 @@ class LiveRunnerService:
             env["REDIS_PASSWORD"] = REDIS_PASSWORD
         env["CORS_ALLOWED_ORIGINS"] = RUNNER_CORS_ALLOWED_ORIGINS
         env["CORS_ALLOW_CREDENTIALS"] = str(RUNNER_CORS_ALLOW_CREDENTIALS).lower()
+        if backend_auth_token:
+            env["BACKEND_AUTH_TOKEN"] = backend_auth_token
 
         # Manager agent webhook (so the runner can call the agent directly)
         if manager_webhook_url:
             env["MANAGER_WEBHOOK_URL"] = _rewrite_webhook_for_docker(manager_webhook_url)
+        if manager_webhook_auth_token:
+            env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
         if manager_chat_session_id:
             env["MANAGER_CHAT_SESSION_ID"] = manager_chat_session_id
         

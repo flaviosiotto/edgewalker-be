@@ -16,11 +16,14 @@ def create_user(session: Session, payload: UserCreate) -> User:
             detail="Email o username già in uso"
         )
 
+    existing_users = session.exec(select(User.id)).first()
+
     user = User(
         email=payload.email,
         username=payload.username,
         hashed_password=get_password_hash(payload.password),
-        is_active=True
+        is_active=True,
+        role="admin" if existing_users is None else "user",
     )
     session.add(user)
     session.commit()

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from contextlib import asynccontextmanager
 import logging
 import os
@@ -20,6 +20,7 @@ from app.api.live import router as live_router
 from app.api.connections import router as connections_router
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
+from app.utils.auth_utils import get_current_active_user
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
@@ -116,8 +117,8 @@ app.add_middleware(TrackIDMiddleware)
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(system_router)
-app.include_router(agents_router)
-app.include_router(strategies_router)
-app.include_router(marketdata_router)
-app.include_router(live_router)
-app.include_router(connections_router)
+app.include_router(agents_router, dependencies=[Depends(get_current_active_user)])
+app.include_router(strategies_router, dependencies=[Depends(get_current_active_user)])
+app.include_router(marketdata_router, dependencies=[Depends(get_current_active_user)])
+app.include_router(live_router, dependencies=[Depends(get_current_active_user)])
+app.include_router(connections_router, dependencies=[Depends(get_current_active_user)])

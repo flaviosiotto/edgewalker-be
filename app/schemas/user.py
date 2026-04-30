@@ -13,6 +13,7 @@ class UserRead(BaseModel):
     id: int
     email: EmailStr
     username: str
+    role: str
     is_active: bool
     created_at: datetime
 
@@ -20,4 +21,5 @@ class UserRead(BaseModel):
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     username: Optional[str] = None
+    role: Optional[str] = None
     is_active: Optional[bool] = None

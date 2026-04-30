@@ -6,7 +6,21 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session
 
 from app.db.database import get_session
-from app.schemas.auth import Token, TokenWithRefresh, RefreshTokenRequest
+from app.schemas.auth import (
+    MessageResponse,
+    PasswordChangeRequest,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
+    PasswordResetRequestResponse,
+    RefreshTokenRequest,
+    Token,
+    TokenWithRefresh,
+)
+from app.services.password_reset_service import (
+    change_password,
+    confirm_password_reset,
+    request_password_reset,
+)
 from app.utils.auth_utils import (
     authenticate_user,
     create_access_token,
@@ -39,8 +53,9 @@ async def login(
         )
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": user.email}, expires_delta=access_token_expires)
-    refresh_token = create_refresh_token(data={"sub": user.email})
+    token_claims = {"sub": user.email, "uid": user.id, "role": user.role}
+    access_token = create_access_token(data=token_claims, expires_delta=access_token_expires)
+    refresh_token = create_refresh_token(data=token_claims)
 
     return {
         "access_token": access_token,
@@ -51,7 +66,10 @@ async def login(
 
 @router.post("/refresh", response_model=Token)
 async def refresh_access_token(refresh_data: RefreshTokenRequest, session: Session = Depends(get_session)):
-    payload = cast(Optional[Dict[str, Any]], decode_token(refresh_data.refresh_token))
+    payload = cast(
+        Optional[Dict[str, Any]],
+        decode_token(refresh_data.refresh_token, audience=settings.REFRESH_TOKEN_AUDIENCE),
+    )
 
     if payload is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token non valido")
@@ -67,7 +85,10 @@ async def refresh_access_token(refresh_data: RefreshTokenRequest, session: Sessi
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Utente non trovato")
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    new_access_token = create_access_token(data={"sub": email}, expires_delta=access_token_expires)
+    new_access_token = create_access_token(
+        data={"sub": email, "uid": user.id, "role": user.role},
+        expires_delta=access_token_expires,
+    )
 
     return {"access_token": new_access_token, "token_type": "bearer"}
 
@@ -75,3 +96,30 @@ async def refresh_access_token(refresh_data: RefreshTokenRequest, session: Sessi
 @router.post("/logout")
 async def logout(current_user: Annotated[User, Depends(get_current_active_user)]):
     return {"message": "Logout effettuato con successo. Cancella i token dal client."}
+
+
+@router.post("/password/change", response_model=MessageResponse)
+async def change_password_endpoint(
+    payload: PasswordChangeRequest,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    session: Session = Depends(get_session),
+):
+    change_password(session, current_user, payload.current_password, payload.new_password)
+    return {"message": "Password aggiornata con successo"}
+
+
+@router.post("/password-reset/request", response_model=PasswordResetRequestResponse)
+async def request_password_reset_endpoint(
+    payload: PasswordResetRequest,
+    session: Session = Depends(get_session),
+):
+    return request_password_reset(session, payload.identifier)
+
+
+@router.post("/password-reset/confirm", response_model=MessageResponse)
+async def confirm_password_reset_endpoint(
+    payload: PasswordResetConfirmRequest,
+    session: Session = Depends(get_session),
+):
+    confirm_password_reset(session, payload.token, payload.new_password)
+    return {"message": "Password reimpostata con successo"}

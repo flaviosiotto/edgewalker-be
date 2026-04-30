@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from sqlalchemy import Column, ForeignKey, Integer, String, DateTime, Text, text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
@@ -37,11 +37,21 @@ class Connection(SQLModel, table=True):
 
     __tablename__ = "connections"
     __allow_unmapped__ = True
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_connections_user_name"),)
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
+    user_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("user.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+
     name: str = Field(
-        sa_column=Column(String(100), unique=True, nullable=False, index=True),
+        sa_column=Column(String(100), nullable=False, index=True),
         description="Human-readable connection name",
     )
     broker_type: str = Field(

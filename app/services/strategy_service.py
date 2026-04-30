@@ -10,7 +10,9 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
+from app.core.config import settings
 from app.models.agent import Agent, Chat
+from app.models.connection import Connection
 from app.models.n8n_chat_history import N8nChatHistory
 from app.models.strategy import Strategy, StrategyLive, BacktestResult, BacktestTrade, BacktestStatus
 from app.schemas.strategy import (
@@ -22,11 +24,52 @@ from app.schemas.strategy import (
     LayoutConfigUpdate,
 )
 from app.schemas.chat import ChatCreate
+from app.utils.auth_utils import create_user_delegated_token
 
 if TYPE_CHECKING:
     from sqlmodel import Session
 
 logger = logging.getLogger(__name__)
+
+
+def _get_owned_agent(session: Session, agent_id: int, user_id: int | None = None) -> Agent:
+    agent = session.get(Agent, agent_id)
+    if not agent or (user_id is not None and agent.user_id != user_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent with id {agent_id} not found",
+        )
+    return agent
+
+
+def _get_owned_connection(session: Session, connection_id: int, user_id: int | None = None) -> Connection:
+    connection = session.get(Connection, connection_id)
+    if not connection or (user_id is not None and connection.user_id != user_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Connection with id {connection_id} not found",
+        )
+    return connection
+
+
+def _n8n_auth_headers(
+    session: Session,
+    *,
+    user_id: int | None,
+    purpose: str,
+    extra_claims: dict | None = None,
+) -> dict[str, str]:
+    if user_id is None:
+        return {}
+
+    token = create_user_delegated_token(
+        session,
+        user_id=user_id,
+        audience=settings.N8N_TOKEN_AUDIENCE,
+        purpose=purpose,
+        extra_claims=extra_claims,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _load_chat_with_agent(session: Session, chat_id: int) -> Chat:
@@ -45,6 +88,7 @@ def resolve_strategy_manager_agent_id(
     strategy_id: int,
     *,
     live_session: StrategyLive | None = None,
+    user_id: int | None = None,
 ) -> int | None:
     """Resolve the effective manager agent for a strategy/live session.
 
@@ -56,7 +100,7 @@ def resolve_strategy_manager_agent_id(
     if live_session and live_session.manager_agent_id is not None:
         return live_session.manager_agent_id
 
-    strategy = get_strategy(session, strategy_id)
+    strategy = get_strategy(session, strategy_id, user_id)
     if strategy.manager_agent_id is not None:
         return strategy.manager_agent_id
 
@@ -70,7 +114,7 @@ def resolve_strategy_manager_agent_id(
     return inferred_chat.id_agent if inferred_chat else None
 
 
-def create_strategy(session: Session, payload: StrategyCreate) -> Strategy:
+def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> Strategy:
     name = (payload.name or "").strip()
     if not name:
         raise HTTPException(
@@ -78,15 +122,26 @@ def create_strategy(session: Session, payload: StrategyCreate) -> Strategy:
             detail="Strategy name is required",
         )
 
-    existing = session.exec(select(Strategy).where(Strategy.name == name)).first()
+    existing = session.exec(
+        select(Strategy)
+        .where(Strategy.user_id == user_id)
+        .where(Strategy.name == name)
+    ).first()
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Strategy name already exists",
         )
 
+    if payload.manager_agent_id is not None:
+        _get_owned_agent(session, payload.manager_agent_id, user_id)
+
+    if payload.connection_id is not None:
+        _get_owned_connection(session, payload.connection_id, user_id)
+
     now = datetime.now(timezone.utc)
     strategy = Strategy(
+        user_id=user_id,
         name=name,
         description=payload.description,
         definition=payload.definition,
@@ -101,27 +156,29 @@ def create_strategy(session: Session, payload: StrategyCreate) -> Strategy:
     return strategy
 
 
-def list_strategies(session: Session) -> list[Strategy]:
+def list_strategies(session: Session, user_id: int) -> list[Strategy]:
     stmt = select(Strategy).options(
         selectinload(Strategy.chats),
         selectinload(Strategy.live_sessions),
-    ).order_by(Strategy.id.desc())
+    ).where(Strategy.user_id == user_id).order_by(Strategy.id.desc())
     return list(session.exec(stmt).all())
 
 
-def get_strategy(session: Session, strategy_id: int) -> Strategy:
+def get_strategy(session: Session, strategy_id: int, user_id: int | None = None) -> Strategy:
     stmt = select(Strategy).options(
         selectinload(Strategy.chats),
         selectinload(Strategy.live_sessions),
     ).where(Strategy.id == strategy_id)
+    if user_id is not None:
+        stmt = stmt.where(Strategy.user_id == user_id)
     strategy = session.exec(stmt).first()
     if not strategy:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
     return strategy
 
 
-def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate) -> Strategy:
-    strategy = get_strategy(session, strategy_id)
+def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate, user_id: int | None = None) -> Strategy:
+    strategy = get_strategy(session, strategy_id, user_id)
 
     if payload.name is not None and payload.name != strategy.name:
         name = (payload.name or "").strip()
@@ -131,7 +188,12 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate)
                 detail="Strategy name is required",
             )
 
-        existing = session.exec(select(Strategy).where(Strategy.name == name)).first()
+        existing = session.exec(
+            select(Strategy)
+            .where(Strategy.user_id == strategy.user_id)
+            .where(Strategy.name == name)
+            .where(Strategy.id != strategy_id)
+        ).first()
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -151,12 +213,7 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate)
     if payload.manager_agent_id is not None:
         # Validate agent exists
         if payload.manager_agent_id != 0:  # 0 means unset
-            agent = session.get(Agent, payload.manager_agent_id)
-            if not agent:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Agent with id {payload.manager_agent_id} not found",
-                )
+            _get_owned_agent(session, payload.manager_agent_id, strategy.user_id)
             strategy.manager_agent_id = payload.manager_agent_id
         else:
             strategy.manager_agent_id = None
@@ -165,6 +222,7 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate)
         if payload.connection_id == 0:
             strategy.connection_id = None
         else:
+            _get_owned_connection(session, payload.connection_id, strategy.user_id)
             strategy.connection_id = payload.connection_id
 
     strategy.updated_at = datetime.now(timezone.utc)
@@ -175,28 +233,28 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate)
     return strategy
 
 
-def delete_strategy(session: Session, strategy_id: int) -> None:
-    strategy = get_strategy(session, strategy_id)
+def delete_strategy(session: Session, strategy_id: int, user_id: int | None = None) -> None:
+    strategy = get_strategy(session, strategy_id, user_id)
     session.delete(strategy)
     session.commit()
 
 
-def create_backtest(session: Session, strategy_id: int, payload: BacktestCreate) -> BacktestResult:
+def create_backtest(
+    session: Session,
+    strategy_id: int,
+    payload: BacktestCreate,
+    user_id: int | None = None,
+) -> BacktestResult:
     """Create a new backtest with status=pending.
     
     Automatically snapshots the strategy definition into the config field
     so the backtest retains the exact configuration used at creation time.
     """
-    strategy = get_strategy(session, strategy_id)
+    strategy = get_strategy(session, strategy_id, user_id)
     
     # Validate agent_id if provided
     if payload.agent_id is not None:
-        agent = session.get(Agent, payload.agent_id)
-        if not agent:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Agent with id {payload.agent_id} not found",
-            )
+        _get_owned_agent(session, payload.agent_id, strategy.user_id)
     
     backtest = BacktestResult(
         strategy_id=strategy_id,
@@ -232,8 +290,8 @@ def create_backtest(session: Session, strategy_id: int, payload: BacktestCreate)
     return backtest
 
 
-def list_backtests(session: Session, strategy_id: int) -> list[BacktestResult]:
-    _ = get_strategy(session, strategy_id)
+def list_backtests(session: Session, strategy_id: int, user_id: int | None = None) -> list[BacktestResult]:
+    _ = get_strategy(session, strategy_id, user_id)
     return list(
         session.exec(
             select(BacktestResult)
@@ -243,14 +301,16 @@ def list_backtests(session: Session, strategy_id: int) -> list[BacktestResult]:
     )
 
 
-def get_backtest(session: Session, backtest_id: int) -> BacktestResult:
+def get_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> BacktestResult:
     backtest = session.get(BacktestResult, backtest_id)
     if not backtest:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest not found")
+    if user_id is not None:
+        _ = get_strategy(session, backtest.strategy_id, user_id)
     return backtest
 
 
-def run_backtest(session: Session, backtest_id: int) -> BacktestResult:
+def run_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> BacktestResult:
     """Start backtest execution by spawning a strategy-backtest container.
 
     The container reads params from the DB, verifies data coverage in the
@@ -259,7 +319,7 @@ def run_backtest(session: Session, backtest_id: int) -> BacktestResult:
     """
     from app.services.backtest_runner_service import backtest_runner_service
 
-    backtest = get_backtest(session, backtest_id)
+    backtest = get_backtest(session, backtest_id, user_id)
 
     if backtest.status != BacktestStatus.PENDING.value:
         raise HTTPException(
@@ -268,7 +328,7 @@ def run_backtest(session: Session, backtest_id: int) -> BacktestResult:
         )
 
     # Resolve connection_id from the strategy
-    strategy = session.get(Strategy, backtest.strategy_id)
+    strategy = get_strategy(session, backtest.strategy_id, user_id)
     connection_id = strategy.connection_id if strategy else None
 
     if not connection_id:
@@ -307,10 +367,13 @@ def run_backtest(session: Session, backtest_id: int) -> BacktestResult:
 
 
 def update_backtest(
-    session: Session, backtest_id: int, payload: BacktestUpdate
+    session: Session,
+    backtest_id: int,
+    payload: BacktestUpdate,
+    user_id: int | None = None,
 ) -> BacktestResult:
     """Update backtest status and results."""
-    backtest = get_backtest(session, backtest_id)
+    backtest = get_backtest(session, backtest_id, user_id)
     
     if payload.status is not None:
         # Validate status transition
@@ -363,18 +426,21 @@ def update_backtest(
     return backtest
 
 
-def delete_backtest(session: Session, backtest_id: int) -> None:
+def delete_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> None:
     """Delete a backtest and all its trades."""
-    backtest = get_backtest(session, backtest_id)
+    backtest = get_backtest(session, backtest_id, user_id)
     session.delete(backtest)
     session.commit()
 
 
 def update_strategy_layout(
-    session: Session, strategy_id: int, payload: LayoutConfigUpdate
+    session: Session,
+    strategy_id: int,
+    payload: LayoutConfigUpdate,
+    user_id: int | None = None,
 ) -> Strategy:
     """Update only the layout_config of a strategy."""
-    strategy = get_strategy(session, strategy_id)
+    strategy = get_strategy(session, strategy_id, user_id)
     strategy.layout_config = payload.layout_config
     session.add(strategy)
     session.commit()
@@ -383,10 +449,13 @@ def update_strategy_layout(
 
 
 def update_backtest_layout(
-    session: Session, backtest_id: int, payload: LayoutConfigUpdate
+    session: Session,
+    backtest_id: int,
+    payload: LayoutConfigUpdate,
+    user_id: int | None = None,
 ) -> BacktestResult:
     """Update only the layout_config of a backtest."""
-    backtest = get_backtest(session, backtest_id)
+    backtest = get_backtest(session, backtest_id, user_id)
     backtest.layout_config = payload.layout_config
     session.add(backtest)
     session.commit()
@@ -395,7 +464,10 @@ def update_backtest_layout(
 
 
 def update_live_layout(
-    session: Session, live_id: int, payload: LayoutConfigUpdate
+    session: Session,
+    live_id: int,
+    payload: LayoutConfigUpdate,
+    user_id: int | None = None,
 ) -> StrategyLive:
     """Update only the layout_config of a live session."""
     sl = session.get(StrategyLive, live_id)
@@ -404,6 +476,8 @@ def update_live_layout(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Live session {live_id} not found",
         )
+    if user_id is not None:
+        _ = get_strategy(session, sl.strategy_id, user_id)
     sl.layout_config = payload.layout_config
     session.add(sl)
     session.commit()
@@ -435,8 +509,8 @@ def create_trade(session: Session, backtest_id: int, payload: TradeCreate) -> Ba
     return trade
 
 
-def list_trades(session: Session, backtest_id: int) -> list[BacktestTrade]:
-    _ = get_backtest(session, backtest_id)
+def list_trades(session: Session, backtest_id: int, user_id: int | None = None) -> list[BacktestTrade]:
+    _ = get_backtest(session, backtest_id, user_id)
     return list(
         session.exec(
             select(BacktestTrade)
@@ -482,30 +556,37 @@ def create_trades_bulk(
 # ─── CHAT FUNCTIONS ───
 
 
-def list_strategy_chats(session: Session, strategy_id: int) -> list[Chat]:
+def list_strategy_chats(session: Session, strategy_id: int, user_id: int | None = None) -> list[Chat]:
     """List all chats for a strategy."""
-    _ = get_strategy(session, strategy_id)
+    strategy = get_strategy(session, strategy_id, user_id)
     return list(
         session.exec(
             select(Chat)
             .options(selectinload(Chat.agent))
             .where(Chat.strategy_id == strategy_id)
+            .where(Chat.user_id == strategy.user_id)
             .order_by(Chat.created_at.desc())
         ).all()
     )
 
 
 def create_strategy_chat(
-    session: Session, strategy_id: int, payload: ChatCreate
+    session: Session,
+    strategy_id: int,
+    payload: ChatCreate,
+    user_id: int,
 ) -> Chat:
     """Create a new chat for a strategy."""
-    _ = get_strategy(session, strategy_id)
+    strategy = get_strategy(session, strategy_id, user_id)
+
+    if payload.id_agent is not None:
+        _get_owned_agent(session, payload.id_agent, strategy.user_id)
     
     now = datetime.now(timezone.utc)
     chat = Chat(
         strategy_id=strategy_id,
         id_agent=payload.id_agent,
-        user_id=payload.user_id,
+        user_id=strategy.user_id,
         nome=payload.nome,
         descrizione=payload.descrizione,
         chat_type=payload.chat_type or Chat.ChatType.GENERIC,
@@ -517,14 +598,20 @@ def create_strategy_chat(
     return _load_chat_with_agent(session, chat.id)
 
 
-def get_strategy_chat(session: Session, strategy_id: int, chat_id: int) -> Chat:
+def get_strategy_chat(
+    session: Session,
+    strategy_id: int,
+    chat_id: int,
+    user_id: int | None = None,
+) -> Chat:
     """Get a specific chat for a strategy."""
-    _ = get_strategy(session, strategy_id)
+    strategy = get_strategy(session, strategy_id, user_id)
     chat = session.exec(
         select(Chat)
         .options(selectinload(Chat.agent))
         .where(Chat.strategy_id == strategy_id)
         .where(Chat.id == chat_id)
+        .where(Chat.user_id == strategy.user_id)
     ).first()
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
@@ -532,16 +619,21 @@ def get_strategy_chat(session: Session, strategy_id: int, chat_id: int) -> Chat:
 
 
 def update_strategy_chat(
-    session: Session, strategy_id: int, chat_id: int, payload: ChatCreate
+    session: Session,
+    strategy_id: int,
+    chat_id: int,
+    payload: ChatCreate,
+    user_id: int | None = None,
 ) -> Chat:
     """Update a chat for a strategy."""
-    chat = get_strategy_chat(session, strategy_id, chat_id)
+    chat = get_strategy_chat(session, strategy_id, chat_id, user_id)
     
     if payload.nome is not None:
         chat.nome = payload.nome
     if payload.descrizione is not None:
         chat.descrizione = payload.descrizione
     if payload.id_agent is not None:
+        _get_owned_agent(session, payload.id_agent, chat.user_id)
         chat.id_agent = payload.id_agent
     if payload.chat_type is not None:
         chat.chat_type = payload.chat_type
@@ -552,9 +644,14 @@ def update_strategy_chat(
     return _load_chat_with_agent(session, chat.id)
 
 
-def delete_strategy_chat(session: Session, strategy_id: int, chat_id: int) -> None:
+def delete_strategy_chat(
+    session: Session,
+    strategy_id: int,
+    chat_id: int,
+    user_id: int | None = None,
+) -> None:
     """Delete a chat from a strategy."""
-    chat = get_strategy_chat(session, strategy_id, chat_id)
+    chat = get_strategy_chat(session, strategy_id, chat_id, user_id)
     session.delete(chat)
     session.commit()
 
@@ -568,6 +665,7 @@ def trigger_rule_agent(
     chat_id: int,
     rule_context: dict,
     webhook_url: str | None = None,
+    user_id: int | None = None,
 ) -> dict:
     """Trigger an agent webhook when an ask_agent rule is activated.
     
@@ -591,16 +689,11 @@ def trigger_rule_agent(
         Response from the agent webhook
     """
     # Get agent
-    agent = session.get(Agent, agent_id)
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent with id {agent_id} not found",
-        )
+    agent = _get_owned_agent(session, agent_id, user_id)
     
     # Get chat and its session_id
     chat = session.get(Chat, chat_id)
-    if not chat:
+    if not chat or (user_id is not None and chat.user_id != user_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Chat with id {chat_id} not found",
@@ -621,7 +714,19 @@ def trigger_rule_agent(
     # Call agent webhook
     try:
         with httpx.Client(timeout=60.0) as client:
-            response = client.post(target_webhook, json=webhook_payload)
+            response = client.post(
+                target_webhook,
+                json=webhook_payload,
+                headers=_n8n_auth_headers(
+                    session,
+                    user_id=chat.user_id,
+                    purpose="n8n_rule_trigger",
+                    extra_claims={
+                        "agent_id": agent_id,
+                        "chat_id": chat_id,
+                    },
+                ),
+            )
             response.raise_for_status()
             return response.json() if response.text else {"status": "ok"}
     except httpx.ConnectError as e:
@@ -650,14 +755,14 @@ def trigger_rule_agent(
 # ─── AI AGENT MANAGER ───
 
 
-def get_or_create_live_chat(session: Session, strategy_id: int) -> Chat:
+def get_or_create_live_chat(session: Session, strategy_id: int, user_id: int | None = None) -> Chat:
     """Get or create the dedicated 'Live' chat for a strategy.
 
     Every strategy has exactly one chat with ``chat_type='live'``.
     If none exists it is created automatically, linked to the strategy's
     manager agent.
     """
-    strategy = get_strategy(session, strategy_id)
+    strategy = get_strategy(session, strategy_id, user_id)
     resolved_manager_agent_id = resolve_strategy_manager_agent_id(session, strategy_id)
 
     # Look for existing live chat
@@ -679,6 +784,7 @@ def get_or_create_live_chat(session: Session, strategy_id: int) -> Chat:
     # Create a new live chat
     live_chat = Chat(
         strategy_id=strategy_id,
+        user_id=strategy.user_id,
         id_agent=resolved_manager_agent_id,
         nome=f"Live",
         descrizione="Chat live della strategia — l'agent manager riporta le attività in tempo reale",
@@ -692,7 +798,7 @@ def get_or_create_live_chat(session: Session, strategy_id: int) -> Chat:
     return _load_chat_with_agent(session, live_chat.id)
 
 
-def list_live_session_chats(session: Session, live_id: int) -> list[Chat]:
+def list_live_session_chats(session: Session, live_id: int, user_id: int | None = None) -> list[Chat]:
     """List chats relevant to a live session.
 
     The live page only shows the dedicated LIVE chat plus chats bound to the
@@ -706,11 +812,12 @@ def list_live_session_chats(session: Session, live_id: int) -> list[Chat]:
             detail=f"Live session {live_id} not found",
         )
 
-    live_chat = get_or_create_live_chat(session, live_session.strategy_id)
+    live_chat = get_or_create_live_chat(session, live_session.strategy_id, user_id)
     manager_agent_id = resolve_strategy_manager_agent_id(
         session,
         live_session.strategy_id,
         live_session=live_session,
+        user_id=user_id,
     )
 
     if manager_agent_id is not None and live_chat.id_agent != manager_agent_id:
@@ -754,6 +861,7 @@ def notify_manager_live_start(
     symbol: str,
     timeframe: str,
     account_config: dict | None = None,
+    user_id: int | None = None,
 ) -> dict | None:
     """Send a context message to the strategy's manager agent when going live.
 
@@ -763,19 +871,19 @@ def notify_manager_live_start(
 
     Returns the webhook response dict, or ``None`` if no manager is set.
     """
-    strategy = get_strategy(session, strategy_id)
+    strategy = get_strategy(session, strategy_id, user_id)
 
     if not strategy.manager_agent_id:
         logger.info("Strategy %s has no manager agent — skipping notification", strategy_id)
         return None
 
-    agent = session.get(Agent, strategy.manager_agent_id)
+    agent = _get_owned_agent(session, strategy.manager_agent_id, strategy.user_id)
     if not agent:
         logger.warning("Manager agent %s not found for strategy %s", strategy.manager_agent_id, strategy_id)
         return None
 
     # Ensure live chat exists
-    live_chat = get_or_create_live_chat(session, strategy_id)
+    live_chat = get_or_create_live_chat(session, strategy_id, strategy.user_id)
 
     # Build context payload
     context = {
@@ -815,6 +923,20 @@ def notify_manager_live_start(
         webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
         with httpx.Client(timeout=30.0) as client:
             response = client.post(webhook_url, json=webhook_payload)
+            response = client.post(
+                webhook_url,
+                json=webhook_payload,
+                headers=_n8n_auth_headers(
+                    session,
+                    user_id=strategy.user_id,
+                    purpose="n8n_live_start",
+                    extra_claims={
+                        "agent_id": agent.id_agent,
+                        "chat_id": live_chat.id,
+                        "strategy_id": strategy_id,
+                    },
+                ),
+            )
             response.raise_for_status()
             logger.info(
                 "Notified manager agent '%s' about live start for strategy %s",
@@ -835,6 +957,7 @@ def post_manager_message(
     message: str,
     sender: str = "system",
     forward_to_webhook: bool = False,
+    user_id: int | None = None,
 ) -> Chat:
     """Post a message to the strategy's live chat.
 
@@ -855,7 +978,7 @@ def post_manager_message(
     Returns:
         The live Chat object
     """
-    live_chat = get_or_create_live_chat(session, strategy_id)
+    live_chat = get_or_create_live_chat(session, strategy_id, user_id)
 
     msg_type = "ai" if sender in ("system", "ai", "agent") else "human"
     history_entry = N8nChatHistory(
@@ -885,8 +1008,18 @@ def post_manager_message(
                     },
                 }
                 try:
+                    headers = _n8n_auth_headers(
+                        session,
+                        user_id=live_chat.user_id,
+                        purpose="n8n_manager_message",
+                        extra_claims={
+                            "agent_id": agent.id_agent,
+                            "chat_id": live_chat.id,
+                            "strategy_id": strategy_id,
+                        },
+                    )
                     with httpx.Client(timeout=10.0) as client:
-                        resp = client.post(webhook_url, json=webhook_payload)
+                        resp = client.post(webhook_url, json=webhook_payload, headers=headers)
                         resp.raise_for_status()
                 except Exception as e:
                     logger.warning(

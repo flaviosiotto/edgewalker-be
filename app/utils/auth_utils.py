@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
@@ -23,31 +23,101 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+def _encode_token(payload: dict[str, Any]) -> str:
+    return jwt.encode(payload, settings.jwt_signing_key, algorithm=settings.ALGORITHM)
+
+
+def _build_token_payload(
+    data: dict[str, Any],
+    *,
+    token_type: str,
+    audience: str,
+    expires_delta: timedelta,
+    purpose: Optional[str] = None,
+) -> dict[str, Any]:
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire, "type": "access"})
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    expire = datetime.now(timezone.utc) + expires_delta
+    to_encode.update(
+        {
+            "aud": audience,
+            "exp": expire,
+            "iss": settings.JWT_ISSUER,
+            "type": token_type,
+        }
+    )
+    if purpose:
+        to_encode["purpose"] = purpose
+    return to_encode
 
 
-def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire, "type": "refresh"})
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+def create_access_token(
+    data: dict[str, Any],
+    expires_delta: Optional[timedelta] = None,
+    audience: Optional[str] = None,
+    purpose: str = "ui_auth",
+) -> str:
+    payload = _build_token_payload(
+        data,
+        token_type="access",
+        audience=audience or settings.ACCESS_TOKEN_AUDIENCE,
+        expires_delta=expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        purpose=purpose,
+    )
+    return _encode_token(payload)
 
 
-def decode_token(token: str) -> Optional[dict]:
+def create_refresh_token(
+    data: dict[str, Any],
+    expires_delta: Optional[timedelta] = None,
+    audience: Optional[str] = None,
+) -> str:
+    payload = _build_token_payload(
+        data,
+        token_type="refresh",
+        audience=audience or settings.REFRESH_TOKEN_AUDIENCE,
+        expires_delta=expires_delta or timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+        purpose="refresh_auth",
+    )
+    return _encode_token(payload)
+
+
+def create_delegated_token(
+    data: dict[str, Any],
+    *,
+    audience: str,
+    purpose: str,
+    expires_delta: Optional[timedelta] = None,
+) -> str:
+    payload = _build_token_payload(
+        data,
+        token_type="delegated",
+        audience=audience,
+        expires_delta=expires_delta or timedelta(minutes=settings.DELEGATED_TOKEN_EXPIRE_MINUTES),
+        purpose=purpose,
+    )
+    return _encode_token(payload)
+
+
+def decode_token(token: str, audience: Optional[str] = None) -> Optional[dict[str, Any]]:
     try:
-        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        decode_kwargs: dict[str, Any] = {
+            "algorithms": [settings.ALGORITHM],
+            "issuer": settings.JWT_ISSUER,
+            "options": {"verify_aud": audience is not None},
+        }
+        if audience is not None:
+            decode_kwargs["audience"] = audience
+        return jwt.decode(token, settings.jwt_verifying_key, **decode_kwargs)
     except JWTError:
         return None
+
+
+def decode_token_for_audiences(token: str, audiences: list[str]) -> Optional[dict[str, Any]]:
+    for audience in audiences:
+        payload = decode_token(token, audience=audience)
+        if payload is not None:
+            return payload
+    return None
 
 
 def get_user_by_email(email: str, session: Session) -> Optional[User]:
@@ -83,7 +153,10 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    payload = decode_token(token)
+    payload = decode_token_for_audiences(
+        token,
+        [settings.ACCESS_TOKEN_AUDIENCE, settings.RUNNER_TOKEN_AUDIENCE],
+    )
     if payload is None:
         raise credentials_exception
 
@@ -101,4 +174,44 @@ async def get_current_user(
 async def get_current_active_user(
     current_user: User = Depends(get_current_user)
 ) -> User:
+    if not current_user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
     return current_user
+
+
+async def get_current_admin_user(
+    current_user: User = Depends(get_current_active_user),
+) -> User:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_user
+
+
+def create_user_delegated_token(
+    session: Session,
+    *,
+    user_id: int,
+    audience: str,
+    purpose: str,
+    extra_claims: Optional[dict[str, Any]] = None,
+    expires_delta: Optional[timedelta] = None,
+) -> str:
+    user = session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User {user_id} not found")
+
+    claims: dict[str, Any] = {
+        "sub": user.email,
+        "uid": user.id,
+        "username": user.username,
+        "role": user.role,
+    }
+    if extra_claims:
+        claims.update(extra_claims)
+
+    return create_delegated_token(
+        claims,
+        audience=audience,
+        purpose=purpose,
+        expires_delta=expires_delta,
+    )

@@ -4,7 +4,7 @@ import enum
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, Column, Computed, Enum as SAEnum, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Column, Computed, Enum as SAEnum, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -17,8 +17,18 @@ def _enum_values_callable(enum_cls: type[enum.Enum]) -> list[str]:
 
 
 class Agent(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("user_id", "agent_name", name="uq_agent_user_name"),)
+
     id_agent: Optional[int] = Field(default=None, primary_key=True)
-    agent_name: str = Field(sa_column=Column(String(255), unique=True, nullable=False))
+    user_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("user.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    agent_name: str = Field(sa_column=Column(String(255), nullable=False))
     n8n_webhook: str = Field(sa_column=Column(String(512), nullable=False))
     is_default: bool = Field(sa_column=Column(Boolean, nullable=False, server_default="false"))
 
@@ -28,9 +38,13 @@ class Chat(SQLModel, table=True):
     __allow_unmapped__ = True
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    user_id: Optional[int] = Field(
-        default=None,
-        foreign_key="user.id",
+    user_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("user.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
         description="ID dell'utente proprietario della chat",
     )
 

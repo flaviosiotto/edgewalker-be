@@ -17,20 +17,40 @@ logger = logging.getLogger(__name__)
 # Connection CRUD
 # =============================================================================
 
-def list_connections(session: Session, *, active_only: bool = False) -> list[Connection]:
-    stmt = select(Connection)
+def list_connections(session: Session, user_id: int, *, active_only: bool = False) -> list[Connection]:
+    stmt = select(Connection).where(Connection.user_id == user_id)
     if active_only:
         stmt = stmt.where(Connection.is_active == True)  # noqa: E712
     stmt = stmt.order_by(Connection.name)
     return list(session.exec(stmt).all())
 
 
-def get_connection(session: Session, connection_id: int) -> Connection | None:
-    return session.get(Connection, connection_id)
+def get_connection(session: Session, connection_id: int, user_id: int | None = None) -> Connection | None:
+    stmt = select(Connection).where(Connection.id == connection_id)
+    if user_id is not None:
+        stmt = stmt.where(Connection.user_id == user_id)
+    return session.exec(stmt).first()
 
 
-def create_connection(session: Session, *, name: str, broker_type: str, config: dict, is_active: bool = True) -> Connection:
+def create_connection(
+    session: Session,
+    *,
+    user_id: int,
+    name: str,
+    broker_type: str,
+    config: dict,
+    is_active: bool = True,
+) -> Connection:
+    existing = session.exec(
+        select(Connection)
+        .where(Connection.user_id == user_id)
+        .where(Connection.name == name)
+    ).first()
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connection name already exists")
+
     conn = Connection(
+        user_id=user_id,
         name=name,
         broker_type=broker_type,
         config=config,
@@ -43,10 +63,22 @@ def create_connection(session: Session, *, name: str, broker_type: str, config: 
     return conn
 
 
-def update_connection(session: Session, connection_id: int, **fields) -> Connection | None:
-    conn = session.get(Connection, connection_id)
+def update_connection(session: Session, connection_id: int, user_id: int | None = None, **fields) -> Connection | None:
+    conn = get_connection(session, connection_id, user_id)
     if conn is None:
         return None
+
+    new_name = fields.get("name")
+    if new_name and new_name != conn.name:
+        existing = session.exec(
+            select(Connection)
+            .where(Connection.user_id == conn.user_id)
+            .where(Connection.name == new_name)
+            .where(Connection.id != connection_id)
+        ).first()
+        if existing is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connection name already exists")
+
     for key, value in fields.items():
         if value is not None:
             setattr(conn, key, value)
@@ -57,8 +89,8 @@ def update_connection(session: Session, connection_id: int, **fields) -> Connect
     return conn
 
 
-def delete_connection(session: Session, connection_id: int) -> bool:
-    conn = session.get(Connection, connection_id)
+def delete_connection(session: Session, connection_id: int, user_id: int | None = None) -> bool:
+    conn = get_connection(session, connection_id, user_id)
     if conn is None:
         return False
     session.delete(conn)
@@ -71,25 +103,40 @@ def delete_connection(session: Session, connection_id: int) -> bool:
 # Account CRUD
 # =============================================================================
 
-def list_accounts(session: Session, connection_id: int, *, active_only: bool = False) -> list[Account]:
-    stmt = select(Account).where(Account.connection_id == connection_id)
+def list_accounts(
+    session: Session,
+    connection_id: int,
+    *,
+    user_id: int | None = None,
+    active_only: bool = False,
+) -> list[Account]:
+    conn = get_connection(session, connection_id, user_id)
+    if conn is None:
+        return []
+
+    stmt = select(Account).where(Account.connection_id == conn.id)
     if active_only:
         stmt = stmt.where(Account.is_active == True)  # noqa: E712
     stmt = stmt.order_by(Account.account_id)
     return list(session.exec(stmt).all())
 
 
-def list_all_accounts(session: Session, *, active_only: bool = False) -> list[Account]:
+def list_all_accounts(session: Session, user_id: int, *, active_only: bool = False) -> list[Account]:
     """List accounts across all connections."""
-    stmt = select(Account)
+    stmt = select(Account).join(Connection, Account.connection_id == Connection.id).where(Connection.user_id == user_id)
     if active_only:
         stmt = stmt.where(Account.is_active == True)  # noqa: E712
     stmt = stmt.order_by(Account.account_id)
     return list(session.exec(stmt).all())
 
 
-def get_account(session: Session, account_id: int) -> Account | None:
-    return session.get(Account, account_id)
+def get_account(session: Session, account_id: int, user_id: int | None = None) -> Account | None:
+    account = session.get(Account, account_id)
+    if account is None:
+        return None
+    if user_id is not None and get_connection(session, account.connection_id, user_id) is None:
+        return None
+    return account
 
 
 def create_account(
