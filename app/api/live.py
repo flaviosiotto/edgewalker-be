@@ -49,7 +49,6 @@ from app.services.live_trading_service import (
     list_active_orders,
     list_live_orders,
     list_live_fills,
-    list_open_positions,
     list_positions,
     list_strategy_orders,
     list_strategy_positions,
@@ -1140,11 +1139,6 @@ def remove_alert(
     return {"status": "deleted", "id": alert_id}
 
 
-# ═════════════════════════════════════════════════════════════════════
-# LIVE POSITIONS
-# ═════════════════════════════════════════════════════════════════════
-
-
 def _enrich_position(pos) -> LivePositionRead:
     """Enrich a LivePosition DB model with computed PnL fields.
 
@@ -1161,32 +1155,6 @@ def _enrich_position(pos) -> LivePositionRead:
     data.net_pnl = (pos.realized_pnl or 0) - total_comm
 
     return data
-
-
-@router.get("/sessions/{live_id}/positions", response_model=list[LivePositionRead])
-def list_session_positions(
-    live_id: int,
-    status: str | None = Query(None, description="Filter by status: open/closed"),
-    limit: int = Query(100, ge=1, le=1000),
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
-):
-    """List live positions for a session (enriched with real-time PnL)."""
-    _get_live_or_404(session, live_id, current_user.id)
-    positions = list_positions(session, live_id, status=status, limit=limit)
-    return [_enrich_position(p) for p in positions]
-
-
-@router.get("/sessions/{live_id}/positions/open", response_model=list[LivePositionRead])
-def list_session_open_positions(
-    live_id: int,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
-):
-    """List open positions for a session (enriched with real-time PnL)."""
-    _get_live_or_404(session, live_id, current_user.id)
-    positions = list_open_positions(session, live_id)
-    return [_enrich_position(p) for p in positions]
 
 
 # ═════════════════════════════════════════════════════════════════════
