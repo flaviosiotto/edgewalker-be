@@ -7,7 +7,7 @@ Order placement is handled directly by the strategy runner — see
 ``strategy-runner/app/broker_client.py``.
 
 All broker operations from the backend are routed through this client,
-which talks to the per-Connection ``gw-v2-{id}`` container over
+which talks to the per-Connection ``gw-{id}`` container over
 the Docker network.
 
 Usage::
@@ -34,10 +34,10 @@ FETCH_TIMEOUT = 300.0  # Historical fetches can be slow
 # Prefix map: broker_type → container name prefix.
 # Must stay in sync with GATEWAY_PREFIXES in shared/constants.py
 # (runtime services) and GATEWAY_REGISTRY in connection_manager.py.
-# All broker types now use the unified gateway-v2 image.
+# All broker types now use the unified gateway image.
 GATEWAY_PREFIXES: dict[str, str] = {
-    "ibkr": "gw-v2-",
-    "binance": "gw-v2-",
+    "ibkr": "gw-",
+    "binance": "gw-",
 }
 
 
@@ -45,13 +45,13 @@ def gateway_url_for(connection_id: int | str, broker_type: str) -> str:
     """Build the gateway base URL for a given connection.
 
     On the Docker network the container is named
-    ``gw-v2-{connection_id}`` and listens on ``GATEWAY_PORT``.
+    ``gw-{connection_id}`` and listens on ``GATEWAY_PORT``.
 
     Raises ``ValueError`` if *broker_type* is empty.
     """
     if not broker_type:
         raise ValueError("broker_type is required")
-    prefix = GATEWAY_PREFIXES.get(broker_type, "gw-v2-")
+    prefix = GATEWAY_PREFIXES.get(broker_type, "gw-")
     return f"http://{prefix}{connection_id}:{GATEWAY_PORT}"
 
 

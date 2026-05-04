@@ -2,10 +2,10 @@
 Connection Manager – async background service that manages broker
 connect / disconnect lifecycle and auto-discovers accounts.
 
-**Architecture (v2 — gateway-per-connection):**
+**Architecture (gateway-per-connection):**
 
 When the user clicks "Connect" the manager spawns a dedicated
-``gateway-v2`` Docker container for that Connection.  The container
+``gateway`` Docker container for that Connection.  The container
 maintains the persistent broker connection(s) and exposes a REST API.
 All further operations (search, streaming, historical fetch, orders)
 are routed through that container via ``GatewayClient``.
@@ -97,7 +97,7 @@ def _spawn_container_user() -> str | None:
 # in ConnectionManager.
 
 def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
-    """Build env vars for an ibkr-gateway container."""
+    """Build env vars for a gateway IBKR container."""
     transport = str(config.get("transport", "legacy"))
     return {
         "IBKR_HOST": str(config.get("host", "host.docker.internal")),
@@ -118,7 +118,7 @@ def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
 
 
 def _binance_env(config: dict[str, Any]) -> dict[str, str]:
-    """Build env vars for a binance-gateway container."""
+    """Build env vars for a gateway Binance container."""
     return {
         "BINANCE_API_KEY": str(config.get("api_key", "")),
         "BINANCE_API_SECRET": str(config.get("api_secret", "")),
@@ -140,25 +140,25 @@ class GatewaySpec:
     extra_hosts: dict[str, str] | None = None
 
 
-_DEFAULT_GATEWAY_V2_IMAGE = os.getenv("GATEWAY_V2_IMAGE", "edgewalker-devops-gateway-v2:latest")
-_IBKR_GATEWAY_IMAGE = os.getenv("IBKR_GATEWAY_IMAGE", _DEFAULT_GATEWAY_V2_IMAGE)
-_BINANCE_GATEWAY_IMAGE = os.getenv("BINANCE_GATEWAY_IMAGE", _DEFAULT_GATEWAY_V2_IMAGE)
+_DEFAULT_GATEWAY_IMAGE = os.getenv("GATEWAY_IMAGE", "edgewalker-devops-gateway:latest")
+_IBKR_GATEWAY_IMAGE = os.getenv("IBKR_GATEWAY_IMAGE", _DEFAULT_GATEWAY_IMAGE)
+_BINANCE_GATEWAY_IMAGE = os.getenv("BINANCE_GATEWAY_IMAGE", _DEFAULT_GATEWAY_IMAGE)
 
 GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
     "ibkr": GatewaySpec(
         image=_IBKR_GATEWAY_IMAGE,
-        prefix="gw-v2-",
-        label="gateway-v2",
+        prefix="gw-",
+        label="gateway",
         env_mapper=_ibkr_env,
-        app_dir="gateway-v2/app",
+        app_dir="gateway/app",
         extra_hosts={"host.docker.internal": "host-gateway"},
     ),
     "binance": GatewaySpec(
         image=_BINANCE_GATEWAY_IMAGE,
-        prefix="gw-v2-",
-        label="gateway-v2",
+        prefix="gw-",
+        label="gateway",
         env_mapper=_binance_env,
-        app_dir="gateway-v2/app",
+        app_dir="gateway/app",
     ),
 }
 
@@ -793,7 +793,7 @@ class ConnectionManager:
     def _reset_connected_on_startup(self) -> None:
         """Reset all 'connected' statuses to 'disconnected' on boot.
 
-        Also cleans up any orphan gateway-v2 containers that were left
+        Also cleans up any orphan gateway containers that were left
         running from a previous backend instance.
         """
         with get_session_context() as session:

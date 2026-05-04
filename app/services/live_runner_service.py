@@ -83,12 +83,33 @@ RUNNER_CORS_ALLOW_CREDENTIALS = os.getenv("RUNNER_CORS_ALLOW_CREDENTIALS", "true
 )
 
 
+def _normalize_root_path(value: str | None) -> str:
+    if not value or value == "/":
+        return ""
+
+    normalized = value.strip()
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized.rstrip("/")
+
+
+API_ROOT_PATH = _normalize_root_path(os.getenv("API_ROOT_PATH", "/api"))
+RUNNER_TRAEFIK_ENTRYPOINTS = os.getenv("RUNNER_TRAEFIK_ENTRYPOINTS", "http")
+
+
 def _docker_runtime_requirements() -> str:
     return (
         "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST) "
         f"and the Docker network '{DOCKER_NETWORK}' must exist; host paths "
         f"EDGEWALKER_PATH={EDGEWALKER_PATH} and RUNTIME_PATH={RUNTIME_PATH} must be valid absolute paths on the Docker host"
     )
+
+
+def _public_runner_route(*segments: str) -> str:
+    suffix = "/".join(segment.strip("/") for segment in segments if segment)
+    if not suffix:
+        return API_ROOT_PATH or "/"
+    return f"{API_ROOT_PATH}/{suffix}" if API_ROOT_PATH else f"/{suffix}"
 
 
 def _get_required_runner_image() -> str:
@@ -302,14 +323,16 @@ class LiveRunnerService:
                 env["CONNECTION_ID"] = str(account_config["connection_id"])
         
         # Traefik labels for routing
-        # Route: /api/runners/{strategy_id}/* -> container:8080
+        # Route: /api/live/instances/{live_id}/runner/* -> container:8080
         # Priority must be higher than the backend's generic /api route
+        live_runner_prefix = _public_runner_route("live", "instances", str(live_id), "runner")
+
         labels = {
             "traefik.enable": "true",
-            f"traefik.http.routers.live-runner-{live_id}.rule": f"PathPrefix(`/live/instances/{live_id}/runner`)",
-            f"traefik.http.routers.live-runner-{live_id}.entrypoints": "web,websecure",
+            f"traefik.http.routers.live-runner-{live_id}.rule": f"PathPrefix(`{live_runner_prefix}`)",
+            f"traefik.http.routers.live-runner-{live_id}.entrypoints": RUNNER_TRAEFIK_ENTRYPOINTS,
             f"traefik.http.routers.live-runner-{live_id}.priority": "200",
-            f"traefik.http.middlewares.live-runner-{live_id}-strip.stripprefix.prefixes": f"/live/instances/{live_id}/runner",
+            f"traefik.http.middlewares.live-runner-{live_id}-strip.stripprefix.prefixes": live_runner_prefix,
             f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
             f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
             f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolallowheaders": "*",
@@ -325,11 +348,12 @@ class LiveRunnerService:
         }
 
         if legacy_strategy_route:
+            legacy_runner_prefix = _public_runner_route("runners", str(strategy_id))
             labels.update({
-                f"traefik.http.routers.runner-{strategy_id}.rule": f"PathPrefix(`/runners/{strategy_id}`)",
-                f"traefik.http.routers.runner-{strategy_id}.entrypoints": "web,websecure",
+                f"traefik.http.routers.runner-{strategy_id}.rule": f"PathPrefix(`{legacy_runner_prefix}`)",
+                f"traefik.http.routers.runner-{strategy_id}.entrypoints": RUNNER_TRAEFIK_ENTRYPOINTS,
                 f"traefik.http.routers.runner-{strategy_id}.priority": "200",
-                f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": f"/runners/{strategy_id}",
+                f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": legacy_runner_prefix,
                 f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
                 f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
                 f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolallowheaders": "*",

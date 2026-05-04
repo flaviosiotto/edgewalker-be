@@ -83,7 +83,8 @@ def search_gateway_symbols_by_id(
     """Search symbols live via a connection's gateway (by numeric ID).
 
     For IBKR futures searches, checks Redis first for cached contract data
-    (populated by ibkr-gateway).  Falls back to the gateway HTTP search.
+    (populated by the per-connection gateway). Falls back to the gateway
+    HTTP search.
     """
     import os, json, redis as sync_redis
     from app.services.gateway_client import gateway_url_for
