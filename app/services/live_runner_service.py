@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Docker network for internal communication
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "edgewalker-devops_default")
+TRAEFIK_DOCKER_NETWORK = os.getenv("TRAEFIK_DOCKER_NETWORK", "").strip()
 
 # Host paths used for Docker bind mounts when spawning runner containers.
 EDGEWALKER_PATH = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
@@ -68,7 +69,7 @@ def _parse_cors_origins(value: str | None, default: list[str]) -> list[str]:
 
 DEFAULT_CORS_ORIGINS = _parse_cors_origins(
     os.getenv("BACKEND_CORS_ORIGINS"),
-    ["https://edgewalker.tech"],
+    [],
 )
 
 RUNNER_CORS_ALLOWED_ORIGIN_LIST = _parse_cors_origins(
@@ -94,7 +95,7 @@ def _normalize_root_path(value: str | None) -> str:
 
 
 API_ROOT_PATH = _normalize_root_path(os.getenv("API_ROOT_PATH", "/api"))
-RUNNER_TRAEFIK_ENTRYPOINTS = os.getenv("RUNNER_TRAEFIK_ENTRYPOINTS", "http")
+RUNNER_TRAEFIK_ENTRYPOINTS = os.getenv("RUNNER_TRAEFIK_ENTRYPOINTS", "").strip()
 
 
 def _docker_runtime_requirements() -> str:
@@ -330,7 +331,6 @@ class LiveRunnerService:
         labels = {
             "traefik.enable": "true",
             f"traefik.http.routers.live-runner-{live_id}.rule": f"PathPrefix(`{live_runner_prefix}`)",
-            f"traefik.http.routers.live-runner-{live_id}.entrypoints": RUNNER_TRAEFIK_ENTRYPOINTS,
             f"traefik.http.routers.live-runner-{live_id}.priority": "200",
             f"traefik.http.middlewares.live-runner-{live_id}-strip.stripprefix.prefixes": live_runner_prefix,
             f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
@@ -347,11 +347,15 @@ class LiveRunnerService:
             "edgewalker.symbol": symbol,
         }
 
+        if TRAEFIK_DOCKER_NETWORK:
+            labels["traefik.docker.network"] = TRAEFIK_DOCKER_NETWORK
+        if RUNNER_TRAEFIK_ENTRYPOINTS:
+            labels[f"traefik.http.routers.live-runner-{live_id}.entrypoints"] = RUNNER_TRAEFIK_ENTRYPOINTS
+
         if legacy_strategy_route:
             legacy_runner_prefix = _public_runner_route("runners", str(strategy_id))
             labels.update({
                 f"traefik.http.routers.runner-{strategy_id}.rule": f"PathPrefix(`{legacy_runner_prefix}`)",
-                f"traefik.http.routers.runner-{strategy_id}.entrypoints": RUNNER_TRAEFIK_ENTRYPOINTS,
                 f"traefik.http.routers.runner-{strategy_id}.priority": "200",
                 f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": legacy_runner_prefix,
                 f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
@@ -362,6 +366,8 @@ class LiveRunnerService:
                 f"traefik.http.routers.runner-{strategy_id}.middlewares": f"runner-{strategy_id}-strip,runner-{strategy_id}-cors",
                 f"traefik.http.services.runner-{strategy_id}.loadbalancer.server.port": "8080",
             })
+            if RUNNER_TRAEFIK_ENTRYPOINTS:
+                labels[f"traefik.http.routers.runner-{strategy_id}.entrypoints"] = RUNNER_TRAEFIK_ENTRYPOINTS
         
         # Volume mounts
         volumes = {
@@ -411,6 +417,9 @@ class LiveRunnerService:
                 restart_policy={"Name": "unless-stopped"},
                 extra_hosts={"host.docker.internal": "host-gateway"},
             )
+
+            if TRAEFIK_DOCKER_NETWORK and TRAEFIK_DOCKER_NETWORK != DOCKER_NETWORK:
+                self.client.networks.get(TRAEFIK_DOCKER_NETWORK).connect(container)
             
             logger.info("Started live runner container: %s (%s)", container_name, container.short_id)
             

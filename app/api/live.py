@@ -1041,7 +1041,7 @@ def get_order(
 
 
 # ═════════════════════════════════════════════════════════════════════
-# LIVE FILLS  (read-only - runner writes directly to DB)
+# LIVE FILLS  (read-only - runner persists fills to DB; no runner /fills endpoint)
 # ═════════════════════════════════════════════════════════════════════
 
 

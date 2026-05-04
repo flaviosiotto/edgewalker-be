@@ -29,11 +29,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    BACKEND_CORS_ORIGINS: List[str] = [
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://localhost"
-    ]
+    BACKEND_CORS_ORIGINS: List[str] = []
 
     LOG_LEVEL: str = "INFO"
     
