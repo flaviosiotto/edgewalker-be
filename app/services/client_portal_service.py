@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from fastapi import HTTPException, status
+
+from app.core.config import settings
+
+
+logger = logging.getLogger(__name__)
+
+_CLIENT_PORTAL_CONFIG_KEYS = frozenset(
+    {
+        "client_portal_base_url",
+        "client_portal_browser_url",
+        "client_portal_verify_ssl",
+        "client_portal_enabled",
+        "transport",
+    }
+)
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -15,24 +32,150 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def resolve_client_portal_base_url(config: dict[str, Any] | None = None) -> str:
-    config = config or {}
-    return str(
-        config.get(
-            "client_portal_base_url",
-            os.getenv("CLIENT_PORTAL_BASE_URL", "https://ibkr-client-portal-gw:5000"),
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _normalize_client_portal_url(
+    raw_url: str | None,
+    *,
+    default_url: str,
+    include_trailing_slash: bool,
+    field_name: str,
+) -> str:
+    candidate = (raw_url or default_url or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{field_name} is required")
+
+    parts = urlsplit(candidate)
+    scheme = (parts.scheme or "https").lower()
+    netloc = parts.netloc or parts.path
+    if not netloc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{field_name} is invalid")
+    if scheme != "https":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must use https",
         )
-    ).rstrip("/")
+    if parts.username or parts.password or "@" in netloc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must not include credentials",
+        )
+
+    return urlunsplit((scheme, netloc, "/" if include_trailing_slash else "", "", ""))
+
+
+def _allowed_client_portal_urls(raw_allowed: str, *, default_url: str, include_trailing_slash: bool) -> set[str]:
+    allowed = {
+        _normalize_client_portal_url(
+            default_url,
+            default_url=default_url,
+            include_trailing_slash=include_trailing_slash,
+            field_name="Client Portal URL",
+        )
+    }
+    for url in _split_csv(raw_allowed):
+        allowed.add(
+            _normalize_client_portal_url(
+                url,
+                default_url=default_url,
+                include_trailing_slash=include_trailing_slash,
+                field_name="Client Portal URL",
+            )
+        )
+    return allowed
+
+
+def _validated_client_portal_url(
+    raw_url: str | None,
+    *,
+    default_url: str,
+    allowed_urls: str,
+    include_trailing_slash: bool,
+    field_name: str,
+) -> str:
+    normalized = _normalize_client_portal_url(
+        raw_url,
+        default_url=default_url,
+        include_trailing_slash=include_trailing_slash,
+        field_name=field_name,
+    )
+    allowed = _allowed_client_portal_urls(
+        allowed_urls,
+        default_url=default_url,
+        include_trailing_slash=include_trailing_slash,
+    )
+    if normalized not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} is not allowed",
+        )
+    return normalized
+
+
+def _needs_client_portal_sanitization(config: dict[str, Any] | None) -> bool:
+    if not config:
+        return False
+    return bool(_CLIENT_PORTAL_CONFIG_KEYS.intersection(config.keys()))
+
+
+def sanitize_connection_config(
+    broker_type: str,
+    config: dict[str, Any] | None,
+    *,
+    strict: bool = True,
+) -> dict[str, Any]:
+    normalized = dict(config or {})
+    if str(broker_type).strip().lower() != "ibkr":
+        return normalized
+    if not _needs_client_portal_sanitization(normalized):
+        return normalized
+
+    try:
+        normalized["client_portal_base_url"] = _validated_client_portal_url(
+            normalized.get("client_portal_base_url"),
+            default_url=settings.CLIENT_PORTAL_BASE_URL,
+            allowed_urls=settings.CLIENT_PORTAL_ALLOWED_BASE_URLS,
+            include_trailing_slash=False,
+            field_name="client_portal_base_url",
+        )
+        normalized["client_portal_browser_url"] = _validated_client_portal_url(
+            normalized.get("client_portal_browser_url"),
+            default_url=settings.CLIENT_PORTAL_BROWSER_URL,
+            allowed_urls=settings.CLIENT_PORTAL_ALLOWED_BROWSER_URLS,
+            include_trailing_slash=True,
+            field_name="client_portal_browser_url",
+        )
+    except HTTPException:
+        if strict:
+            raise
+        logger.warning("Falling back to trusted Client Portal defaults for IBKR connection config")
+        normalized["client_portal_base_url"] = _normalize_client_portal_url(
+            settings.CLIENT_PORTAL_BASE_URL,
+            default_url=settings.CLIENT_PORTAL_BASE_URL,
+            include_trailing_slash=False,
+            field_name="client_portal_base_url",
+        )
+        normalized["client_portal_browser_url"] = _normalize_client_portal_url(
+            settings.CLIENT_PORTAL_BROWSER_URL,
+            default_url=settings.CLIENT_PORTAL_BROWSER_URL,
+            include_trailing_slash=True,
+            field_name="client_portal_browser_url",
+        )
+
+    normalized["client_portal_verify_ssl"] = settings.CLIENT_PORTAL_VERIFY_SSL
+    return normalized
+
+
+def resolve_client_portal_base_url(config: dict[str, Any] | None = None) -> str:
+    config = sanitize_connection_config("ibkr", config, strict=False)
+    return str(config.get("client_portal_base_url", settings.CLIENT_PORTAL_BASE_URL)).rstrip("/")
 
 
 def resolve_client_portal_browser_url(config: dict[str, Any] | None = None) -> str:
-    config = config or {}
-    browser_url = str(
-        config.get(
-            "client_portal_browser_url",
-            os.getenv("CLIENT_PORTAL_BROWSER_URL", "https://localhost:5000/"),
-        )
-    )
+    config = sanitize_connection_config("ibkr", config, strict=False)
+    browser_url = str(config.get("client_portal_browser_url", settings.CLIENT_PORTAL_BROWSER_URL))
     normalized = browser_url.rstrip("/")
     if (
         not normalized
@@ -53,11 +196,8 @@ def resolve_client_portal_browser_url(config: dict[str, Any] | None = None) -> s
 
 
 def resolve_client_portal_verify_ssl(config: dict[str, Any] | None = None) -> bool:
-    config = config or {}
-    return _as_bool(
-        config.get("client_portal_verify_ssl", os.getenv("CLIENT_PORTAL_VERIFY_SSL", "false")),
-        default=False,
-    )
+    config = sanitize_connection_config("ibkr", config, strict=False)
+    return _as_bool(config.get("client_portal_verify_ssl", settings.CLIENT_PORTAL_VERIFY_SSL), default=False)
 
 
 def is_client_portal_transport(config: dict[str, Any] | None = None) -> bool:

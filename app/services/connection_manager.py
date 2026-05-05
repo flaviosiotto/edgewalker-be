@@ -34,7 +34,9 @@ from app.services.client_portal_service import (
     get_client_portal_auth_status,
     is_client_portal_transport,
     logout_client_portal_session,
+    resolve_client_portal_base_url,
     resolve_client_portal_browser_url,
+    resolve_client_portal_verify_ssl,
 )
 from app.services.gateway_client import GatewayClient
 
@@ -90,6 +92,10 @@ def _spawn_container_user() -> str | None:
     return None
 
 
+def _shared_client_portal_base_url() -> str:
+    return resolve_client_portal_base_url()
+
+
 # ── Gateway Registry ─────────────────────────────────────────────────
 # Each broker type maps to its Docker image, container prefix, label,
 # and a function that builds the environment dict from Connection.config.
@@ -105,15 +111,9 @@ def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
         "IBKR_CLIENT_ID": str(config.get("client_id", 100)),
         "IBKR_TRANSPORT": transport,
         "CLIENT_PORTAL_ENABLED": str(config.get("client_portal_enabled", transport == "client_portal")).lower(),
-        "CLIENT_PORTAL_BASE_URL": str(
-            config.get("client_portal_base_url", os.getenv("CLIENT_PORTAL_BASE_URL", "https://ibkr-client-portal-gw:5000"))
-        ),
-        "CLIENT_PORTAL_BROWSER_URL": str(
-            config.get("client_portal_browser_url", os.getenv("CLIENT_PORTAL_BROWSER_URL", ""))
-        ),
-        "CLIENT_PORTAL_VERIFY_SSL": str(
-            config.get("client_portal_verify_ssl", os.getenv("CLIENT_PORTAL_VERIFY_SSL", "false"))
-        ).lower(),
+        "CLIENT_PORTAL_BASE_URL": resolve_client_portal_base_url(config),
+        "CLIENT_PORTAL_BROWSER_URL": resolve_client_portal_browser_url(config),
+        "CLIENT_PORTAL_VERIFY_SSL": str(resolve_client_portal_verify_ssl(config)).lower(),
     }
 
 
@@ -349,6 +349,31 @@ class ConnectionManager:
                 container.restart(timeout=10)
             except Exception as e:
                 logger.warning("Could not restart Client Portal gateway container %s: %s", container.name, e)
+
+    def _has_other_active_client_portal_connections(self, connection_id: int, base_url: str) -> bool:
+        active_statuses = {
+            ConnectionStatus.CONNECTING.value,
+            ConnectionStatus.CONNECTED.value,
+            ConnectionStatus.AWAITING_AUTH.value,
+        }
+
+        with get_session_context() as session:
+            candidates = list(
+                session.exec(
+                    select(Connection).where(Connection.id != connection_id).where(Connection.broker_type == "ibkr")
+                ).all()
+            )
+
+        for candidate in candidates:
+            candidate_config = dict(candidate.config or {})
+            if not is_client_portal_transport(candidate_config):
+                continue
+            if candidate.status not in active_statuses:
+                continue
+            if resolve_client_portal_base_url(candidate_config) == base_url:
+                return True
+
+        return False
 
     def _spawn_gateway(self, connection_id: int, broker_type: str, config: dict[str, Any]) -> None:
         """Spawn a gateway container for the given Connection.
@@ -676,11 +701,23 @@ class ConnectionManager:
             pass  # Container may already be gone
 
         if is_client_portal_transport(config):
-            try:
-                await logout_client_portal_session(config)
-            except Exception:
-                pass
-            self._restart_client_portal_gateway()
+            client_portal_base_url = resolve_client_portal_base_url(config)
+            has_peers = self._has_other_active_client_portal_connections(connection_id, client_portal_base_url)
+
+            if not has_peers:
+                try:
+                    await logout_client_portal_session(config)
+                except Exception:
+                    pass
+
+                if client_portal_base_url == _shared_client_portal_base_url():
+                    self._restart_client_portal_gateway()
+            else:
+                logger.info(
+                    "Skipping Client Portal logout/reset for connection %s because another active connection uses %s",
+                    connection_id,
+                    client_portal_base_url,
+                )
 
         # Destroy the container
         self._destroy_gateway(connection_id, broker_type)

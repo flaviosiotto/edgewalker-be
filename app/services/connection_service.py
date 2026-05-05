@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
+from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
 from app.models.connection import Connection, Account
+from app.services.client_portal_service import sanitize_connection_config
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,7 @@ def create_connection(
     user_id: int,
     name: str,
     broker_type: str,
-    config: dict,
+    config: dict[str, Any],
     is_active: bool = True,
 ) -> Connection:
     existing = session.exec(
@@ -49,11 +52,13 @@ def create_connection(
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connection name already exists")
 
+    safe_config = sanitize_connection_config(broker_type, config, strict=True)
+
     conn = Connection(
         user_id=user_id,
         name=name,
         broker_type=broker_type,
-        config=config,
+        config=safe_config,
         is_active=is_active,
     )
     session.add(conn)
@@ -78,6 +83,12 @@ def update_connection(session: Session, connection_id: int, user_id: int | None 
         ).first()
         if existing is not None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connection name already exists")
+
+    new_config = fields.get("config")
+    if new_config is not None:
+        merged_config = dict(conn.config or {})
+        merged_config.update(new_config)
+        fields["config"] = sanitize_connection_config(conn.broker_type, merged_config, strict=True)
 
     for key, value in fields.items():
         if value is not None:
