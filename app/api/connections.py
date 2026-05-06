@@ -175,6 +175,11 @@ class ClientPortalAuthStatusResponse(BaseModel):
     message: str | None = None
 
 
+class ClientPortalFlowSignalResponse(BaseModel):
+    success: bool
+    message: str | None = None
+
+
 @router.post("/{connection_id}/connect", response_model=ConnectDisconnectResponse)
 async def connect_endpoint(
     connection_id: int,
@@ -229,6 +234,23 @@ async def client_portal_auth_status_endpoint(
     manager = get_connection_manager()
     payload = await manager.client_portal_auth_status(connection_id)
     return ClientPortalAuthStatusResponse(**payload)
+
+
+@router.post("/{connection_id}/client-portal/dispatcher-received", response_model=ClientPortalFlowSignalResponse)
+async def client_portal_dispatcher_received_endpoint(
+    connection_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    conn = get_connection(session, connection_id, current_user.id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.broker_type != "ibkr" or not is_client_portal_transport(conn.config or {}):
+        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR Client Portal")
+
+    manager = get_connection_manager()
+    payload = await manager.mark_client_portal_dispatcher_received(connection_id)
+    return ClientPortalFlowSignalResponse(**payload)
 
 
 @router.post("/{connection_id}/client-portal/connect", response_model=ConnectDisconnectResponse)

@@ -20,7 +20,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import docker
@@ -73,6 +73,10 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS = max(
+    0,
+    int(os.getenv("CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS", "30")),
+)
 
 
 def _docker_runtime_requirements() -> str:
@@ -288,6 +292,7 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._running = False
         self._tasks: list[asyncio.Task] = []
+        self._client_portal_dispatcher_received_at: dict[int, datetime] = {}
         try:
             self._docker = docker.from_env()
         except Exception as e:
@@ -297,6 +302,70 @@ class ConnectionManager:
                 _docker_runtime_requirements(),
             )
             self._docker = None
+
+    def _clear_client_portal_dispatcher_grace(self, connection_id: int) -> None:
+        self._client_portal_dispatcher_received_at.pop(connection_id, None)
+
+    def _client_portal_dispatcher_grace_deadline(self, connection_id: int) -> datetime | None:
+        if CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS <= 0:
+            self._clear_client_portal_dispatcher_grace(connection_id)
+            return None
+
+        received_at = self._client_portal_dispatcher_received_at.get(connection_id)
+        if received_at is None:
+            return None
+
+        deadline = received_at + timedelta(seconds=CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS)
+        if deadline <= datetime.now(timezone.utc):
+            self._clear_client_portal_dispatcher_grace(connection_id)
+            return None
+
+        return deadline
+
+    def _client_portal_dispatcher_grace_payload(
+        self,
+        connection_id: int,
+        *,
+        config: dict[str, Any],
+        gateway_started: bool,
+        connection_status: str,
+    ) -> dict[str, Any] | None:
+        deadline = self._client_portal_dispatcher_grace_deadline(connection_id)
+        if deadline is None:
+            return None
+
+        return {
+            "service_ready": True,
+            "gateway_session_ready": True,
+            "connected": False,
+            "session_authenticated": False,
+            "authenticated": False,
+            "established": False,
+            "competing": False,
+            "bridge_ready": False,
+            "ready_to_connect": False,
+            "gateway_started": gateway_started,
+            "connection_status": connection_status,
+            "auth_url": resolve_client_portal_browser_url(config),
+            "message": "Autorizzazione 2FA ricevuta. Attendo che IBKR apra la brokerage session.",
+        }
+
+    async def mark_client_portal_dispatcher_received(self, connection_id: int) -> dict[str, Any]:
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                raise ValueError("Connection not found")
+
+            conn.status = ConnectionStatus.AWAITING_AUTH.value
+            conn.status_message = "Autorizzazione 2FA ricevuta. Attendo che IBKR apra la brokerage session."
+            conn.updated_at = datetime.now(timezone.utc)
+            session.commit()
+
+        self._client_portal_dispatcher_received_at[connection_id] = datetime.now(timezone.utc)
+        return {
+            "success": True,
+            "message": "Dispatcher ricevuto. Attendo l'apertura della brokerage session IBKR.",
+        }
 
     # ── Container management ─────────────────────────────────────────
 
@@ -497,6 +566,7 @@ class ConnectionManager:
         return _gateway_clients[connection_id]
 
     async def begin_client_portal_auth(self, connection_id: int) -> dict[str, Any]:
+        self._clear_client_portal_dispatcher_grace(connection_id)
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
             if conn is None:
@@ -555,7 +625,10 @@ class ConnectionManager:
                     session.commit()
             return ConnectorResult(success=False, message=wait_message)
 
-        return await self.connect(connection_id)
+        result = await self.connect(connection_id)
+        if result.success:
+            self._clear_client_portal_dispatcher_grace(connection_id)
+        return result
 
     async def client_portal_auth_status(self, connection_id: int) -> dict[str, Any]:
         with get_session_context() as session:
@@ -566,9 +639,22 @@ class ConnectionManager:
             config = dict(conn.config or {})
             status_value = conn.status
 
-        auth = await get_client_portal_auth_status(config)
         container = self._get_container(connection_id, broker_type)
         gateway_started = bool(container and container.status == "running")
+
+        grace_payload = self._client_portal_dispatcher_grace_payload(
+            connection_id,
+            config=config,
+            gateway_started=gateway_started,
+            connection_status=status_value,
+        )
+        if grace_payload is not None:
+            return grace_payload
+
+        auth = await get_client_portal_auth_status(config)
+        if auth.get("authenticated") or auth.get("session_authenticated") or auth.get("bridge_ready") or auth.get("ready_to_connect"):
+            self._clear_client_portal_dispatcher_grace(connection_id)
+
         return {
             "service_ready": auth["service_ready"],
             "gateway_session_ready": auth.get("gateway_session_ready", False),
@@ -686,6 +772,7 @@ class ConnectionManager:
 
     async def disconnect(self, connection_id: int) -> ConnectorResult:
         """Disconnect by destroying the gateway container."""
+        self._clear_client_portal_dispatcher_grace(connection_id)
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
             if conn is None:
