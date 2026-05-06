@@ -13,6 +13,8 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+_CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY = "_client_portal_dispatcher_received_at"
+
 _CLIENT_PORTAL_CONFIG_KEYS = frozenset(
     {
         "client_portal_base_url",
@@ -288,10 +290,18 @@ def _extract_bridge_ready(payload: Any) -> bool:
     return False
 
 
+def _has_dispatcher_marker(config: dict[str, Any] | None) -> bool:
+    if not isinstance(config, dict):
+        return False
+    value = config.get(_CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY)
+    return isinstance(value, str) and bool(value.strip())
+
+
 async def get_client_portal_auth_status(config: dict[str, Any] | None = None) -> dict[str, Any]:
     base_url = resolve_client_portal_base_url(config)
     browser_url = resolve_client_portal_browser_url(config)
     verify_ssl = resolve_client_portal_verify_ssl(config)
+    dispatcher_marker_present = _has_dispatcher_marker(config)
 
     result: dict[str, Any] = {
         "service_ready": False,
@@ -315,6 +325,8 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
         async with httpx.AsyncClient(base_url=base_url, verify=verify_ssl, timeout=10.0, follow_redirects=True) as client:
             payload = None
             tickle_payload = None
+            session_authenticated = False
+            competing = False
             response = await client.get("/v1/api/iserver/auth/status")
             result["service_ready"] = True
 
@@ -327,57 +339,76 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
                 # Sending extra 401-bound requests during login corrupts the
                 # x-sess-uuid cookies and prevents the 2FA handshake from
                 # completing — the Authenticator loop never reaches Dispatcher.
-                result["message"] = "Sessione Client Portal non autenticata. Completa il login nel popup."
-                return result
+                if not dispatcher_marker_present:
+                    result["message"] = "Sessione Client Portal non autenticata. Completa il login nel popup."
+                    return result
 
-            response.raise_for_status()
-            payload = response.json()
-            result["payload"] = payload
+                # After Dispatcher completion the browser flow has finished, so
+                # auth/status may legitimately lag behind the session becoming
+                # usable. In that phase use account/bridge endpoints as the real
+                # readiness signal instead of getting stuck on repeated 401 here.
+                result["message"] = "Autorizzazione 2FA ricevuta. Verifico l'apertura della brokerage session IBKR."
+            else:
+                response.raise_for_status()
+                payload = response.json()
+                result["payload"] = payload
 
-            try:
-                tickle_response = await client.get("/v1/api/tickle")
-                if tickle_response.status_code != 401:
-                    tickle_response.raise_for_status()
-                    tickle_payload = tickle_response.json()
-            except httpx.HTTPStatusError as tickle_exc:
-                if tickle_exc.response.status_code != 401:
-                    raise
+                try:
+                    tickle_response = await client.get("/v1/api/tickle")
+                    if tickle_response.status_code != 401:
+                        tickle_response.raise_for_status()
+                        tickle_payload = tickle_response.json()
+                except httpx.HTTPStatusError as tickle_exc:
+                    if tickle_exc.response.status_code != 401:
+                        raise
 
-            flags = _extract_status_flags(tickle_payload if tickle_payload is not None else payload)
-            session_authenticated = flags["authenticated"]
-            competing = flags["competing"]
-            result["tickle_payload"] = tickle_payload
-            # A 200 from auth/status means the browser SSO session is established
-            # even if tickle has not started returning session markers yet.
-            result["gateway_session_ready"] = bool(
-                response.status_code != 401
-                or _extract_gateway_session_ready(tickle_payload if tickle_payload is not None else payload)
-            )
-            result["connected"] = flags["connected"]
-            result["session_authenticated"] = session_authenticated
-            result["authenticated"] = flags["authenticated"]
-            result["established"] = flags["established"]
-            result["competing"] = competing
-            result["message"] = payload.get("message") if isinstance(payload, dict) else None
+                flags = _extract_status_flags(tickle_payload if tickle_payload is not None else payload)
+                session_authenticated = flags["authenticated"]
+                competing = flags["competing"]
+                result["tickle_payload"] = tickle_payload
+                # A 200 from auth/status means the browser SSO session is established
+                # even if tickle has not started returning session markers yet.
+                result["gateway_session_ready"] = bool(
+                    _extract_gateway_session_ready(tickle_payload if tickle_payload is not None else payload)
+                    or response.status_code != 401
+                )
+                result["connected"] = flags["connected"]
+                result["session_authenticated"] = session_authenticated
+                result["authenticated"] = flags["authenticated"]
+                result["established"] = flags["established"]
+                result["competing"] = competing
+                result["message"] = payload.get("message") if isinstance(payload, dict) else None
 
             if competing:
                 result["message"] = (
                     "Client Portal segnala una sessione concorrente. Chiudi eventuali altre sessioni IBKR/TWS/Client Portal e riprova."
                 )
 
-            # Only query heavy endpoints once authenticated — during login
-            # these would all return 401 and further pollute the cookie jar.
-            if session_authenticated:
+            # Before Dispatcher completion, avoid probing heavier endpoints if
+            # auth/status still reports unauthenticated: 401-bound requests can
+            # overwrite the gateway's shared SSO cookie jar. After Dispatcher we
+            # can safely use portfolio/accounts as the readiness signal because
+            # auth/status may lag behind the real CP session state.
+            should_probe_accounts = session_authenticated or dispatcher_marker_present
+            if should_probe_accounts:
                 accounts_response = await client.get("/v1/api/portfolio/accounts")
                 if accounts_response.status_code != 401:
                     accounts_response.raise_for_status()
                     result["accounts"] = _extract_accounts(accounts_response.json())
+                    session_authenticated = True
+                    result["gateway_session_ready"] = True
+                    result["session_authenticated"] = True
+                    result["authenticated"] = True
 
+            if session_authenticated:
                 try:
                     bridge_response = await client.get("/v1/api/iserver/accounts")
                     if bridge_response.status_code != 401:
                         bridge_response.raise_for_status()
                         result["bridge_ready"] = _extract_bridge_ready(bridge_response.json())
+                        if result["bridge_ready"]:
+                            result["session_authenticated"] = True
+                            result["authenticated"] = True
                 except httpx.HTTPStatusError as bridge_exc:
                     if bridge_exc.response.status_code == 400 and "no bridge" in bridge_exc.response.text.lower():
                         result["bridge_ready"] = False
