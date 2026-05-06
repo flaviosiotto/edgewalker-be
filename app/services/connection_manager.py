@@ -83,6 +83,7 @@ CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE = (
 CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE = (
     "Dispatcher ricevuto. Attendo l'apertura della brokerage session IBKR."
 )
+CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY = "_client_portal_dispatcher_received_at"
 
 
 def _docker_runtime_requirements() -> str:
@@ -104,6 +105,36 @@ def _spawn_container_user() -> str | None:
 
 def _shared_client_portal_base_url() -> str:
     return resolve_client_portal_base_url()
+
+
+def _parse_client_portal_dispatcher_received_at(config: dict[str, Any] | None) -> datetime | None:
+    if not config:
+        return None
+
+    raw_value = config.get(CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY)
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _with_client_portal_dispatcher_received_at(
+    config: dict[str, Any] | None,
+    received_at: datetime | None,
+) -> dict[str, Any]:
+    updated = dict(config or {})
+    if received_at is None:
+        updated.pop(CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY, None)
+    else:
+        updated[CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY] = received_at.astimezone(timezone.utc).isoformat()
+    return updated
 
 
 # ── Gateway Registry ─────────────────────────────────────────────────
@@ -316,6 +347,7 @@ class ConnectionManager:
         self,
         connection_id: int,
         *,
+        dispatcher_received_at: datetime | None,
         connection_status: str,
         status_message: str | None,
         updated_at: datetime | None,
@@ -325,6 +357,9 @@ class ConnectionManager:
             return None
 
         received_at = self._client_portal_dispatcher_received_at.get(connection_id)
+        if received_at is None:
+            received_at = dispatcher_received_at
+
         if received_at is None:
             if connection_status != ConnectionStatus.AWAITING_AUTH.value:
                 return None
@@ -351,8 +386,10 @@ class ConnectionManager:
         status_message: str | None,
         updated_at: datetime | None,
     ) -> dict[str, Any] | None:
+        dispatcher_received_at = _parse_client_portal_dispatcher_received_at(config)
         deadline = self._client_portal_dispatcher_grace_deadline(
             connection_id,
+            dispatcher_received_at=dispatcher_received_at,
             connection_status=connection_status,
             status_message=status_message,
             updated_at=updated_at,
@@ -382,12 +419,14 @@ class ConnectionManager:
             if conn is None:
                 raise ValueError("Connection not found")
 
+            dispatcher_received_at = datetime.now(timezone.utc)
             conn.status = ConnectionStatus.AWAITING_AUTH.value
             conn.status_message = CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE
-            conn.updated_at = datetime.now(timezone.utc)
+            conn.updated_at = dispatcher_received_at
+            conn.config = _with_client_portal_dispatcher_received_at(conn.config, dispatcher_received_at)
             session.commit()
 
-        self._client_portal_dispatcher_received_at[connection_id] = datetime.now(timezone.utc)
+        self._client_portal_dispatcher_received_at[connection_id] = dispatcher_received_at
         return {
             "success": True,
             "message": CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE,
@@ -597,7 +636,9 @@ class ConnectionManager:
             conn = session.get(Connection, connection_id)
             if conn is None:
                 raise ValueError("Connection not found")
-            config = dict(conn.config or {})
+            config = _with_client_portal_dispatcher_received_at(conn.config, None)
+            conn.config = config
+            session.commit()
 
         auth = await get_client_portal_auth_status(config)
         message = "Autenticazione IBKR richiesta nel popup Client Portal."
@@ -654,6 +695,11 @@ class ConnectionManager:
         result = await self.connect(connection_id)
         if result.success:
             self._clear_client_portal_dispatcher_grace(connection_id)
+            with get_session_context() as session:
+                conn = session.get(Connection, connection_id)
+                if conn is not None:
+                    conn.config = _with_client_portal_dispatcher_received_at(conn.config, None)
+                    session.commit()
         return result
 
     async def client_portal_auth_status(self, connection_id: int) -> dict[str, Any]:
@@ -808,7 +854,9 @@ class ConnectionManager:
             if conn is None:
                 return ConnectorResult(success=False, message="Connection not found")
             broker_type = conn.broker_type
+            conn.config = _with_client_portal_dispatcher_received_at(conn.config, None)
             config = dict(conn.config or {})
+            session.commit()
 
         # Gracefully tell the gateway to disconnect first
         try:
