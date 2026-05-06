@@ -347,7 +347,12 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
             session_authenticated = flags["authenticated"]
             competing = flags["competing"]
             result["tickle_payload"] = tickle_payload
-            result["gateway_session_ready"] = _extract_gateway_session_ready(tickle_payload)
+            # A 200 from auth/status means the browser SSO session is established
+            # even if tickle has not started returning session markers yet.
+            result["gateway_session_ready"] = bool(
+                response.status_code != 401
+                or _extract_gateway_session_ready(tickle_payload if tickle_payload is not None else payload)
+            )
             result["connected"] = flags["connected"]
             result["session_authenticated"] = session_authenticated
             result["authenticated"] = flags["authenticated"]
