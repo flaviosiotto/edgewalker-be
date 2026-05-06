@@ -77,6 +77,12 @@ CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS = max(
     0,
     int(os.getenv("CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS", "30")),
 )
+CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE = (
+    "Autorizzazione 2FA ricevuta. Attendo che IBKR apra la brokerage session."
+)
+CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE = (
+    "Dispatcher ricevuto. Attendo l'apertura della brokerage session IBKR."
+)
 
 
 def _docker_runtime_requirements() -> str:
@@ -306,14 +312,27 @@ class ConnectionManager:
     def _clear_client_portal_dispatcher_grace(self, connection_id: int) -> None:
         self._client_portal_dispatcher_received_at.pop(connection_id, None)
 
-    def _client_portal_dispatcher_grace_deadline(self, connection_id: int) -> datetime | None:
+    def _client_portal_dispatcher_grace_deadline(
+        self,
+        connection_id: int,
+        *,
+        connection_status: str,
+        status_message: str | None,
+        updated_at: datetime | None,
+    ) -> datetime | None:
         if CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS <= 0:
             self._clear_client_portal_dispatcher_grace(connection_id)
             return None
 
         received_at = self._client_portal_dispatcher_received_at.get(connection_id)
         if received_at is None:
-            return None
+            if connection_status != ConnectionStatus.AWAITING_AUTH.value:
+                return None
+            if status_message != CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE:
+                return None
+            received_at = updated_at
+            if received_at is None:
+                return None
 
         deadline = received_at + timedelta(seconds=CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS)
         if deadline <= datetime.now(timezone.utc):
@@ -329,8 +348,15 @@ class ConnectionManager:
         config: dict[str, Any],
         gateway_started: bool,
         connection_status: str,
+        status_message: str | None,
+        updated_at: datetime | None,
     ) -> dict[str, Any] | None:
-        deadline = self._client_portal_dispatcher_grace_deadline(connection_id)
+        deadline = self._client_portal_dispatcher_grace_deadline(
+            connection_id,
+            connection_status=connection_status,
+            status_message=status_message,
+            updated_at=updated_at,
+        )
         if deadline is None:
             return None
 
@@ -347,7 +373,7 @@ class ConnectionManager:
             "gateway_started": gateway_started,
             "connection_status": connection_status,
             "auth_url": resolve_client_portal_browser_url(config),
-            "message": "Autorizzazione 2FA ricevuta. Attendo che IBKR apra la brokerage session.",
+            "message": CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE,
         }
 
     async def mark_client_portal_dispatcher_received(self, connection_id: int) -> dict[str, Any]:
@@ -357,14 +383,14 @@ class ConnectionManager:
                 raise ValueError("Connection not found")
 
             conn.status = ConnectionStatus.AWAITING_AUTH.value
-            conn.status_message = "Autorizzazione 2FA ricevuta. Attendo che IBKR apra la brokerage session."
+            conn.status_message = CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE
             conn.updated_at = datetime.now(timezone.utc)
             session.commit()
 
         self._client_portal_dispatcher_received_at[connection_id] = datetime.now(timezone.utc)
         return {
             "success": True,
-            "message": "Dispatcher ricevuto. Attendo l'apertura della brokerage session IBKR.",
+            "message": CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE,
         }
 
     # ── Container management ─────────────────────────────────────────
@@ -638,6 +664,8 @@ class ConnectionManager:
             broker_type = conn.broker_type
             config = dict(conn.config or {})
             status_value = conn.status
+            status_message = conn.status_message
+            updated_at = conn.updated_at
 
         container = self._get_container(connection_id, broker_type)
         gateway_started = bool(container and container.status == "running")
@@ -647,6 +675,8 @@ class ConnectionManager:
             config=config,
             gateway_started=gateway_started,
             connection_status=status_value,
+            status_message=status_message,
+            updated_at=updated_at,
         )
         if grace_payload is not None:
             return grace_payload
