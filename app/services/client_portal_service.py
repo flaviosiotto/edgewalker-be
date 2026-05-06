@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -24,6 +25,13 @@ _CLIENT_PORTAL_CONFIG_KEYS = frozenset(
         "transport",
     }
 )
+
+_CLIENT_PORTAL_SESSION_POST_FALLBACK_STATUS_CODES = frozenset({404, 405})
+_CLIENT_PORTAL_ACCOUNTS_PROBE_INTERVAL_SECONDS = 5.0
+_CLIENT_PORTAL_SESSION_INIT_INTERVAL_SECONDS = 5.0
+
+_client_portal_accounts_probe_state: dict[str, dict[str, Any]] = {}
+_client_portal_session_init_attempted_at: dict[str, float] = {}
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -209,7 +217,157 @@ def is_client_portal_transport(config: dict[str, Any] | None = None) -> bool:
     return transport == "client_portal" or enabled
 
 
+def _unwrap_client_portal_payload(payload: Any) -> Any:
+    current = payload
+    for _ in range(3):
+        if not isinstance(current, dict):
+            break
+
+        success = current.get("success")
+        if isinstance(success, dict) and "value" in success:
+            current = success["value"]
+            continue
+
+        fail = current.get("fail")
+        if isinstance(fail, dict) and "value" in fail:
+            current = fail["value"]
+            continue
+
+        break
+
+    return current
+
+
+def _extract_message(payload: Any) -> str | None:
+    source = _unwrap_client_portal_payload(payload)
+    if not isinstance(source, dict):
+        return None
+
+    message = source.get("message") or source.get("error") or source.get("text")
+    if not message:
+        return None
+    return str(message)
+
+
+def _clear_client_portal_probe_state(base_url: str) -> None:
+    _client_portal_accounts_probe_state.pop(base_url, None)
+    _client_portal_session_init_attempted_at.pop(base_url, None)
+
+
+def _get_cached_client_portal_accounts(base_url: str) -> list[dict[str, Any]]:
+    entry = _client_portal_accounts_probe_state.get(base_url)
+    if not isinstance(entry, dict):
+        return []
+
+    last_successful = entry.get("last_successful")
+    if not isinstance(last_successful, (int, float)):
+        return []
+    if time.monotonic() - float(last_successful) > _CLIENT_PORTAL_ACCOUNTS_PROBE_INTERVAL_SECONDS:
+        return []
+
+    accounts = entry.get("accounts")
+    if not isinstance(accounts, list):
+        return []
+
+    return [item for item in accounts if isinstance(item, dict)]
+
+
+def _should_probe_client_portal_accounts(base_url: str) -> bool:
+    now = time.monotonic()
+    entry = _client_portal_accounts_probe_state.setdefault(base_url, {})
+    last_attempted = entry.get("last_attempted")
+    if isinstance(last_attempted, (int, float)) and now - float(last_attempted) < _CLIENT_PORTAL_ACCOUNTS_PROBE_INTERVAL_SECONDS:
+        return False
+
+    entry["last_attempted"] = now
+    return True
+
+
+def _store_client_portal_accounts(base_url: str, accounts: list[dict[str, Any]]) -> None:
+    entry = _client_portal_accounts_probe_state.setdefault(base_url, {})
+    entry["accounts"] = accounts
+    entry["last_successful"] = time.monotonic()
+
+
+def _should_initialize_client_portal_session(base_url: str) -> bool:
+    now = time.monotonic()
+    last_attempted = _client_portal_session_init_attempted_at.get(base_url)
+    if isinstance(last_attempted, (int, float)) and now - float(last_attempted) < _CLIENT_PORTAL_SESSION_INIT_INTERVAL_SECONDS:
+        return False
+
+    _client_portal_session_init_attempted_at[base_url] = now
+    return True
+
+
+async def _post_with_get_fallback(
+    client: httpx.AsyncClient,
+    path: str,
+    *,
+    json_body: Any | None = None,
+) -> httpx.Response:
+    post_kwargs: dict[str, Any]
+    if json_body is None:
+        post_kwargs = {"headers": {"Content-Length": "0"}}
+    else:
+        post_kwargs = {"json": json_body}
+
+    response = await client.post(path, **post_kwargs)
+    if response.status_code not in _CLIENT_PORTAL_SESSION_POST_FALLBACK_STATUS_CODES:
+        return response
+
+    return await client.get(path)
+
+
+async def _initialize_client_portal_brokerage_session(
+    client: httpx.AsyncClient,
+    *,
+    base_url: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "attempted": False,
+        "supported": True,
+        "initialized": False,
+        "message": None,
+    }
+
+    if not _should_initialize_client_portal_session(base_url):
+        return result
+
+    result["attempted"] = True
+
+    try:
+        response = await client.post(
+            "/v1/api/iserver/auth/ssodh/init",
+            json={"publish": True, "compete": False},
+        )
+        if response.status_code in _CLIENT_PORTAL_SESSION_POST_FALLBACK_STATUS_CODES:
+            result["supported"] = False
+            return result
+        if response.status_code == 401:
+            return result
+        if response.status_code == 400:
+            try:
+                result["message"] = _extract_message(response.json()) or response.text
+            except ValueError:
+                result["message"] = response.text
+            return result
+
+        response.raise_for_status()
+        result["initialized"] = True
+        if response.content:
+            try:
+                result["message"] = _extract_message(response.json())
+            except ValueError:
+                result["message"] = None
+    except Exception as exc:
+        logger.warning("Client Portal ssodh/init failed for %s: %s", base_url, exc)
+        result["message"] = str(exc)
+
+    return result
+
+
 def _extract_authenticated(payload: Any) -> bool:
+    payload = _unwrap_client_portal_payload(payload)
     if not isinstance(payload, dict):
         return False
 
@@ -233,6 +391,7 @@ def _extract_status_flags(payload: Any) -> dict[str, bool]:
         "competing": False,
     }
 
+    payload = _unwrap_client_portal_payload(payload)
     if not isinstance(payload, dict):
         return flags
 
@@ -251,6 +410,7 @@ def _extract_status_flags(payload: Any) -> dict[str, bool]:
 
 
 def _extract_gateway_session_ready(payload: Any) -> bool:
+    payload = _unwrap_client_portal_payload(payload)
     if not isinstance(payload, dict):
         return False
 
@@ -261,12 +421,14 @@ def _extract_gateway_session_ready(payload: Any) -> bool:
 
 
 def _extract_competing(payload: Any) -> bool:
+    payload = _unwrap_client_portal_payload(payload)
     if not isinstance(payload, dict):
         return False
     return bool(payload.get("competing"))
 
 
 def _extract_accounts(payload: Any) -> list[dict[str, Any]]:
+    payload = _unwrap_client_portal_payload(payload)
     if not isinstance(payload, list):
         return []
 
@@ -282,6 +444,7 @@ def _extract_accounts(payload: Any) -> list[dict[str, Any]]:
 
 
 def _extract_bridge_ready(payload: Any) -> bool:
+    payload = _unwrap_client_portal_payload(payload)
     if isinstance(payload, list):
         return len(payload) > 0
     if isinstance(payload, dict):
@@ -327,7 +490,7 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
             tickle_payload = None
             session_authenticated = False
             competing = False
-            response = await client.get("/v1/api/iserver/auth/status")
+            response = await _post_with_get_fallback(client, "/v1/api/iserver/auth/status")
             result["service_ready"] = True
 
             if response.status_code == 401:
@@ -354,7 +517,7 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
                 result["payload"] = payload
 
                 try:
-                    tickle_response = await client.get("/v1/api/tickle")
+                    tickle_response = await _post_with_get_fallback(client, "/v1/api/tickle")
                     if tickle_response.status_code != 401:
                         tickle_response.raise_for_status()
                         tickle_payload = tickle_response.json()
@@ -377,12 +540,21 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
                 result["authenticated"] = flags["authenticated"]
                 result["established"] = flags["established"]
                 result["competing"] = competing
-                result["message"] = payload.get("message") if isinstance(payload, dict) else None
+                result["message"] = _extract_message(payload)
 
             if competing:
                 result["message"] = (
                     "Client Portal segnala una sessione concorrente. Chiudi eventuali altre sessioni IBKR/TWS/Client Portal e riprova."
                 )
+
+            if dispatcher_marker_present and not session_authenticated and not competing:
+                init_result = await _initialize_client_portal_brokerage_session(client, base_url=base_url)
+                if init_result.get("initialized"):
+                    result["gateway_session_ready"] = True
+                    if not result["message"]:
+                        result["message"] = "Autorizzazione 2FA ricevuta. Inizializzo la brokerage session IBKR."
+                elif init_result.get("message") and not result["message"]:
+                    result["message"] = str(init_result["message"])
 
             # Before Dispatcher completion, avoid probing heavier endpoints if
             # auth/status still reports unauthenticated: 401-bound requests can
@@ -391,14 +563,31 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
             # auth/status may lag behind the real CP session state.
             should_probe_accounts = session_authenticated or dispatcher_marker_present
             if should_probe_accounts:
-                accounts_response = await client.get("/v1/api/portfolio/accounts")
-                if accounts_response.status_code != 401:
-                    accounts_response.raise_for_status()
-                    result["accounts"] = _extract_accounts(accounts_response.json())
-                    session_authenticated = True
-                    result["gateway_session_ready"] = True
-                    result["session_authenticated"] = True
-                    result["authenticated"] = True
+                cached_accounts = _get_cached_client_portal_accounts(base_url)
+                if not _should_probe_client_portal_accounts(base_url):
+                    if cached_accounts:
+                        result["accounts"] = cached_accounts
+                        session_authenticated = True
+                        result["gateway_session_ready"] = True
+                        result["session_authenticated"] = True
+                        result["authenticated"] = True
+                else:
+                    accounts_response = await client.get("/v1/api/portfolio/accounts")
+                    if accounts_response.status_code != 401:
+                        accounts_response.raise_for_status()
+                        accounts = _extract_accounts(accounts_response.json())
+                        result["accounts"] = accounts
+                        _store_client_portal_accounts(base_url, accounts)
+                        session_authenticated = True
+                        result["gateway_session_ready"] = True
+                        result["session_authenticated"] = True
+                        result["authenticated"] = True
+                    elif cached_accounts:
+                        result["accounts"] = cached_accounts
+                        session_authenticated = True
+                        result["gateway_session_ready"] = True
+                        result["session_authenticated"] = True
+                        result["authenticated"] = True
 
             if session_authenticated:
                 try:
@@ -460,10 +649,13 @@ async def logout_client_portal_session(config: dict[str, Any] | None = None) -> 
                 response.raise_for_status()
             result["service_ready"] = True
             result["logged_out"] = response.status_code in (200, 204, 401)
+            if result["logged_out"]:
+                _clear_client_portal_probe_state(base_url)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
             result["service_ready"] = True
             result["logged_out"] = True
+            _clear_client_portal_probe_state(base_url)
         else:
             result["message"] = str(exc)
     except Exception as exc:
