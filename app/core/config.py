@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     CLIENT_PORTAL_VERIFY_SSL: bool = False
     CLIENT_PORTAL_ALLOWED_BASE_URLS: str = ""
     CLIENT_PORTAL_ALLOWED_BROWSER_URLS: str = ""
+    CLIENT_PORTAL_PROXY_BRIDGE_TOKEN: str = ""
 
     DATABASE_URL: str = "sqlite:///./app.db"
 

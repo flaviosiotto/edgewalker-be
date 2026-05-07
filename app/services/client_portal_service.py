@@ -15,6 +15,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 _CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY = "_client_portal_dispatcher_received_at"
+_CLIENT_PORTAL_PROXY_BRIDGE_HEADER = "X-Edgewalker-Client-Portal-Bridge"
 
 _CLIENT_PORTAL_CONFIG_KEYS = frozenset(
     {
@@ -44,6 +45,13 @@ def _as_bool(value: Any, default: bool = False) -> bool:
 
 def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _client_portal_proxy_headers() -> dict[str, str]:
+    token = settings.CLIENT_PORTAL_PROXY_BRIDGE_TOKEN.strip()
+    if not token:
+        return {}
+    return {_CLIENT_PORTAL_PROXY_BRIDGE_HEADER: token}
 
 
 def _normalize_client_portal_url(
@@ -485,7 +493,13 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
     }
 
     try:
-        async with httpx.AsyncClient(base_url=base_url, verify=verify_ssl, timeout=10.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            verify=verify_ssl,
+            timeout=10.0,
+            follow_redirects=True,
+            headers=_client_portal_proxy_headers(),
+        ) as client:
             payload = None
             tickle_payload = None
             session_authenticated = False
@@ -643,7 +657,13 @@ async def logout_client_portal_session(config: dict[str, Any] | None = None) -> 
     }
 
     try:
-        async with httpx.AsyncClient(base_url=base_url, verify=verify_ssl, timeout=10.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            verify=verify_ssl,
+            timeout=10.0,
+            follow_redirects=True,
+            headers=_client_portal_proxy_headers(),
+        ) as client:
             response = await client.post("/v1/api/logout", headers={"Content-Length": "0"})
             if response.status_code not in (200, 204, 401):
                 response.raise_for_status()
