@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -78,3 +78,73 @@ class LiveStrategyStopResponse(BaseModel):
     strategy_id: int
     status: str
     message: str | None = None
+
+
+class LiveDashboardDateRange(BaseModel):
+    start_date: date
+    end_date: date
+
+
+class LiveDashboardSummaryRead(BaseModel):
+    account_count: int = 0
+    session_count: int = 0
+    running_session_count: int = 0
+    open_positions: int = 0
+    active_days: int = 0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    net_pnl: float = 0.0
+    total_trades: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    win_rate: float | None = None
+    last_activity_at: datetime | None = None
+
+
+class LiveDashboardEquityPointRead(BaseModel):
+    date: date
+    realized_pnl: float = 0.0
+    commission: float = 0.0
+    net_pnl: float = 0.0
+    cumulative_pnl: float = 0.0
+    trade_count: int = 0
+
+
+class LiveDashboardDailyResultRead(BaseModel):
+    date: date
+    realized_pnl: float = 0.0
+    commission: float = 0.0
+    net_pnl: float = 0.0
+    trade_count: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    win_rate: float | None = None
+
+
+class LiveDashboardAccountBreakdownRead(BaseModel):
+    account_id: int
+    account_code: str
+    account_display: str
+    connection_id: int
+    connection_name: str
+    currency: str
+    session_count: int = 0
+    running_session_count: int = 0
+    open_positions: int = 0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    net_pnl: float = 0.0
+    total_trades: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    win_rate: float | None = None
+    last_activity_at: datetime | None = None
+
+
+class LiveDashboardOverviewRead(BaseModel):
+    date_range: LiveDashboardDateRange
+    selected_account_ids: list[int]
+    summary: LiveDashboardSummaryRead
+    equity_curve: list[LiveDashboardEquityPointRead]
+    daily_results: list[LiveDashboardDailyResultRead]
+    accounts: list[LiveDashboardAccountBreakdownRead]

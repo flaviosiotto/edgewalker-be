@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -24,6 +24,7 @@ from app.models.strategy import LiveStatus, Strategy, StrategyLive
 from app.models.user import User
 from app.schemas.chat import ChatRead
 from app.schemas.live_strategy import (
+    LiveDashboardOverviewRead,
     LivePerformanceSummary,
     LiveStrategyCreate,
     LiveStrategyDetailRead,
@@ -45,6 +46,7 @@ import redis as _redis
 
 from app.services.live_runner_service import live_runner_service
 from app.services.live_trading_service import (
+    get_live_dashboard_overview,
     get_live_order,
     list_active_orders,
     list_live_orders,
@@ -305,6 +307,31 @@ def _derive_sync_state(sl: StrategyLive, container_info: dict[str, Any]) -> str:
     if sl.status == LiveStatus.STOPPING.value and container_status not in {"exited", "dead", "not_found"}:
         return "stale"
     return "aligned"
+
+
+def _parse_account_ids(account_ids: str | None) -> list[int] | None:
+    if account_ids is None:
+        return None
+
+    raw_values = [value.strip() for value in account_ids.split(",") if value.strip()]
+    if not raw_values:
+        return None
+
+    try:
+        parsed = [int(value) for value in raw_values]
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="account_ids must be a comma-separated list of integers",
+        ) from exc
+
+    deduped: list[int] = []
+    seen: set[int] = set()
+    for value in parsed:
+        if value not in seen:
+            deduped.append(value)
+            seen.add(value)
+    return deduped
 
 
 def _compute_live_performance_summary(session: Session, sl: StrategyLive) -> LivePerformanceSummary:
@@ -636,7 +663,7 @@ async def _fetch_broker_snapshot(
 def list_live_instances(
     status_filter: str | None = Query(None, alias="status"),
     strategy_id: int | None = Query(None),
-    account_id: int | None = Query(None),
+    account_ids: str | None = Query(None, description="Comma-separated account IDs"),
     connection_id: int | None = Query(None),
     include_stopped: bool = Query(True),
     limit: int = Query(100, ge=1, le=500),
@@ -644,6 +671,7 @@ def list_live_instances(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
+    parsed_account_ids = _parse_account_ids(account_ids)
     stmt = select(StrategyLive).join(Strategy, StrategyLive.strategy_id == Strategy.id).where(Strategy.user_id == current_user.id)
     if status_filter:
         stmt = stmt.where(StrategyLive.status == status_filter)
@@ -651,14 +679,35 @@ def list_live_instances(
         stmt = stmt.where(StrategyLive.status != LiveStatus.STOPPED.value)
     if strategy_id is not None:
         stmt = stmt.where(StrategyLive.strategy_id == strategy_id)
-    if account_id is not None:
-        stmt = stmt.where(StrategyLive.account_id == account_id)
+    if parsed_account_ids:
+        stmt = stmt.where(StrategyLive.account_id.in_(parsed_account_ids))  # type: ignore[union-attr]
     if connection_id is not None:
         stmt = stmt.where(StrategyLive.connection_id == connection_id)
 
     stmt = stmt.order_by(StrategyLive.started_at.desc(), StrategyLive.id.desc()).offset(offset).limit(limit)
     sessions = session.exec(stmt).all()
     return [_serialize_live_summary(session, sl) for sl in sessions]
+
+
+@router.get("/dashboard/overview", response_model=LiveDashboardOverviewRead)
+def get_live_dashboard_overview_endpoint(
+    account_ids: str | None = Query(None, description="Comma-separated account IDs"),
+    start_date: date | None = Query(None),
+    end_date: date | None = Query(None),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    parsed_account_ids = _parse_account_ids(account_ids)
+    try:
+        return get_live_dashboard_overview(
+            session,
+            current_user.id,
+            account_ids=parsed_account_ids,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/instances/{live_id}", response_model=LiveStrategyDetailRead)

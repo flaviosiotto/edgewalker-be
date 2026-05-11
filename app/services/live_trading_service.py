@@ -10,8 +10,10 @@ NOT directly to a Strategy.
 """
 from __future__ import annotations
 
+from calendar import monthrange
+from collections import defaultdict
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from sqlmodel import Session, select
@@ -32,6 +34,14 @@ from app.schemas.live_trading import (
     LiveFillCreate,
     ReconciliationItem,
     ReconciliationReport,
+)
+from app.schemas.live_strategy import (
+    LiveDashboardAccountBreakdownRead,
+    LiveDashboardDailyResultRead,
+    LiveDashboardDateRange,
+    LiveDashboardEquityPointRead,
+    LiveDashboardOverviewRead,
+    LiveDashboardSummaryRead,
 )
 
 logger = logging.getLogger(__name__)
@@ -287,7 +297,7 @@ def list_open_positions(session: Session, strategy_live_id: int) -> list[LivePos
 # STRATEGY-LEVEL QUERIES (aggregate across all sessions)
 # ═════════════════════════════════════════════════════════════════════
 
-from app.models.strategy import StrategyLive  # noqa: E402
+from app.models.strategy import LiveStatus, Strategy, StrategyLive  # noqa: E402
 
 
 def _live_ids_for_strategy(session: Session, strategy_id: int) -> list[int]:
@@ -357,6 +367,347 @@ def list_strategy_positions(
     if status:
         stmt = stmt.where(LivePosition.status == status)
     return list(session.exec(stmt).all())
+
+
+def _resolve_dashboard_range(
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[date, date]:
+    today = datetime.now(timezone.utc).date()
+
+    if start_date is None and end_date is None:
+        start_date = today.replace(day=1)
+        end_date = date(today.year, today.month, monthrange(today.year, today.month)[1])
+    elif start_date is None and end_date is not None:
+        start_date = end_date.replace(day=1)
+    elif start_date is not None and end_date is None:
+        end_date = date(start_date.year, start_date.month, monthrange(start_date.year, start_date.month)[1])
+
+    assert start_date is not None
+    assert end_date is not None
+
+    if end_date < start_date:
+        raise ValueError("end_date must be greater than or equal to start_date")
+
+    return start_date, end_date
+
+
+def _account_scope_for_user(
+    session: Session,
+    user_id: int,
+    account_ids: list[int] | None,
+) -> list[tuple[Account, Connection]]:
+    stmt = (
+        select(Account, Connection)
+        .join(Connection, Account.connection_id == Connection.id)
+        .where(Connection.user_id == user_id)
+        .order_by(Connection.name, Account.account_id)
+    )
+    if account_ids:
+        stmt = stmt.where(Account.id.in_(account_ids))  # type: ignore[union-attr]
+
+    account_rows = list(session.exec(stmt).all())
+
+    if account_ids:
+        found_ids = {account.id for account, _connection in account_rows if account.id is not None}
+        missing_ids = sorted(set(account_ids) - found_ids)
+        if missing_ids:
+            raise ValueError(f"Accounts not found or not accessible: {', '.join(str(v) for v in missing_ids)}")
+
+    return account_rows
+
+
+def get_live_dashboard_overview(
+    session: Session,
+    user_id: int,
+    *,
+    account_ids: list[int] | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> LiveDashboardOverviewRead:
+    resolved_start, resolved_end = _resolve_dashboard_range(start_date, end_date)
+    range_start = datetime.combine(resolved_start, time.min, tzinfo=timezone.utc)
+    range_end = datetime.combine(resolved_end + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+    account_rows = _account_scope_for_user(session, user_id, account_ids)
+    scoped_account_ids = [account.id for account, _connection in account_rows if account.id is not None]
+
+    if not scoped_account_ids:
+        date_cursor = resolved_start
+        daily_results: list[LiveDashboardDailyResultRead] = []
+        while date_cursor <= resolved_end:
+            daily_results.append(LiveDashboardDailyResultRead(date=date_cursor))
+            date_cursor += timedelta(days=1)
+
+        return LiveDashboardOverviewRead(
+            date_range=LiveDashboardDateRange(start_date=resolved_start, end_date=resolved_end),
+            selected_account_ids=[],
+            summary=LiveDashboardSummaryRead(),
+            equity_curve=[
+                LiveDashboardEquityPointRead(
+                    date=result.date,
+                    realized_pnl=result.realized_pnl,
+                    commission=result.commission,
+                    net_pnl=result.net_pnl,
+                    cumulative_pnl=0.0,
+                    trade_count=result.trade_count,
+                )
+                for result in daily_results
+            ],
+            daily_results=daily_results,
+            accounts=[],
+        )
+
+    base_session_stmt = (
+        select(StrategyLive)
+        .join(Strategy, StrategyLive.strategy_id == Strategy.id)
+        .where(Strategy.user_id == user_id)
+        .where(StrategyLive.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
+    )
+    live_sessions = list(session.exec(base_session_stmt.order_by(StrategyLive.started_at.desc(), StrategyLive.id.desc())).all())
+
+    fills_stmt = (
+        select(LiveFill)
+        .join(StrategyLive, LiveFill.strategy_live_id == StrategyLive.id)
+        .join(Strategy, StrategyLive.strategy_id == Strategy.id)
+        .where(Strategy.user_id == user_id)
+        .where(LiveFill.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
+        .where(LiveFill.fill_time >= range_start)
+        .where(LiveFill.fill_time < range_end)
+        .order_by(LiveFill.fill_time.asc())  # type: ignore[union-attr]
+    )
+    fills = list(session.exec(fills_stmt).all())
+
+    closed_positions_stmt = (
+        select(LivePosition)
+        .join(StrategyLive, LivePosition.strategy_live_id == StrategyLive.id)
+        .join(Strategy, StrategyLive.strategy_id == Strategy.id)
+        .where(Strategy.user_id == user_id)
+        .where(LivePosition.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
+        .where(LivePosition.status == PositionStatus.CLOSED.value)
+        .where(LivePosition.closed_at.is_not(None))
+        .where(LivePosition.closed_at >= range_start)
+        .where(LivePosition.closed_at < range_end)
+        .order_by(LivePosition.closed_at.asc())  # type: ignore[union-attr]
+    )
+    closed_positions = list(session.exec(closed_positions_stmt).all())
+
+    open_positions_stmt = (
+        select(LivePosition)
+        .join(StrategyLive, LivePosition.strategy_live_id == StrategyLive.id)
+        .join(Strategy, StrategyLive.strategy_id == Strategy.id)
+        .where(Strategy.user_id == user_id)
+        .where(LivePosition.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
+        .where(LivePosition.status == PositionStatus.OPEN.value)
+        .order_by(LivePosition.updated_at.desc())  # type: ignore[union-attr]
+    )
+    open_positions = list(session.exec(open_positions_stmt).all())
+
+    daily_buckets: dict[date, dict[str, float | int]] = {}
+    account_breakdown: dict[int, dict[str, Any]] = {}
+
+    for account, connection in account_rows:
+        if account.id is None:
+            continue
+        account_breakdown[account.id] = {
+            "account_id": account.id,
+            "account_code": account.account_id,
+            "account_display": account.display_name or account.account_id,
+            "connection_id": connection.id,
+            "connection_name": connection.name,
+            "currency": account.currency,
+            "session_count": 0,
+            "running_session_count": 0,
+            "open_positions": 0,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "net_pnl": 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "last_activity_at": None,
+        }
+
+    for live_session in live_sessions:
+        if live_session.account_id is None or live_session.account_id not in account_breakdown:
+            continue
+        item = account_breakdown[live_session.account_id]
+        item["session_count"] += 1
+        if live_session.status in {
+            LiveStatus.RUNNING.value,
+            LiveStatus.STARTING.value,
+            LiveStatus.STOPPING.value,
+        }:
+            item["running_session_count"] += 1
+        session_activity = max(
+            ts for ts in [live_session.started_at, live_session.updated_at, live_session.stopped_at] if ts is not None
+        ) if any(ts is not None for ts in [live_session.started_at, live_session.updated_at, live_session.stopped_at]) else None
+        if session_activity and (item["last_activity_at"] is None or session_activity > item["last_activity_at"]):
+            item["last_activity_at"] = session_activity
+
+    for fill in fills:
+        if fill.account_id is None or fill.account_id not in account_breakdown:
+            continue
+        bucket_date = fill.fill_time.astimezone(timezone.utc).date()
+        bucket = daily_buckets.setdefault(bucket_date, {
+            "realized_pnl": 0.0,
+            "commission": 0.0,
+            "net_pnl": 0.0,
+            "trade_count": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+        })
+
+        realized_pnl = float(fill.realized_pnl or 0.0)
+        commission = float(fill.commission or 0.0)
+        bucket["realized_pnl"] += realized_pnl
+        bucket["commission"] += commission
+        bucket["net_pnl"] += realized_pnl - commission
+
+        item = account_breakdown[fill.account_id]
+        item["realized_pnl"] += realized_pnl
+        item["net_pnl"] += realized_pnl - commission
+        if item["last_activity_at"] is None or fill.fill_time > item["last_activity_at"]:
+            item["last_activity_at"] = fill.fill_time
+
+    for position in closed_positions:
+        if position.account_id is None or position.account_id not in account_breakdown:
+            continue
+        if position.closed_at is None:
+            continue
+
+        bucket_date = position.closed_at.astimezone(timezone.utc).date()
+        bucket = daily_buckets.setdefault(bucket_date, {
+            "realized_pnl": 0.0,
+            "commission": 0.0,
+            "net_pnl": 0.0,
+            "trade_count": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+        })
+        bucket["trade_count"] += 1
+
+        realized_pnl = float(position.realized_pnl or 0.0)
+        if realized_pnl > 0:
+            bucket["winning_trades"] += 1
+        elif realized_pnl < 0:
+            bucket["losing_trades"] += 1
+
+        item = account_breakdown[position.account_id]
+        item["total_trades"] += 1
+        if realized_pnl > 0:
+            item["winning_trades"] += 1
+        elif realized_pnl < 0:
+            item["losing_trades"] += 1
+        if item["last_activity_at"] is None or position.closed_at > item["last_activity_at"]:
+            item["last_activity_at"] = position.closed_at
+
+    for position in open_positions:
+        if position.account_id is None or position.account_id not in account_breakdown:
+            continue
+        unrealized_pnl = float(position.unrealized_pnl or 0.0)
+        item = account_breakdown[position.account_id]
+        item["open_positions"] += 1
+        item["unrealized_pnl"] += unrealized_pnl
+        item["net_pnl"] += unrealized_pnl
+        if item["last_activity_at"] is None or position.updated_at > item["last_activity_at"]:
+            item["last_activity_at"] = position.updated_at
+
+    daily_results: list[LiveDashboardDailyResultRead] = []
+    equity_curve: list[LiveDashboardEquityPointRead] = []
+    cumulative_pnl = 0.0
+    cursor = resolved_start
+    while cursor <= resolved_end:
+        bucket = daily_buckets.get(cursor, {
+            "realized_pnl": 0.0,
+            "commission": 0.0,
+            "net_pnl": 0.0,
+            "trade_count": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+        })
+        trade_count = int(bucket["trade_count"])
+        winning_trades = int(bucket["winning_trades"])
+        losing_trades = int(bucket["losing_trades"])
+        net_pnl = float(bucket["net_pnl"])
+        cumulative_pnl += net_pnl
+
+        daily_results.append(LiveDashboardDailyResultRead(
+            date=cursor,
+            realized_pnl=float(bucket["realized_pnl"]),
+            commission=float(bucket["commission"]),
+            net_pnl=net_pnl,
+            trade_count=trade_count,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            win_rate=(winning_trades / trade_count * 100.0) if trade_count else None,
+        ))
+        equity_curve.append(LiveDashboardEquityPointRead(
+            date=cursor,
+            realized_pnl=float(bucket["realized_pnl"]),
+            commission=float(bucket["commission"]),
+            net_pnl=net_pnl,
+            cumulative_pnl=cumulative_pnl,
+            trade_count=trade_count,
+        ))
+        cursor += timedelta(days=1)
+
+    account_items: list[LiveDashboardAccountBreakdownRead] = []
+    for item in account_breakdown.values():
+        total_trades = int(item["total_trades"])
+        winning_trades = int(item["winning_trades"])
+        losing_trades = int(item["losing_trades"])
+        account_items.append(LiveDashboardAccountBreakdownRead(
+            account_id=item["account_id"],
+            account_code=item["account_code"],
+            account_display=item["account_display"],
+            connection_id=item["connection_id"],
+            connection_name=item["connection_name"],
+            currency=item["currency"],
+            session_count=int(item["session_count"]),
+            running_session_count=int(item["running_session_count"]),
+            open_positions=int(item["open_positions"]),
+            realized_pnl=float(item["realized_pnl"]),
+            unrealized_pnl=float(item["unrealized_pnl"]),
+            net_pnl=float(item["net_pnl"]),
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            win_rate=(winning_trades / total_trades * 100.0) if total_trades else None,
+            last_activity_at=item["last_activity_at"],
+        ))
+
+    account_items.sort(key=lambda item: (item.net_pnl, item.account_display), reverse=True)
+
+    summary_total_trades = sum(item.total_trades for item in account_items)
+    summary_winning_trades = sum(item.winning_trades for item in account_items)
+    summary_losing_trades = sum(item.losing_trades for item in account_items)
+    summary_last_activity_candidates = [
+        item.last_activity_at for item in account_items if item.last_activity_at is not None
+    ]
+
+    return LiveDashboardOverviewRead(
+        date_range=LiveDashboardDateRange(start_date=resolved_start, end_date=resolved_end),
+        selected_account_ids=scoped_account_ids,
+        summary=LiveDashboardSummaryRead(
+            account_count=len(account_items),
+            session_count=sum(item.session_count for item in account_items),
+            running_session_count=sum(item.running_session_count for item in account_items),
+            open_positions=sum(item.open_positions for item in account_items),
+            active_days=sum(1 for result in daily_results if result.trade_count > 0 or result.net_pnl != 0),
+            realized_pnl=sum(item.realized_pnl for item in account_items),
+            unrealized_pnl=sum(item.unrealized_pnl for item in account_items),
+            net_pnl=sum(item.net_pnl for item in account_items),
+            total_trades=summary_total_trades,
+            winning_trades=summary_winning_trades,
+            losing_trades=summary_losing_trades,
+            win_rate=(summary_winning_trades / summary_total_trades * 100.0) if summary_total_trades else None,
+            last_activity_at=max(summary_last_activity_candidates) if summary_last_activity_candidates else None,
+        ),
+        equity_curve=equity_curve,
+        daily_results=daily_results,
+        accounts=account_items,
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════
