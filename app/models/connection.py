@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
@@ -153,6 +153,32 @@ class Account(SQLModel, table=True):
     currency: str = Field(
         default="USD",
         sa_column=Column(String(10), nullable=False),
+    )
+
+    cash_balance: Optional[float] = Field(
+        default=None,
+        sa_column=Column(Float, nullable=True),
+        description="Normalized current cash balance in account currency",
+    )
+    equity: Optional[float] = Field(
+        default=None,
+        sa_column=Column(Float, nullable=True),
+        description="Normalized current equity / net liquidation in account currency",
+    )
+    buying_power: Optional[float] = Field(
+        default=None,
+        sa_column=Column(Float, nullable=True),
+        description="Normalized current buying power in account currency when supported",
+    )
+    available_funds: Optional[float] = Field(
+        default=None,
+        sa_column=Column(Float, nullable=True),
+        description="Normalized available funds in account currency when supported",
+    )
+    snapshot_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+        description="Timestamp of the last normalized account-state snapshot",
     )
 
     is_active: bool = Field(default=True)

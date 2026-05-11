@@ -55,6 +55,11 @@ class AccountRead(BaseModel):
     display_name: str | None = None
     account_type: str | None = None
     currency: str
+    cash_balance: float | None = None
+    equity: float | None = None
+    buying_power: float | None = None
+    available_funds: float | None = None
+    snapshot_at: datetime | None = None
     is_active: bool
     extra: dict[str, Any] | None = None
     created_at: datetime
@@ -98,6 +103,11 @@ class AccountCreate(BaseModel):
     display_name: str | None = None
     account_type: str | None = None
     currency: str = "USD"
+    cash_balance: float | None = None
+    equity: float | None = None
+    buying_power: float | None = None
+    available_funds: float | None = None
+    snapshot_at: datetime | None = None
     is_active: bool = True
     extra: dict[str, Any] | None = None
 
@@ -107,6 +117,11 @@ class AccountUpdate(BaseModel):
     display_name: str | None = None
     account_type: str | None = None
     currency: str | None = None
+    cash_balance: float | None = None
+    equity: float | None = None
+    buying_power: float | None = None
+    available_funds: float | None = None
+    snapshot_at: datetime | None = None
     is_active: bool | None = None
     extra: dict[str, Any] | None = None
 

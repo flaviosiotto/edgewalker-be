@@ -86,6 +86,28 @@ CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE = (
 CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY = "_client_portal_dispatcher_received_at"
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value in (None, "", "N/A"):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_snapshot_at(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
 def _docker_runtime_requirements() -> str:
     return (
         "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST), "
@@ -216,21 +238,28 @@ _gateway_clients: dict[int, GatewayClient] = {}
 def _sync_accounts_from_gateway(
     session: Session,
     connection_id: int,
-    accounts: list[dict[str, str]],
+    accounts: list[dict[str, Any]],
 ) -> None:
     """Sync accounts discovered by a gateway container.
 
-    ``accounts`` is a list of ``{"account_id": "...", "account_type": "..."}``
-    dicts returned by the gateway's ``/accounts`` endpoint.
+    ``accounts`` is a list of normalized account-state dicts returned by
+    the gateway's ``/accounts`` endpoint.
     """
     discovered = [
         DiscoveredAccount(
             account_id=a["account_id"],
-            display_name=a["account_id"],
+            display_name=a.get("display_name") or a["account_id"],
             account_type=a.get("account_type", "unknown"),
-            currency="USD",
+            currency=a.get("currency") or "USD",
+            cash_balance=_safe_float(a.get("cash_balance")),
+            equity=_safe_float(a.get("equity")),
+            buying_power=_safe_float(a.get("buying_power")),
+            available_funds=_safe_float(a.get("available_funds")),
+            snapshot_at=_parse_snapshot_at(a.get("snapshot_at")),
+            extra=a.get("extra") if isinstance(a.get("extra"), dict) else None,
         )
         for a in accounts
+        if a.get("account_id")
     ]
     _sync_accounts(session, connection_id, discovered)
 
@@ -255,6 +284,11 @@ def _sync_accounts(session: Session, connection_id: int, discovered: list[Discov
                 display_name=d.display_name,
                 account_type=d.account_type,
                 currency=d.currency,
+                cash_balance=d.cash_balance,
+                equity=d.equity,
+                buying_power=d.buying_power,
+                available_funds=d.available_funds,
+                snapshot_at=d.snapshot_at,
                 is_active=True,
                 extra=d.extra,
             )
@@ -269,6 +303,18 @@ def _sync_accounts(session: Session, connection_id: int, discovered: list[Discov
                 acct.account_type = d.account_type
             if d.currency:
                 acct.currency = d.currency
+            if d.cash_balance is not None:
+                acct.cash_balance = d.cash_balance
+            if d.equity is not None:
+                acct.equity = d.equity
+            if d.buying_power is not None:
+                acct.buying_power = d.buying_power
+            if d.available_funds is not None:
+                acct.available_funds = d.available_funds
+            if d.snapshot_at is not None:
+                acct.snapshot_at = d.snapshot_at
+            if d.extra is not None:
+                acct.extra = d.extra
             acct.updated_at = now
 
     # Deactivate accounts no longer present
@@ -835,11 +881,18 @@ class ConnectionManager:
         discovered = [
             DiscoveredAccount(
                 account_id=a.get("account_id", ""),
-                display_name=a.get("account_id", ""),
+                display_name=a.get("display_name") or a.get("account_id", ""),
                 account_type=a.get("account_type", "unknown"),
-                currency="USD",
+                currency=a.get("currency") or "USD",
+                cash_balance=_safe_float(a.get("cash_balance")),
+                equity=_safe_float(a.get("equity")),
+                buying_power=_safe_float(a.get("buying_power")),
+                available_funds=_safe_float(a.get("available_funds")),
+                snapshot_at=_parse_snapshot_at(a.get("snapshot_at")),
+                extra=a.get("extra") if isinstance(a.get("extra"), dict) else None,
             )
             for a in accounts
+            if a.get("account_id")
         ]
 
         return ConnectorResult(success=True, accounts=discovered)

@@ -4,6 +4,7 @@ and gateway client.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,6 +16,11 @@ class DiscoveredAccount:
     display_name: str | None = None
     account_type: str | None = None   # paper, live, margin …
     currency: str = "USD"
+    cash_balance: float | None = None
+    equity: float | None = None
+    buying_power: float | None = None
+    available_funds: float | None = None
+    snapshot_at: datetime | None = None
     extra: dict[str, Any] | None = None
 
 

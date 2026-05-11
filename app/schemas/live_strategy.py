@@ -91,6 +91,10 @@ class LiveDashboardSummaryRead(BaseModel):
     running_session_count: int = 0
     open_positions: int = 0
     active_days: int = 0
+    cash_balance: float | None = None
+    equity: float | None = None
+    buying_power: float | None = None
+    available_funds: float | None = None
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     net_pnl: float = 0.0
@@ -128,6 +132,11 @@ class LiveDashboardAccountBreakdownRead(BaseModel):
     connection_id: int
     connection_name: str
     currency: str
+    cash_balance: float | None = None
+    equity: float | None = None
+    buying_power: float | None = None
+    available_funds: float | None = None
+    snapshot_at: datetime | None = None
     session_count: int = 0
     running_session_count: int = 0
     open_positions: int = 0

@@ -417,6 +417,16 @@ def _account_scope_for_user(
     return account_rows
 
 
+def _aggregate_account_state(values: list[float | None], currencies: list[str]) -> float | None:
+    if not values:
+        return None
+    if len(set(currencies)) != 1:
+        return None
+    if any(value is None for value in values):
+        return None
+    return sum(value for value in values if value is not None)
+
+
 def get_live_dashboard_overview(
     session: Session,
     user_id: int,
@@ -516,6 +526,11 @@ def get_live_dashboard_overview(
             "connection_id": connection.id,
             "connection_name": connection.name,
             "currency": account.currency,
+            "cash_balance": float(account.cash_balance) if account.cash_balance is not None else None,
+            "equity": float(account.equity) if account.equity is not None else None,
+            "buying_power": float(account.buying_power) if account.buying_power is not None else None,
+            "available_funds": float(account.available_funds) if account.available_funds is not None else None,
+            "snapshot_at": account.snapshot_at,
             "session_count": 0,
             "running_session_count": 0,
             "open_positions": 0,
@@ -664,6 +679,11 @@ def get_live_dashboard_overview(
             connection_id=item["connection_id"],
             connection_name=item["connection_name"],
             currency=item["currency"],
+            cash_balance=item["cash_balance"],
+            equity=item["equity"],
+            buying_power=item["buying_power"],
+            available_funds=item["available_funds"],
+            snapshot_at=item["snapshot_at"],
             session_count=int(item["session_count"]),
             running_session_count=int(item["running_session_count"]),
             open_positions=int(item["open_positions"]),
@@ -685,6 +705,7 @@ def get_live_dashboard_overview(
     summary_last_activity_candidates = [
         item.last_activity_at for item in account_items if item.last_activity_at is not None
     ]
+    summary_currencies = [item.currency for item in account_items]
 
     return LiveDashboardOverviewRead(
         date_range=LiveDashboardDateRange(start_date=resolved_start, end_date=resolved_end),
@@ -695,6 +716,10 @@ def get_live_dashboard_overview(
             running_session_count=sum(item.running_session_count for item in account_items),
             open_positions=sum(item.open_positions for item in account_items),
             active_days=sum(1 for result in daily_results if result.trade_count > 0 or result.net_pnl != 0),
+            cash_balance=_aggregate_account_state([item.cash_balance for item in account_items], summary_currencies),
+            equity=_aggregate_account_state([item.equity for item in account_items], summary_currencies),
+            buying_power=_aggregate_account_state([item.buying_power for item in account_items], summary_currencies),
+            available_funds=_aggregate_account_state([item.available_funds for item in account_items], summary_currencies),
             realized_pnl=sum(item.realized_pnl for item in account_items),
             unrealized_pnl=sum(item.unrealized_pnl for item in account_items),
             net_pnl=sum(item.net_pnl for item in account_items),
