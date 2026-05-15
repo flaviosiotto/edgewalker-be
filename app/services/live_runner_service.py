@@ -31,6 +31,7 @@ TRAEFIK_DOCKER_NETWORK = os.getenv("TRAEFIK_DOCKER_NETWORK", "").strip()
 EDGEWALKER_PATH = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
 RUNTIME_PATH = os.getenv("RUNTIME_PATH", "/home/flavio/playground/edgewalker-runtime")
 SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
+JWT_KEY_DIR = os.getenv("JWT_KEY_DIR", "").strip()
 
 # Strategy runner image must be explicitly configured by environment.
 RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "").strip()
@@ -218,6 +219,8 @@ class LiveRunnerService:
         manager_chat_session_id: str | None = None,
         strategy_live_id: int | None = None,
         legacy_strategy_route: bool = False,
+        owner_user_id: int | None = None,
+        owner_user_email: str | None = None,
     ) -> dict[str, Any]:
         """
         Start a live strategy runner container.
@@ -265,6 +268,8 @@ class LiveRunnerService:
             "REDIS_PORT": REDIS_PORT,
             "STRATEGY_ID": str(strategy_id),
             "STRATEGY_LIVE_ID": str(live_id),
+            "OWNER_USER_ID": str(owner_user_id or ""),
+            "OWNER_USER_EMAIL": owner_user_email or "",
             "SYMBOL": symbol,
             # Single live:bars stream - runner derives from DB config if STRATEGY_LIVE_ID is set
             "STREAMS": f"live:bars:{symbol}:{timeframe}{conn_suffix}",
@@ -274,8 +279,14 @@ class LiveRunnerService:
             "DEBUG_RULES": str(debug_rules).lower(),
             "LOG_LEVEL": "DEBUG" if debug_rules else "INFO",
             "PYTHONPATH": "/app",
+            "RUNNER_INTERNAL_URL": f"http://{container_name}:8080",
             # Backend API URL for manager agent notifications
             "BACKEND_URL": os.getenv("BACKEND_URL", "http://backend:8000"),
+            "ALGORITHM": os.getenv("ALGORITHM", "RS256"),
+            "JWT_ISSUER": os.getenv("JWT_ISSUER", "edgewalker-backend"),
+            "JWT_PUBLIC_KEY_PATH": os.getenv("JWT_PUBLIC_KEY_PATH", "/run/secrets/edgewalker-jwt/public.pem"),
+            "ACCESS_TOKEN_AUDIENCE": os.getenv("ACCESS_TOKEN_AUDIENCE", "edgewalker-ui"),
+            "AGENT_TOKEN_AUDIENCE": os.getenv("AGENT_TOKEN_AUDIENCE", "edgewalker-agent"),
             # Database URL for direct order/position persistence + config loading
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
             # OpenTelemetry - send metrics/traces to the shared OTel Collector
@@ -400,6 +411,12 @@ class LiveRunnerService:
                     "mode": "ro",
                 },
             })
+
+        if JWT_KEY_DIR:
+            volumes[JWT_KEY_DIR] = {
+                "bind": "/run/secrets/edgewalker-jwt",
+                "mode": "ro",
+            }
         
         image_name = _get_required_runner_image()
 

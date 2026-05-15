@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -74,7 +74,14 @@ from app.services.strategy_service import (
     list_live_session_chats,
     resolve_strategy_manager_agent_id,
 )
-from app.utils.auth_utils import create_user_delegated_token, get_current_active_user, get_current_admin_user
+from app.utils.auth_utils import (
+    AuthPrincipal,
+    create_user_delegated_token,
+    get_current_active_or_runner_user,
+    get_current_active_user,
+    get_current_admin_user,
+    get_current_runner_principal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +91,12 @@ router = APIRouter(prefix="/live", tags=["Live Trading"])
 _REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 _REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 _CHECKPOINT_LIMIT = 100
+_DEFAULT_AGENT_RUNNER_SCOPES = [
+    "runner:read",
+    "runner:orders:write",
+    "runner:alerts:write",
+    "runner:decision:write",
+]
 
 
 def _clear_live_config(
@@ -566,6 +579,8 @@ async def _start_live_instance_internal(
         manager_chat_session_id=manager_chat_session_id,
         strategy_live_id=sl.id,
         legacy_strategy_route=legacy_strategy_route,
+        owner_user_id=current_user.id,
+        owner_user_email=current_user.email,
     )
 
     sl.status = LiveStatus.RUNNING.value
@@ -1394,6 +1409,64 @@ class ManagerMessageResponse(BaseModel):
     chat_id: int
 
 
+class AgentApiTokenResponse(BaseModel):
+    token: str
+    token_type: str = "Bearer"
+    expires_at: datetime
+    audience: str
+    purpose: str
+    scopes: list[str]
+
+
+@router.post("/sessions/{live_id}/agent-token", response_model=AgentApiTokenResponse)
+def issue_live_agent_token_endpoint(
+    live_id: int,
+    session: Session = Depends(get_session),
+    runner_principal: AuthPrincipal = Depends(get_current_runner_principal),
+):
+    sl = session.get(StrategyLive, live_id)
+    if sl is None:
+        raise HTTPException(status_code=404, detail="Live session not found")
+
+    strategy = session.get(Strategy, sl.strategy_id)
+    if strategy is None or strategy.user_id != runner_principal.user.id:
+        raise HTTPException(status_code=404, detail="Live session not found")
+
+    runner_live_id = runner_principal.claims.get("live_id")
+    if runner_live_id is None or str(runner_live_id) != str(live_id):
+        raise HTTPException(status_code=403, detail="Runner token does not match this live session")
+
+    runner_strategy_id = runner_principal.claims.get("strategy_id")
+    if runner_strategy_id is not None and str(runner_strategy_id) != str(sl.strategy_id):
+        raise HTTPException(status_code=403, detail="Runner token does not match this strategy")
+
+    expires_delta = timedelta(minutes=settings.AGENT_CALLBACK_TOKEN_EXPIRE_MINUTES)
+    expires_at = datetime.now(timezone.utc) + expires_delta
+    purpose = "agent_runner_callback"
+    token = create_user_delegated_token(
+        session,
+        user_id=runner_principal.user.id,
+        audience=settings.AGENT_TOKEN_AUDIENCE,
+        purpose=purpose,
+        expires_delta=expires_delta,
+        extra_claims={
+            "strategy_id": sl.strategy_id,
+            "live_id": sl.id,
+            "connection_id": sl.connection_id,
+            "account_id": sl.account_id,
+            "scopes": _DEFAULT_AGENT_RUNNER_SCOPES,
+        },
+    )
+
+    return AgentApiTokenResponse(
+        token=token,
+        expires_at=expires_at,
+        audience=settings.AGENT_TOKEN_AUDIENCE,
+        purpose=purpose,
+        scopes=list(_DEFAULT_AGENT_RUNNER_SCOPES),
+    )
+
+
 @router.post(
     "/strategies/{strategy_id}/manager/message",
     response_model=ManagerMessageResponse,
@@ -1402,7 +1475,7 @@ def post_manager_message_endpoint(
     strategy_id: int,
     payload: ManagerMessageRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_runner_user),
 ):
     """Post a message to the strategy's Live chat.
 

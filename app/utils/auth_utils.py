@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from typing import Any, Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -13,6 +14,12 @@ from app.db.database import get_session
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_ROOT_PATH}/auth/token")
+
+
+@dataclass
+class AuthPrincipal:
+    user: User
+    claims: dict[str, Any]
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -120,6 +127,37 @@ def decode_token_for_audiences(token: str, audiences: list[str]) -> Optional[dic
     return None
 
 
+def _credentials_exception(detail: str = "Could not validate credentials") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _load_principal_from_payload(
+    payload: dict[str, Any],
+    session: Session,
+    *,
+    allowed_token_types: set[str],
+    allowed_purposes: set[str] | None = None,
+    credentials_exception: HTTPException,
+) -> AuthPrincipal:
+    email: str | None = payload.get("sub")
+    token_type: str | None = payload.get("type")
+    purpose: str | None = payload.get("purpose")
+    if email is None or token_type not in allowed_token_types:
+        raise credentials_exception
+    if allowed_purposes is not None and purpose not in allowed_purposes:
+        raise credentials_exception
+
+    user = get_user_by_email(email, session)
+    if user is None:
+        raise credentials_exception
+
+    return AuthPrincipal(user=user, claims=payload)
+
+
 def get_user_by_email(email: str, session: Session) -> Optional[User]:
     statement = select(User).where(User.email == email)
     return session.exec(statement).first()
@@ -147,28 +185,21 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session)
 ) -> User:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    credentials_exception = _credentials_exception()
 
     payload = decode_token_for_audiences(
         token,
-        [settings.ACCESS_TOKEN_AUDIENCE, settings.RUNNER_TOKEN_AUDIENCE],
+        [settings.ACCESS_TOKEN_AUDIENCE],
     )
     if payload is None:
         raise credentials_exception
 
-    email: str | None = payload.get("sub")
-    token_type: str | None = payload.get("type")
-    if email is None or token_type != "access":
-        raise credentials_exception
-
-    user = get_user_by_email(email, session)
-    if user is None:
-        raise credentials_exception
-    return user
+    return _load_principal_from_payload(
+        payload,
+        session,
+        allowed_token_types={"access"},
+        credentials_exception=credentials_exception,
+    ).user
 
 
 async def get_current_active_user(
@@ -185,6 +216,46 @@ async def get_current_admin_user(
     if current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
+
+
+async def get_current_runner_principal(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+) -> AuthPrincipal:
+    credentials_exception = _credentials_exception("Could not validate runner credentials")
+    payload = decode_token_for_audiences(token, [settings.RUNNER_TOKEN_AUDIENCE])
+    if payload is None:
+        raise credentials_exception
+
+    return _load_principal_from_payload(
+        payload,
+        session,
+        allowed_token_types={"delegated"},
+        allowed_purposes={"runner_backend"},
+        credentials_exception=credentials_exception,
+    )
+
+
+async def get_current_active_or_runner_user(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+) -> User:
+    access_payload = decode_token(token, audience=settings.ACCESS_TOKEN_AUDIENCE)
+    if access_payload is not None:
+        user = _load_principal_from_payload(
+            access_payload,
+            session,
+            allowed_token_types={"access"},
+            credentials_exception=_credentials_exception(),
+        ).user
+        if not user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        return user
+
+    runner_principal = await get_current_runner_principal(token=token, session=session)
+    if not runner_principal.user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return runner_principal.user
 
 
 def create_user_delegated_token(

@@ -26,7 +26,9 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_AUDIENCE: str = "edgewalker-refresh"
     N8N_TOKEN_AUDIENCE: str = "edgewalker-n8n"
     RUNNER_TOKEN_AUDIENCE: str = "edgewalker-runner"
+    AGENT_TOKEN_AUDIENCE: str = "edgewalker-agent"
     DELEGATED_TOKEN_EXPIRE_MINUTES: int = 480
+    AGENT_CALLBACK_TOKEN_EXPIRE_MINUTES: int = 15
     JWT_PRIVATE_KEY: Optional[str] = None
     JWT_PUBLIC_KEY: Optional[str] = None
     JWT_PRIVATE_KEY_PATH: Optional[str] = None
