@@ -447,6 +447,7 @@ async def _start_live_instance_internal(
     debug_rules: bool,
     account_id: int,
     user_id: int,
+    user_email: str | None,
     legacy_strategy_route: bool = False,
 ) -> tuple[StrategyLive, dict[str, Any]]:
     strategy = _get_strategy_or_404(session, strategy_id, user_id)
@@ -579,8 +580,8 @@ async def _start_live_instance_internal(
         manager_chat_session_id=manager_chat_session_id,
         strategy_live_id=sl.id,
         legacy_strategy_route=legacy_strategy_route,
-        owner_user_id=current_user.id,
-        owner_user_email=current_user.email,
+        owner_user_id=user_id,
+        owner_user_email=user_email,
     )
 
     sl.status = LiveStatus.RUNNING.value
@@ -751,6 +752,7 @@ async def create_live_instance(
             debug_rules=payload.debug_rules,
             account_id=payload.account_id,
             user_id=current_user.id,
+            user_email=current_user.email,
             legacy_strategy_route=False,
         )
     except ValueError as exc:
@@ -876,6 +878,7 @@ async def start_live_strategy(
             debug_rules=request.debug_rules,
             account_id=request.account_id,
             user_id=current_user.id,
+            user_email=current_user.email,
             legacy_strategy_route=True,
         )
     except ValueError as exc:
