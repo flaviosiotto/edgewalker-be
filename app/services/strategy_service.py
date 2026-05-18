@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+import uuid
 
 import logging
 
@@ -70,6 +71,47 @@ def _n8n_auth_headers(
         extra_claims=extra_claims,
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def _n8n_auth_metadata(
+    *,
+    user_id: int | None,
+    purpose: str,
+) -> dict[str, str | int | None]:
+    return {
+        "mode": "authorization_header",
+        "scheme": "Bearer",
+        "token_type": "delegated",
+        "audience": settings.N8N_TOKEN_AUDIENCE,
+        "purpose": purpose,
+        "user_id": user_id,
+    }
+
+
+def _chat_session_id(chat: Chat) -> str:
+    if chat.n8n_session_id:
+        return chat.n8n_session_id
+    if chat.id is not None:
+        return str(chat.id)
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Chat session id is not available",
+    )
+
+
+def _build_rule_trigger_chat_input(rule_context: dict) -> str:
+    rule_name = str(rule_context.get("rule_name") or "ask_agent")
+    timestamp = rule_context.get("timestamp")
+    conditions = rule_context.get("conditions_matched")
+
+    parts = [f"Rule '{rule_name}' triggered."]
+    if timestamp:
+        parts.append(f"Timestamp: {timestamp}.")
+    if isinstance(conditions, list) and conditions:
+        matched = ", ".join(str(condition) for condition in conditions[:5])
+        parts.append(f"Matched conditions: {matched}.")
+    parts.append("Review metadata.rule_context and decide the next action.")
+    return " ".join(parts)
 
 
 def _load_chat_with_agent(session: Session, chat_id: int) -> Chat:
@@ -698,17 +740,32 @@ def trigger_rule_agent(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Chat with id {chat_id} not found",
         )
+    session_id = _chat_session_id(chat)
+    request_id = str(uuid.uuid4())
     
     # Use provided webhook_url or fall back to agent's webhook
     target_webhook = webhook_url or agent.n8n_webhook
+
+    auth_metadata = _n8n_auth_metadata(
+        user_id=chat.user_id,
+        purpose="n8n_rule_trigger",
+    )
     
-    # Build payload for the agent
+    # Build payload using the same sendMessage envelope as chat and runner flows.
     webhook_payload = {
-        "action": "rule_trigger",
-        "agent_id": agent_id,
-        "chat_id": chat_id,
-        "sessionId": chat.n8n_session_id,
-        "rule_context": rule_context,
+        "action": "sendMessage",
+        "sessionId": session_id,
+        "chatInput": _build_rule_trigger_chat_input(rule_context),
+        "metadata": {
+            "chat_id": session_id,
+            "edgewalker_chat_id": chat.id,
+            "request_id": request_id,
+            "message_type": "rule_trigger",
+            "requested_action": "rule_trigger",
+            "agent_id": agent_id,
+            "rule_context": rule_context,
+            "auth": auth_metadata,
+        },
     }
     
     # Call agent webhook
@@ -724,6 +781,8 @@ def trigger_rule_agent(
                     extra_claims={
                         "agent_id": agent_id,
                         "chat_id": chat_id,
+                        "request_id": request_id,
+                        "session_id": session_id,
                     },
                 ),
             )
