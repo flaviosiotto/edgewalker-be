@@ -25,7 +25,11 @@ from app.schemas.strategy import (
     LayoutConfigUpdate,
 )
 from app.schemas.chat import ChatCreate
-from app.utils.auth_utils import create_user_delegated_token
+from app.services.n8n_auth import (
+    build_n8n_api_auth_metadata,
+    build_n8n_webhook_auth_headers,
+    issue_n8n_webhook_auth_token,
+)
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -51,41 +55,6 @@ def _get_owned_connection(session: Session, connection_id: int, user_id: int | N
             detail=f"Connection with id {connection_id} not found",
         )
     return connection
-
-
-def _n8n_auth_headers(
-    session: Session,
-    *,
-    user_id: int | None,
-    purpose: str,
-    extra_claims: dict | None = None,
-) -> dict[str, str]:
-    if user_id is None:
-        return {}
-
-    token = create_user_delegated_token(
-        session,
-        user_id=user_id,
-        audience=settings.N8N_TOKEN_AUDIENCE,
-        purpose=purpose,
-        extra_claims=extra_claims,
-    )
-    return {"Authorization": f"Bearer {token}"}
-
-
-def _n8n_auth_metadata(
-    *,
-    user_id: int | None,
-    purpose: str,
-) -> dict[str, str | int | None]:
-    return {
-        "mode": "authorization_header",
-        "scheme": "Bearer",
-        "token_type": "delegated",
-        "audience": settings.N8N_TOKEN_AUDIENCE,
-        "purpose": purpose,
-        "user_id": user_id,
-    }
 
 
 def _chat_session_id(chat: Chat) -> str:
@@ -746,9 +715,21 @@ def trigger_rule_agent(
     # Use provided webhook_url or fall back to agent's webhook
     target_webhook = webhook_url or agent.n8n_webhook
 
-    auth_metadata = _n8n_auth_metadata(
+    auth_token = issue_n8n_webhook_auth_token(
+        session,
         user_id=chat.user_id,
         purpose="n8n_rule_trigger",
+        extra_claims={
+            "agent_id": agent_id,
+            "chat_id": chat_id,
+            "request_id": request_id,
+            "session_id": session_id,
+        },
+    )
+    api_auth_metadata = build_n8n_api_auth_metadata(
+        user_id=chat.user_id,
+        purpose="n8n_rule_trigger",
+        token=auth_token,
     )
     
     # Build payload using the same sendMessage envelope as chat and runner flows.
@@ -764,7 +745,7 @@ def trigger_rule_agent(
             "requested_action": "rule_trigger",
             "agent_id": agent_id,
             "rule_context": rule_context,
-            "auth": auth_metadata,
+            "api_auth": api_auth_metadata,
         },
     }
     
@@ -774,17 +755,7 @@ def trigger_rule_agent(
             response = client.post(
                 target_webhook,
                 json=webhook_payload,
-                headers=_n8n_auth_headers(
-                    session,
-                    user_id=chat.user_id,
-                    purpose="n8n_rule_trigger",
-                    extra_claims={
-                        "agent_id": agent_id,
-                        "chat_id": chat_id,
-                        "request_id": request_id,
-                        "session_id": session_id,
-                    },
-                ),
+                headers=build_n8n_webhook_auth_headers(auth_token),
             )
             response.raise_for_status()
             return response.json() if response.text else {"status": "ok"}
@@ -980,21 +951,27 @@ def notify_manager_live_start(
     try:
         from app.services.live_runner_service import _rewrite_webhook_for_docker
         webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+        auth_token = issue_n8n_webhook_auth_token(
+            session,
+            user_id=strategy.user_id,
+            purpose="n8n_live_start",
+            extra_claims={
+                "agent_id": agent.id_agent,
+                "chat_id": live_chat.id,
+                "strategy_id": strategy_id,
+                "session_id": live_chat.n8n_session_id or "",
+            },
+        )
+        webhook_payload["metadata"]["api_auth"] = build_n8n_api_auth_metadata(
+            user_id=strategy.user_id,
+            purpose="n8n_live_start",
+            token=auth_token,
+        )
         with httpx.Client(timeout=30.0) as client:
-            response = client.post(webhook_url, json=webhook_payload)
             response = client.post(
                 webhook_url,
                 json=webhook_payload,
-                headers=_n8n_auth_headers(
-                    session,
-                    user_id=strategy.user_id,
-                    purpose="n8n_live_start",
-                    extra_claims={
-                        "agent_id": agent.id_agent,
-                        "chat_id": live_chat.id,
-                        "strategy_id": strategy_id,
-                    },
-                ),
+                headers=build_n8n_webhook_auth_headers(auth_token),
             )
             response.raise_for_status()
             logger.info(
@@ -1067,7 +1044,7 @@ def post_manager_message(
                     },
                 }
                 try:
-                    headers = _n8n_auth_headers(
+                    auth_token = issue_n8n_webhook_auth_token(
                         session,
                         user_id=live_chat.user_id,
                         purpose="n8n_manager_message",
@@ -1075,8 +1052,15 @@ def post_manager_message(
                             "agent_id": agent.id_agent,
                             "chat_id": live_chat.id,
                             "strategy_id": strategy_id,
+                            "session_id": live_chat.n8n_session_id or "",
                         },
                     )
+                    webhook_payload["metadata"]["api_auth"] = build_n8n_api_auth_metadata(
+                        user_id=live_chat.user_id,
+                        purpose="n8n_manager_message",
+                        token=auth_token,
+                    )
+                    headers = build_n8n_webhook_auth_headers(auth_token)
                     with httpx.Client(timeout=10.0) as client:
                         resp = client.post(webhook_url, json=webhook_payload, headers=headers)
                         resp.raise_for_status()

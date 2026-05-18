@@ -12,12 +12,15 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
-from app.core.config import settings
 from app.models.agent import Agent, Chat
 from app.models.n8n_chat_history import N8nChatHistory
 from app.schemas.chat import ChatHistoryMessageRead, ChatHistoryPage, ChatSendMessageResponse
 from app.services.live_runner_service import _rewrite_webhook_for_docker
-from app.utils.auth_utils import create_user_delegated_token
+from app.services.n8n_auth import (
+    build_n8n_api_auth_metadata,
+    build_n8n_webhook_auth_headers,
+    issue_n8n_webhook_auth_token,
+)
 
 MAX_CHAT_PAGE_SIZE = 100
 DEFAULT_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=60.0)
@@ -37,41 +40,6 @@ def _sse_event(event: str, payload: dict[str, Any]) -> str:
         f"event: {event}\n"
         f"data: {json.dumps(payload, ensure_ascii=False, default=_json_default)}\n\n"
     )
-
-
-def _n8n_auth_headers(
-    session: Session,
-    *,
-    user_id: int | None,
-    purpose: str,
-    extra_claims: dict[str, Any] | None = None,
-) -> dict[str, str]:
-    if user_id is None:
-        return {}
-
-    token = create_user_delegated_token(
-        session,
-        user_id=user_id,
-        audience=settings.N8N_TOKEN_AUDIENCE,
-        purpose=purpose,
-        extra_claims=extra_claims,
-    )
-    return {"Authorization": f"Bearer {token}"}
-
-
-def _n8n_auth_metadata(
-    *,
-    user_id: int | None,
-    purpose: str,
-) -> dict[str, Any]:
-    return {
-        "mode": "authorization_header",
-        "scheme": "Bearer",
-        "token_type": "delegated",
-        "audience": settings.N8N_TOKEN_AUDIENCE,
-        "purpose": purpose,
-        "user_id": user_id,
-    }
 
 
 def _get_owned_chat(session: Session, chat_id: int, user_id: int) -> Chat:
@@ -131,19 +99,22 @@ def _build_webhook_payload(
     text: str,
     metadata: dict[str, Any] | None,
     request_id: str,
-    auth_metadata: dict[str, Any] | None = None,
+    api_auth_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     session_id = _chat_session_id(chat)
     base_metadata = dict(metadata or {})
-    existing_auth_metadata = base_metadata.get("auth")
-    merged_auth_metadata: dict[str, Any] | None = None
-    if isinstance(existing_auth_metadata, dict):
-        merged_auth_metadata = dict(existing_auth_metadata)
-    elif auth_metadata:
-        merged_auth_metadata = {}
+    existing_api_auth_metadata = base_metadata.get("api_auth")
+    legacy_auth_metadata = base_metadata.get("auth")
+    merged_api_auth_metadata: dict[str, Any] | None = None
+    if isinstance(existing_api_auth_metadata, dict):
+        merged_api_auth_metadata = dict(existing_api_auth_metadata)
+    elif isinstance(legacy_auth_metadata, dict):
+        merged_api_auth_metadata = dict(legacy_auth_metadata)
+    elif api_auth_metadata:
+        merged_api_auth_metadata = {}
 
-    if merged_auth_metadata is not None and auth_metadata:
-        merged_auth_metadata.update(auth_metadata)
+    if merged_api_auth_metadata is not None and api_auth_metadata:
+        merged_api_auth_metadata.update(api_auth_metadata)
 
     base_metadata.update(
         {
@@ -152,8 +123,9 @@ def _build_webhook_payload(
             "request_id": request_id,
         }
     )
-    if merged_auth_metadata is not None:
-        base_metadata["auth"] = merged_auth_metadata
+    base_metadata.pop("auth", None)
+    if merged_api_auth_metadata is not None:
+        base_metadata["api_auth"] = merged_api_auth_metadata
     return {
         "action": "sendMessage",
         "sessionId": session_id,
@@ -357,19 +329,7 @@ def send_chat_message(
     agent = _resolve_chat_agent(session, chat)
     request_id = str(uuid.uuid4())
     session_id = _chat_session_id(chat)
-    auth_metadata = _n8n_auth_metadata(
-        user_id=chat.user_id,
-        purpose="n8n_chat_message",
-    )
-    webhook_payload = _build_webhook_payload(
-        chat,
-        text=normalized_text,
-        metadata=metadata,
-        request_id=request_id,
-        auth_metadata=auth_metadata,
-    )
-
-    headers = _n8n_auth_headers(
+    auth_token = issue_n8n_webhook_auth_token(
         session,
         user_id=chat.user_id,
         purpose="n8n_chat_message",
@@ -380,6 +340,20 @@ def send_chat_message(
             "session_id": session_id,
         },
     )
+    api_auth_metadata = build_n8n_api_auth_metadata(
+        user_id=chat.user_id,
+        purpose="n8n_chat_message",
+        token=auth_token,
+    )
+    webhook_payload = _build_webhook_payload(
+        chat,
+        text=normalized_text,
+        metadata=metadata,
+        request_id=request_id,
+        api_auth_metadata=api_auth_metadata,
+    )
+
+    headers = build_n8n_webhook_auth_headers(auth_token)
 
     try:
         with httpx.Client(timeout=DEFAULT_SEND_TIMEOUT) as client:
@@ -500,18 +474,7 @@ async def stream_chat_message(
     agent = _resolve_chat_agent(session, chat)
     request_id = str(uuid.uuid4())
     session_id = _chat_session_id(chat)
-    auth_metadata = _n8n_auth_metadata(
-        user_id=chat.user_id,
-        purpose="n8n_chat_stream",
-    )
-    webhook_payload = _build_webhook_payload(
-        chat,
-        text=normalized_text,
-        metadata=metadata,
-        request_id=request_id,
-        auth_metadata=auth_metadata,
-    )
-    headers = _n8n_auth_headers(
+    auth_token = issue_n8n_webhook_auth_token(
         session,
         user_id=chat.user_id,
         purpose="n8n_chat_stream",
@@ -522,6 +485,19 @@ async def stream_chat_message(
             "session_id": session_id,
         },
     )
+    api_auth_metadata = build_n8n_api_auth_metadata(
+        user_id=chat.user_id,
+        purpose="n8n_chat_stream",
+        token=auth_token,
+    )
+    webhook_payload = _build_webhook_payload(
+        chat,
+        text=normalized_text,
+        metadata=metadata,
+        request_id=request_id,
+        api_auth_metadata=api_auth_metadata,
+    )
+    headers = build_n8n_webhook_auth_headers(auth_token)
     headers["Accept"] = "text/plain"
 
     async def event_stream() -> AsyncIterator[str]:

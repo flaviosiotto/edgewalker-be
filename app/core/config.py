@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_AUDIENCE: str = "edgewalker-ui"
     REFRESH_TOKEN_AUDIENCE: str = "edgewalker-refresh"
     N8N_TOKEN_AUDIENCE: str = "edgewalker-n8n"
+    N8N_WEBHOOK_JWT_SHARED_SECRET: Optional[str] = None
+    N8N_WEBHOOK_JWT_ISSUER: Optional[str] = None
+    N8N_WEBHOOK_JWT_AUDIENCE: Optional[str] = None
+    N8N_WEBHOOK_JWT_EXPIRE_MINUTES: int = 15
     RUNNER_TOKEN_AUDIENCE: str = "edgewalker-runner"
     AGENT_TOKEN_AUDIENCE: str = "edgewalker-agent"
     DELEGATED_TOKEN_EXPIRE_MINUTES: int = 480
@@ -84,6 +88,14 @@ class Settings(BaseSettings):
             )
 
         return self.jwt_signing_key
+
+    @property
+    def n8n_webhook_jwt_issuer(self) -> str:
+        return self.N8N_WEBHOOK_JWT_ISSUER or self.JWT_ISSUER
+
+    @property
+    def n8n_webhook_jwt_audience(self) -> str:
+        return self.N8N_WEBHOOK_JWT_AUDIENCE or self.N8N_TOKEN_AUDIENCE
 
     class Config:
         case_sensitive = True
