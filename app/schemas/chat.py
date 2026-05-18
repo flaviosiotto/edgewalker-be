@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.agent import Chat
 
@@ -30,3 +30,37 @@ class ChatRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ChatHistoryMessageRead(BaseModel):
+    id: int
+    session_id: str
+    message: dict[str, Any]
+    text: str
+    message_type: Optional[str] = None
+    sender_kind: Optional[str] = None
+    sender_label: Optional[str] = None
+    timestamp: Optional[datetime] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    format: Optional[str] = None
+
+
+class ChatHistoryPage(BaseModel):
+    chat_id: int
+    session_id: str
+    items: list[ChatHistoryMessageRead]
+    limit: int
+    next_before: Optional[int] = None
+    has_more: bool
+
+
+class ChatSendMessageRequest(BaseModel):
+    text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatSendMessageResponse(BaseModel):
+    status: str
+    chat_id: int
+    session_id: str
+    request_id: Optional[str] = None
