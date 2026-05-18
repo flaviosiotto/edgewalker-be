@@ -28,6 +28,7 @@ from app.schemas.chat import ChatCreate
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
     build_n8n_webhook_auth_headers,
+    issue_n8n_api_access_token,
     issue_n8n_webhook_auth_token,
 )
 
@@ -715,7 +716,7 @@ def trigger_rule_agent(
     # Use provided webhook_url or fall back to agent's webhook
     target_webhook = webhook_url or agent.n8n_webhook
 
-    auth_token = issue_n8n_webhook_auth_token(
+    webhook_auth_token = issue_n8n_webhook_auth_token(
         session,
         user_id=chat.user_id,
         purpose="n8n_rule_trigger",
@@ -726,10 +727,21 @@ def trigger_rule_agent(
             "session_id": session_id,
         },
     )
+    api_auth_token, api_auth_expires_at = issue_n8n_api_access_token(
+        session,
+        user_id=chat.user_id,
+        purpose="n8n_rule_trigger_api_access",
+        extra_claims={
+            "agent_id": agent_id,
+            "chat_id": chat_id,
+            "session_id": session_id,
+        },
+    )
     api_auth_metadata = build_n8n_api_auth_metadata(
         user_id=chat.user_id,
-        purpose="n8n_rule_trigger",
-        token=auth_token,
+        purpose="n8n_rule_trigger_api_access",
+        token=api_auth_token,
+        expires_at=api_auth_expires_at,
     )
     
     # Build payload using the same sendMessage envelope as chat and runner flows.
@@ -755,7 +767,7 @@ def trigger_rule_agent(
             response = client.post(
                 target_webhook,
                 json=webhook_payload,
-                headers=build_n8n_webhook_auth_headers(auth_token),
+                headers=build_n8n_webhook_auth_headers(webhook_auth_token),
             )
             response.raise_for_status()
             return response.json() if response.text else {"status": "ok"}
@@ -951,7 +963,7 @@ def notify_manager_live_start(
     try:
         from app.services.live_runner_service import _rewrite_webhook_for_docker
         webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
-        auth_token = issue_n8n_webhook_auth_token(
+        webhook_auth_token = issue_n8n_webhook_auth_token(
             session,
             user_id=strategy.user_id,
             purpose="n8n_live_start",
@@ -962,16 +974,28 @@ def notify_manager_live_start(
                 "session_id": live_chat.n8n_session_id or "",
             },
         )
+        api_auth_token, api_auth_expires_at = issue_n8n_api_access_token(
+            session,
+            user_id=strategy.user_id,
+            purpose="n8n_live_start_api_access",
+            extra_claims={
+                "agent_id": agent.id_agent,
+                "chat_id": live_chat.id,
+                "strategy_id": strategy_id,
+                "session_id": live_chat.n8n_session_id or "",
+            },
+        )
         webhook_payload["metadata"]["api_auth"] = build_n8n_api_auth_metadata(
             user_id=strategy.user_id,
-            purpose="n8n_live_start",
-            token=auth_token,
+            purpose="n8n_live_start_api_access",
+            token=api_auth_token,
+            expires_at=api_auth_expires_at,
         )
         with httpx.Client(timeout=30.0) as client:
             response = client.post(
                 webhook_url,
                 json=webhook_payload,
-                headers=build_n8n_webhook_auth_headers(auth_token),
+                headers=build_n8n_webhook_auth_headers(webhook_auth_token),
             )
             response.raise_for_status()
             logger.info(
@@ -1044,7 +1068,7 @@ def post_manager_message(
                     },
                 }
                 try:
-                    auth_token = issue_n8n_webhook_auth_token(
+                    webhook_auth_token = issue_n8n_webhook_auth_token(
                         session,
                         user_id=live_chat.user_id,
                         purpose="n8n_manager_message",
@@ -1055,12 +1079,24 @@ def post_manager_message(
                             "session_id": live_chat.n8n_session_id or "",
                         },
                     )
+                    api_auth_token, api_auth_expires_at = issue_n8n_api_access_token(
+                        session,
+                        user_id=live_chat.user_id,
+                        purpose="n8n_manager_message_api_access",
+                        extra_claims={
+                            "agent_id": agent.id_agent,
+                            "chat_id": live_chat.id,
+                            "strategy_id": strategy_id,
+                            "session_id": live_chat.n8n_session_id or "",
+                        },
+                    )
                     webhook_payload["metadata"]["api_auth"] = build_n8n_api_auth_metadata(
                         user_id=live_chat.user_id,
-                        purpose="n8n_manager_message",
-                        token=auth_token,
+                        purpose="n8n_manager_message_api_access",
+                        token=api_auth_token,
+                        expires_at=api_auth_expires_at,
                     )
-                    headers = build_n8n_webhook_auth_headers(auth_token)
+                    headers = build_n8n_webhook_auth_headers(webhook_auth_token)
                     with httpx.Client(timeout=10.0) as client:
                         resp = client.post(webhook_url, json=webhook_payload, headers=headers)
                         resp.raise_for_status()

@@ -19,6 +19,7 @@ from app.services.live_runner_service import _rewrite_webhook_for_docker
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
     build_n8n_webhook_auth_headers,
+    issue_n8n_api_access_token,
     issue_n8n_webhook_auth_token,
 )
 
@@ -329,7 +330,7 @@ def send_chat_message(
     agent = _resolve_chat_agent(session, chat)
     request_id = str(uuid.uuid4())
     session_id = _chat_session_id(chat)
-    auth_token = issue_n8n_webhook_auth_token(
+    webhook_auth_token = issue_n8n_webhook_auth_token(
         session,
         user_id=chat.user_id,
         purpose="n8n_chat_message",
@@ -340,10 +341,21 @@ def send_chat_message(
             "session_id": session_id,
         },
     )
+    api_auth_token, api_auth_expires_at = issue_n8n_api_access_token(
+        session,
+        user_id=chat.user_id,
+        purpose="n8n_chat_api_access",
+        extra_claims={
+            "agent_id": agent.id_agent,
+            "chat_id": chat.id,
+            "session_id": session_id,
+        },
+    )
     api_auth_metadata = build_n8n_api_auth_metadata(
         user_id=chat.user_id,
-        purpose="n8n_chat_message",
-        token=auth_token,
+        purpose="n8n_chat_api_access",
+        token=api_auth_token,
+        expires_at=api_auth_expires_at,
     )
     webhook_payload = _build_webhook_payload(
         chat,
@@ -353,7 +365,7 @@ def send_chat_message(
         api_auth_metadata=api_auth_metadata,
     )
 
-    headers = build_n8n_webhook_auth_headers(auth_token)
+    headers = build_n8n_webhook_auth_headers(webhook_auth_token)
 
     try:
         with httpx.Client(timeout=DEFAULT_SEND_TIMEOUT) as client:
@@ -474,7 +486,7 @@ async def stream_chat_message(
     agent = _resolve_chat_agent(session, chat)
     request_id = str(uuid.uuid4())
     session_id = _chat_session_id(chat)
-    auth_token = issue_n8n_webhook_auth_token(
+    webhook_auth_token = issue_n8n_webhook_auth_token(
         session,
         user_id=chat.user_id,
         purpose="n8n_chat_stream",
@@ -485,10 +497,21 @@ async def stream_chat_message(
             "session_id": session_id,
         },
     )
+    api_auth_token, api_auth_expires_at = issue_n8n_api_access_token(
+        session,
+        user_id=chat.user_id,
+        purpose="n8n_chat_api_access",
+        extra_claims={
+            "agent_id": agent.id_agent,
+            "chat_id": chat.id,
+            "session_id": session_id,
+        },
+    )
     api_auth_metadata = build_n8n_api_auth_metadata(
         user_id=chat.user_id,
-        purpose="n8n_chat_stream",
-        token=auth_token,
+        purpose="n8n_chat_api_access",
+        token=api_auth_token,
+        expires_at=api_auth_expires_at,
     )
     webhook_payload = _build_webhook_payload(
         chat,
@@ -497,7 +520,7 @@ async def stream_chat_message(
         request_id=request_id,
         api_auth_metadata=api_auth_metadata,
     )
-    headers = build_n8n_webhook_auth_headers(auth_token)
+    headers = build_n8n_webhook_auth_headers(webhook_auth_token)
     headers["Accept"] = "text/plain"
 
     async def event_stream() -> AsyncIterator[str]:
