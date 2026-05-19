@@ -8,6 +8,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
 
 from app.core.config import settings
+from app.models.strategy import LiveStatus, StrategyLive
 from app.models.user import User
 from app.db.database import get_session
 
@@ -39,19 +40,19 @@ def _build_token_payload(
     *,
     token_type: str,
     audience: str,
-    expires_delta: timedelta,
+    expires_delta: Optional[timedelta],
     purpose: Optional[str] = None,
 ) -> dict[str, Any]:
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + expires_delta
     to_encode.update(
         {
             "aud": audience,
-            "exp": expire,
             "iss": settings.JWT_ISSUER,
             "type": token_type,
         }
     )
+    if expires_delta is not None:
+        to_encode["exp"] = datetime.now(timezone.utc) + expires_delta
     if purpose:
         to_encode["purpose"] = purpose
     return to_encode
@@ -94,12 +95,16 @@ def create_delegated_token(
     audience: str,
     purpose: str,
     expires_delta: Optional[timedelta] = None,
+    no_expiry: bool = False,
 ) -> str:
+    effective_expires_delta = None if no_expiry else (
+        expires_delta or timedelta(minutes=settings.DELEGATED_TOKEN_EXPIRE_MINUTES)
+    )
     payload = _build_token_payload(
         data,
         token_type="delegated",
         audience=audience,
-        expires_delta=expires_delta or timedelta(minutes=settings.DELEGATED_TOKEN_EXPIRE_MINUTES),
+        expires_delta=effective_expires_delta,
         purpose=purpose,
     )
     return _encode_token(payload)
@@ -227,13 +232,30 @@ async def get_current_runner_principal(
     if payload is None:
         raise credentials_exception
 
-    return _load_principal_from_payload(
+    principal = _load_principal_from_payload(
         payload,
         session,
         allowed_token_types={"delegated"},
         allowed_purposes={"runner_backend"},
         credentials_exception=credentials_exception,
     )
+
+    runner_live_id = principal.claims.get("live_id")
+    if runner_live_id is None:
+        raise _credentials_exception("Runner token is missing live session binding")
+
+    strategy_live = session.get(StrategyLive, runner_live_id)
+    if strategy_live is None:
+        raise _credentials_exception("Runner live session not found")
+
+    if strategy_live.status == LiveStatus.STOPPED.value:
+        raise _credentials_exception("Runner live session is no longer active")
+
+    runner_strategy_id = principal.claims.get("strategy_id")
+    if runner_strategy_id is not None and str(runner_strategy_id) != str(strategy_live.strategy_id):
+        raise _credentials_exception("Runner token does not match this strategy")
+
+    return principal
 
 
 async def get_current_active_or_runner_user(
@@ -266,6 +288,7 @@ def create_user_delegated_token(
     purpose: str,
     extra_claims: Optional[dict[str, Any]] = None,
     expires_delta: Optional[timedelta] = None,
+    no_expiry: bool = False,
 ) -> str:
     user = session.get(User, user_id)
     if user is None:
@@ -285,4 +308,5 @@ def create_user_delegated_token(
         audience=audience,
         purpose=purpose,
         expires_delta=expires_delta,
+        no_expiry=no_expiry,
     )

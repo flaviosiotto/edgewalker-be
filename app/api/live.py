@@ -545,6 +545,7 @@ async def _start_live_instance_internal(
         audience=settings.RUNNER_TOKEN_AUDIENCE,
         purpose="runner_backend",
         extra_claims={"strategy_id": strategy_id, "live_id": sl.id},
+        no_expiry=True,
     )
     manager_webhook_auth_token: str | None = None
     if strategy.manager_agent_id:
