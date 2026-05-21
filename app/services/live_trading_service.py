@@ -29,6 +29,7 @@ from app.models.live_trading import (
 from app.models.strategy import Strategy, StrategyLive
 from app.schemas.live_trading import (
     LiveOrderCreate,
+    LiveOrderRead,
     LiveOrderUpdate,
     LivePositionCreate,
     LivePositionUpdate,
@@ -150,7 +151,7 @@ def list_account_orders(
     status: str | None = None,
     active_only: bool = False,
     limit: int = 100,
-) -> list[LiveOrder]:
+) -> list[LiveOrderRead]:
     """List persisted orders for a broker account across all live sessions."""
     stmt = (
         select(LiveOrder)
@@ -170,9 +171,12 @@ def list_account_orders(
         stmt = stmt.where(LiveOrder.status == status)
 
     orders = list(session.exec(stmt).all())
+    if not orders:
+        return []
+
     live_ids = sorted({order.strategy_live_id for order in orders if order.strategy_live_id})
     if not live_ids:
-        return orders
+        return [LiveOrderRead.model_validate(order) for order in orders]
 
     strategy_name_rows = session.exec(
         select(StrategyLive.id, Strategy.name)
@@ -184,10 +188,12 @@ def list_account_orders(
         for live_id, strategy_name in strategy_name_rows
     }
 
-    for order in orders:
-        setattr(order, "strategy_name", strategy_names_by_live_id.get(order.strategy_live_id))
-
-    return orders
+    return [
+        LiveOrderRead.model_validate(order).model_copy(
+            update={"strategy_name": strategy_names_by_live_id.get(order.strategy_live_id)},
+        )
+        for order in orders
+    ]
 
 
 # ═════════════════════════════════════════════════════════════════════

@@ -78,4 +78,4 @@ def list_account_orders_endpoint(
         active_only=active_only,
         limit=limit,
     )
-    return [LiveOrderRead.model_validate(order) for order in orders]
+    return orders
