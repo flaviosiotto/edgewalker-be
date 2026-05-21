@@ -392,11 +392,10 @@ def _compute_live_performance_summary(session: Session, sl: StrategyLive) -> Liv
     )
 
 
-def _serialize_live_summary(session: Session, sl: StrategyLive) -> LiveStrategySummaryRead:
+def _build_live_summary_payload(session: Session, sl: StrategyLive) -> dict[str, Any]:
     strategy = session.get(Strategy, sl.strategy_id)
     account = session.get(Account, sl.account_id) if sl.account_id else None
     connection = session.get(Connection, sl.connection_id) if sl.connection_id else None
-    container_info = _load_container_info_for_live(sl)
 
     account_display: str | None = None
     if account is not None:
@@ -404,29 +403,47 @@ def _serialize_live_summary(session: Session, sl: StrategyLive) -> LiveStrategyS
         if connection is not None:
             account_display = f"{account_display} ({connection.name})"
 
+    return {
+        "id": sl.id,
+        "strategy_id": sl.strategy_id,
+        "strategy_name": strategy.name if strategy else f"Strategy {sl.strategy_id}",
+        "status": sl.status,
+        "symbol": sl.symbol,
+        "timeframe": sl.timeframe,
+        "account_id": sl.account_id,
+        "account_display": account_display,
+        "connection_id": sl.connection_id,
+        "connection_name": connection.name if connection else None,
+        "started_at": sl.started_at,
+        "stopped_at": sl.stopped_at,
+        "error_message": sl.error_message,
+        "performance_summary": _compute_live_performance_summary(session, sl),
+        "created_at": sl.created_at,
+        "updated_at": sl.updated_at,
+    }
+
+
+def _serialize_live_summary_from_payload(
+    sl: StrategyLive,
+    payload: dict[str, Any],
+    *,
+    container_info: dict[str, Any] | None = None,
+) -> LiveStrategySummaryRead:
+    resolved_container_info = container_info or _load_container_info_for_live(sl)
+
     return LiveStrategySummaryRead(
-        id=sl.id,
-        strategy_id=sl.strategy_id,
-        strategy_name=strategy.name if strategy else f"Strategy {sl.strategy_id}",
-        status=sl.status,
-        sync_state=_derive_sync_state(sl, container_info),
-        symbol=sl.symbol,
-        timeframe=sl.timeframe,
-        account_id=sl.account_id,
-        account_display=account_display,
-        connection_id=sl.connection_id,
-        connection_name=connection.name if connection else None,
-        container_id=container_info.get("container_id") or sl.container_id,
-        container_name=container_info.get("container_name"),
-        container_status=container_info.get("status"),
-        container_health=container_info.get("health_status"),
-        started_at=sl.started_at,
-        stopped_at=sl.stopped_at,
-        error_message=sl.error_message,
-        performance_summary=_compute_live_performance_summary(session, sl),
-        created_at=sl.created_at,
-        updated_at=sl.updated_at,
+        **payload,
+        sync_state=_derive_sync_state(sl, resolved_container_info),
+        container_id=resolved_container_info.get("container_id") or sl.container_id,
+        container_name=resolved_container_info.get("container_name"),
+        container_status=resolved_container_info.get("status"),
+        container_health=resolved_container_info.get("health_status"),
     )
+
+
+def _serialize_live_summary(session: Session, sl: StrategyLive) -> LiveStrategySummaryRead:
+    payload = _build_live_summary_payload(session, sl)
+    return _serialize_live_summary_from_payload(sl, payload)
 
 
 def _serialize_live_detail(session: Session, sl: StrategyLive) -> LiveStrategyDetailRead:
@@ -721,7 +738,9 @@ def list_live_instances(
 
     stmt = stmt.order_by(StrategyLive.started_at.desc(), StrategyLive.id.desc()).offset(offset).limit(limit)
     sessions = session.exec(stmt).all()
-    return [_serialize_live_summary(session, sl) for sl in sessions]
+    summary_payloads = [(sl, _build_live_summary_payload(session, sl)) for sl in sessions]
+    session.close()
+    return [_serialize_live_summary_from_payload(sl, payload) for sl, payload in summary_payloads]
 
 
 @router.get("/dashboard/overview", response_model=LiveDashboardOverviewRead)
@@ -826,7 +845,9 @@ def get_live_instance_status(
     current_user: User = Depends(get_current_active_user),
 ):
     sl = _get_live_or_404(session, live_id, current_user.id)
-    return _serialize_live_summary(session, sl)
+    payload = _build_live_summary_payload(session, sl)
+    session.close()
+    return _serialize_live_summary_from_payload(sl, payload)
 
 
 @router.get("/instances/{live_id}/logs")
