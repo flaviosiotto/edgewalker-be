@@ -521,25 +521,39 @@ async def _start_live_instance_internal(
         },
     )
 
-    recon_report = reconcile_on_startup(
-        session,
-        strategy_live_id=sl.id,
-        account_id=account_id,
-        broker_orders=broker_orders,
-        broker_positions=broker_positions,
-    )
-    _append_live_checkpoint(
-        session,
-        sl.id,
-        source="backend",
-        kind="pre_start_reconciliation",
-        message="Completed broker-aware reconciliation before runner start.",
-        details={
-            "items_count": len(recon_report.items),
-            "summary": recon_report.summary,
-            "issues": [item.issue for item in recon_report.items[:20]],
-        },
-    )
+    if settings.LIVE_RECONCILIATION_ENABLED:
+        recon_report = reconcile_on_startup(
+            session,
+            strategy_live_id=sl.id,
+            account_id=account_id,
+            broker_orders=broker_orders,
+            broker_positions=broker_positions,
+        )
+        _append_live_checkpoint(
+            session,
+            sl.id,
+            source="backend",
+            kind="pre_start_reconciliation",
+            message="Completed broker-aware reconciliation before runner start.",
+            details={
+                "items_count": len(recon_report.items),
+                "summary": recon_report.summary,
+                "issues": [item.issue for item in recon_report.items[:20]],
+            },
+        )
+    else:
+        _append_live_checkpoint(
+            session,
+            sl.id,
+            source="backend",
+            kind="pre_start_reconciliation_skipped",
+            message="Skipped backend reconciliation; runner will bootstrap broker state non-destructively from gateway sync.",
+            details={
+                "orders_count": len(broker_orders),
+                "positions_count": len(broker_positions),
+                "live_reconciliation_enabled": settings.LIVE_RECONCILIATION_ENABLED,
+            },
+        )
 
     manager_webhook_url: str | None = None
     manager_chat_session_id: str | None = live_chat.n8n_session_id
@@ -1313,6 +1327,20 @@ async def reconcile_session(
     only local DB state (cancels stale orders, etc.).
     """
     sl = _get_live_or_404(session, live_id, current_user.id)
+
+    if not settings.LIVE_RECONCILIATION_ENABLED:
+        _append_live_checkpoint(
+            session,
+            sl.id,
+            source="backend",
+            kind="manual_reconciliation_rejected",
+            message="Rejected manual reconciliation because reconciliation is currently disabled.",
+            details={"live_reconciliation_enabled": settings.LIVE_RECONCILIATION_ENABLED},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Live reconciliation is currently disabled. The runner relies on gateway snapshots and broker fill sync instead.",
+        )
 
     if broker_orders is None or broker_positions is None:
         if sl.account_id is None or sl.connection_id is None:

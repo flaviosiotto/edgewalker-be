@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: List[str] = []
 
     LOG_LEVEL: str = "INFO"
+    LIVE_RECONCILIATION_ENABLED: bool = False
     
     # Sync settings
     SYNC_POLL_INTERVAL_SECONDS: int = 60  # How often to check if sources need sync
