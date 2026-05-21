@@ -17,13 +17,16 @@ required in ConnectionManager itself.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import docker
+import redis.asyncio as aioredis
 from docker.errors import NotFound, APIError
 from sqlmodel import Session, select
 
@@ -73,6 +76,12 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+BROKER_SYNC_STREAM = os.getenv("BROKER_SYNC_STREAM", "events:broker-sync")
+BROKER_ACCOUNT_SYNC_EVENT = "broker.account.sync"
+BROKER_ACCOUNT_SYNC_GROUP = os.getenv("BROKER_ACCOUNT_SYNC_GROUP", "backend-account-sync")
+BROKER_ACCOUNT_SYNC_ENABLED = os.getenv("BROKER_ACCOUNT_SYNC_ENABLED", "true").lower() == "true"
+BROKER_ACCOUNT_SYNC_BLOCK_MS = max(100, int(os.getenv("BROKER_ACCOUNT_SYNC_BLOCK_MS", "1000")))
+BROKER_ACCOUNT_SYNC_COUNT = max(1, int(os.getenv("BROKER_ACCOUNT_SYNC_COUNT", "50")))
 CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS = max(
     0,
     int(os.getenv("CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS", "30")),
@@ -264,6 +273,67 @@ def _sync_accounts_from_gateway(
     _sync_accounts(session, connection_id, discovered)
 
 
+def _upsert_account_snapshot(
+    session: Session,
+    connection_id: int,
+    discovered: DiscoveredAccount,
+    *,
+    now: datetime | None = None,
+) -> Account:
+    now = now or datetime.now(timezone.utc)
+    stmt = (
+        select(Account)
+        .where(Account.connection_id == connection_id)
+        .where(Account.account_id == discovered.account_id)
+    )
+    acct = session.exec(stmt).first()
+
+    if acct is None:
+        acct = Account(
+            connection_id=connection_id,
+            account_id=discovered.account_id,
+            display_name=discovered.display_name,
+            account_type=discovered.account_type,
+            currency=discovered.currency,
+            cash_balance=discovered.cash_balance,
+            equity=discovered.equity,
+            buying_power=discovered.buying_power,
+            available_funds=discovered.available_funds,
+            snapshot_at=discovered.snapshot_at,
+            is_active=True,
+            extra=discovered.extra,
+        )
+        session.add(acct)
+        logger.info(
+            "Auto-discovered new account %s for connection %s",
+            discovered.account_id,
+            connection_id,
+        )
+        return acct
+
+    acct.is_active = True
+    if discovered.display_name:
+        acct.display_name = discovered.display_name
+    if discovered.account_type:
+        acct.account_type = discovered.account_type
+    if discovered.currency:
+        acct.currency = discovered.currency
+    if discovered.cash_balance is not None:
+        acct.cash_balance = discovered.cash_balance
+    if discovered.equity is not None:
+        acct.equity = discovered.equity
+    if discovered.buying_power is not None:
+        acct.buying_power = discovered.buying_power
+    if discovered.available_funds is not None:
+        acct.available_funds = discovered.available_funds
+    if discovered.snapshot_at is not None:
+        acct.snapshot_at = discovered.snapshot_at
+    if discovered.extra is not None:
+        acct.extra = discovered.extra
+    acct.updated_at = now
+    return acct
+
+
 def _sync_accounts(session: Session, connection_id: int, discovered: list[DiscoveredAccount]) -> None:
     """Upsert discovered accounts and deactivate stale ones."""
     now = datetime.now(timezone.utc)
@@ -276,46 +346,13 @@ def _sync_accounts(session: Session, connection_id: int, discovered: list[Discov
 
     # Upsert
     for d in discovered:
-        acct = existing_map.get(d.account_id)
-        if acct is None:
-            acct = Account(
-                connection_id=connection_id,
-                account_id=d.account_id,
-                display_name=d.display_name,
-                account_type=d.account_type,
-                currency=d.currency,
-                cash_balance=d.cash_balance,
-                equity=d.equity,
-                buying_power=d.buying_power,
-                available_funds=d.available_funds,
-                snapshot_at=d.snapshot_at,
-                is_active=True,
-                extra=d.extra,
-            )
-            session.add(acct)
-            logger.info("Auto-discovered new account %s for connection %s", d.account_id, connection_id)
-        else:
-            # Re-activate if it was previously deactivated
-            acct.is_active = True
-            if d.display_name:
-                acct.display_name = d.display_name
-            if d.account_type:
-                acct.account_type = d.account_type
-            if d.currency:
-                acct.currency = d.currency
-            if d.cash_balance is not None:
-                acct.cash_balance = d.cash_balance
-            if d.equity is not None:
-                acct.equity = d.equity
-            if d.buying_power is not None:
-                acct.buying_power = d.buying_power
-            if d.available_funds is not None:
-                acct.available_funds = d.available_funds
-            if d.snapshot_at is not None:
-                acct.snapshot_at = d.snapshot_at
-            if d.extra is not None:
-                acct.extra = d.extra
-            acct.updated_at = now
+        acct = _upsert_account_snapshot(
+            session,
+            connection_id,
+            d,
+            now=now,
+        )
+        existing_map[d.account_id] = acct
 
     # Deactivate accounts no longer present
     for acct_id, acct in existing_map.items():
@@ -375,6 +412,9 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._running = False
         self._tasks: list[asyncio.Task] = []
+        self._broker_account_sync_consumer = (
+            f"{BROKER_ACCOUNT_SYNC_GROUP}-{socket.gethostname()}-{os.getpid()}"
+        )
         self._client_portal_dispatcher_received_at: dict[int, datetime] = {}
         try:
             self._docker = docker.from_env()
@@ -385,6 +425,152 @@ class ConnectionManager:
                 _docker_runtime_requirements(),
             )
             self._docker = None
+
+    def _create_async_redis_client(self) -> aioredis.Redis:
+        if REDIS_URL:
+            return aioredis.from_url(REDIS_URL, decode_responses=True)
+        return aioredis.Redis(
+            host=REDIS_HOST,
+            port=int(REDIS_PORT),
+            username=REDIS_USERNAME or None,
+            password=REDIS_PASSWORD or None,
+            decode_responses=True,
+        )
+
+    async def _ensure_broker_account_sync_group(
+        self,
+        redis: aioredis.Redis,
+    ) -> None:
+        try:
+            await redis.xgroup_create(
+                BROKER_SYNC_STREAM,
+                BROKER_ACCOUNT_SYNC_GROUP,
+                id="$",
+                mkstream=True,
+            )
+            logger.info(
+                "Created broker account-sync consumer group '%s' on %s",
+                BROKER_ACCOUNT_SYNC_GROUP,
+                BROKER_SYNC_STREAM,
+            )
+        except aioredis.ResponseError as exc:
+            if "BUSYGROUP" not in str(exc):
+                raise
+
+    @staticmethod
+    def _build_discovered_account_from_sync_payload(
+        payload: dict[str, Any],
+    ) -> DiscoveredAccount | None:
+        account_id = str(payload.get("account") or payload.get("account_id") or "").strip()
+        if not account_id:
+            return None
+        return DiscoveredAccount(
+            account_id=account_id,
+            display_name=str(payload.get("display_name") or account_id),
+            account_type=str(payload.get("account_type") or "unknown"),
+            currency=str(payload.get("currency") or "USD"),
+            cash_balance=_safe_float(payload.get("cash_balance")),
+            equity=_safe_float(payload.get("equity")),
+            buying_power=_safe_float(payload.get("buying_power")),
+            available_funds=_safe_float(payload.get("available_funds")),
+            snapshot_at=_parse_snapshot_at(payload.get("snapshot_at")),
+            extra=payload.get("extra") if isinstance(payload.get("extra"), dict) else None,
+        )
+
+    async def _handle_broker_account_sync_payload(
+        self,
+        *,
+        connection_id: int,
+        payload: dict[str, Any],
+    ) -> None:
+        discovered = self._build_discovered_account_from_sync_payload(payload)
+        if discovered is None:
+            return
+
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                logger.debug(
+                    "Ignoring broker account sync for unknown connection_id=%s account=%s",
+                    connection_id,
+                    discovered.account_id,
+                )
+                return
+
+            _upsert_account_snapshot(session, connection_id, discovered)
+            session.commit()
+
+    async def _run_broker_account_sync_consumer(self) -> None:
+        redis = self._create_async_redis_client()
+        try:
+            await self._ensure_broker_account_sync_group(redis)
+            logger.info(
+                "Broker account-sync consumer started (group=%s consumer=%s)",
+                BROKER_ACCOUNT_SYNC_GROUP,
+                self._broker_account_sync_consumer,
+            )
+            while self._running:
+                try:
+                    results = await redis.xreadgroup(
+                        BROKER_ACCOUNT_SYNC_GROUP,
+                        self._broker_account_sync_consumer,
+                        {BROKER_SYNC_STREAM: ">"},
+                        count=BROKER_ACCOUNT_SYNC_COUNT,
+                        block=BROKER_ACCOUNT_SYNC_BLOCK_MS,
+                    )
+                    if not results:
+                        continue
+
+                    ack_ids: list[str] = []
+                    for _stream_name, messages in results:
+                        for msg_id, fields in messages:
+                            ack_ids.append(str(msg_id))
+                            if str(fields.get("event_type") or "") != BROKER_ACCOUNT_SYNC_EVENT:
+                                continue
+                            payload_raw = str(fields.get("payload") or "{}")
+                            try:
+                                payload = json.loads(payload_raw)
+                            except json.JSONDecodeError:
+                                logger.warning(
+                                    "Invalid broker account-sync payload JSON: connection_id=%s payload=%s",
+                                    fields.get("connection_id"),
+                                    payload_raw,
+                                )
+                                continue
+
+                            raw_connection_id = fields.get("connection_id") or payload.get("connection_id")
+                            try:
+                                connection_id = int(str(raw_connection_id))
+                            except (TypeError, ValueError):
+                                logger.warning(
+                                    "Ignoring broker account sync with invalid connection_id=%s",
+                                    raw_connection_id,
+                                )
+                                continue
+
+                            await self._handle_broker_account_sync_payload(
+                                connection_id=connection_id,
+                                payload=payload if isinstance(payload, dict) else {},
+                            )
+
+                    if ack_ids:
+                        await redis.xack(
+                            BROKER_SYNC_STREAM,
+                            BROKER_ACCOUNT_SYNC_GROUP,
+                            *ack_ids,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Broker account-sync consumer iteration failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(1.0)
+        finally:
+            await redis.aclose()
+            logger.info("Broker account-sync consumer stopped")
 
     def _clear_client_portal_dispatcher_grace(self, connection_id: int) -> None:
         self._client_portal_dispatcher_received_at.pop(connection_id, None)
@@ -1124,6 +1310,9 @@ class ConnectionManager:
         if self._running:
             return
         self._running = True
+
+        if BROKER_ACCOUNT_SYNC_ENABLED:
+            self._tasks.append(asyncio.create_task(self._run_broker_account_sync_consumer()))
 
         # On (re)start, no broker connections can be alive
         self._reset_connected_on_startup()

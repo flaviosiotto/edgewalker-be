@@ -18,6 +18,7 @@ from app.api.chats import router as chats_router
 from app.api.strategies import router as strategies_router
 from app.api.marketdata import router as marketdata_router
 from app.api.live import router as live_router
+from app.api.accounts import router as accounts_router
 from app.api.connections import router as connections_router
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
@@ -123,4 +124,5 @@ app.include_router(chats_router, dependencies=[Depends(get_current_active_user)]
 app.include_router(strategies_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(marketdata_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(live_router)
+app.include_router(accounts_router)
 app.include_router(connections_router, dependencies=[Depends(get_current_active_user)])

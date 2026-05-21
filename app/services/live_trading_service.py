@@ -142,6 +142,34 @@ def list_active_orders(session: Session, strategy_live_id: int) -> list[LiveOrde
     return list(session.exec(stmt).all())
 
 
+def list_account_orders(
+    session: Session,
+    account_id: int,
+    *,
+    status: str | None = None,
+    active_only: bool = False,
+    limit: int = 100,
+) -> list[LiveOrder]:
+    """List persisted orders for a broker account across all live sessions."""
+    stmt = (
+        select(LiveOrder)
+        .where(LiveOrder.account_id == account_id)
+        .order_by(LiveOrder.created_at.desc())  # type: ignore[union-attr]
+        .limit(limit)
+    )
+    if active_only:
+        stmt = stmt.where(
+            LiveOrder.status.in_([
+                OrderStatus.PENDING.value,
+                OrderStatus.SUBMITTED.value,
+                OrderStatus.PARTIALLY_FILLED.value,
+            ])
+        )  # type: ignore[union-attr]
+    elif status:
+        stmt = stmt.where(LiveOrder.status == status)
+    return list(session.exec(stmt).all())
+
+
 # ═════════════════════════════════════════════════════════════════════
 # FILLS
 # ═════════════════════════════════════════════════════════════════════

@@ -258,6 +258,27 @@ async def get_current_runner_principal(
     return principal
 
 
+async def get_current_consultative_principal(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+) -> AuthPrincipal:
+    credentials_exception = _credentials_exception("Could not validate consultative API credentials")
+    payload = decode_token_for_audiences(
+        token,
+        [settings.AGENT_TOKEN_AUDIENCE, settings.N8N_TOKEN_AUDIENCE],
+    )
+    if payload is None:
+        raise credentials_exception
+
+    return _load_principal_from_payload(
+        payload,
+        session,
+        allowed_token_types={"delegated"},
+        allowed_purposes={"agent_backend_consult", "n8n_backend_consult"},
+        credentials_exception=credentials_exception,
+    )
+
+
 async def get_current_active_or_runner_user(
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session),
@@ -278,6 +299,28 @@ async def get_current_active_or_runner_user(
     if not runner_principal.user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
     return runner_principal.user
+
+
+async def get_current_active_or_consultative_user(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+) -> User:
+    access_payload = decode_token(token, audience=settings.ACCESS_TOKEN_AUDIENCE)
+    if access_payload is not None:
+        user = _load_principal_from_payload(
+            access_payload,
+            session,
+            allowed_token_types={"access"},
+            credentials_exception=_credentials_exception(),
+        ).user
+        if not user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        return user
+
+    consultative_principal = await get_current_consultative_principal(token=token, session=session)
+    if not consultative_principal.user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return consultative_principal.user
 
 
 def create_user_delegated_token(

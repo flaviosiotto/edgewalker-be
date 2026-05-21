@@ -97,6 +97,10 @@ _DEFAULT_AGENT_RUNNER_SCOPES = [
     "runner:alerts:write",
     "runner:decision:write",
 ]
+_DEFAULT_AGENT_CONSULTATIVE_SCOPES = [
+    "accounts:read",
+    "account_orders:read",
+]
 
 
 def _clear_live_config(
@@ -1420,6 +1424,7 @@ class AgentApiTokenResponse(BaseModel):
     audience: str
     purpose: str
     scopes: list[str]
+    backend_api: dict[str, Any] | None = None
 
 
 @router.post("/sessions/{live_id}/agent-token", response_model=AgentApiTokenResponse)
@@ -1462,12 +1467,38 @@ def issue_live_agent_token_endpoint(
         },
     )
 
+    consultative_purpose = "agent_backend_consult"
+    consultative_token = create_user_delegated_token(
+        session,
+        user_id=runner_principal.user.id,
+        audience=settings.AGENT_TOKEN_AUDIENCE,
+        purpose=consultative_purpose,
+        expires_delta=expires_delta,
+        extra_claims={
+            "strategy_id": sl.strategy_id,
+            "live_id": sl.id,
+            "connection_id": sl.connection_id,
+            "account_id": sl.account_id,
+            "scopes": _DEFAULT_AGENT_CONSULTATIVE_SCOPES,
+        },
+    )
+
     return AgentApiTokenResponse(
         token=token,
         expires_at=expires_at,
         audience=settings.AGENT_TOKEN_AUDIENCE,
         purpose=purpose,
         scopes=list(_DEFAULT_AGENT_RUNNER_SCOPES),
+        backend_api={
+            "token": consultative_token,
+            "token_type": "Bearer",
+            "expires_at": expires_at,
+            "audience": settings.AGENT_TOKEN_AUDIENCE,
+            "purpose": consultative_purpose,
+            "scopes": list(_DEFAULT_AGENT_CONSULTATIVE_SCOPES),
+            "account_id": sl.account_id,
+            "connection_id": sl.connection_id,
+        },
     )
 
 
