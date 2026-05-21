@@ -57,6 +57,7 @@ class LiveOrderRead(BaseModel):
     """Response schema for a live order."""
     id: int
     strategy_live_id: int
+    strategy_name: str | None = None
     account_id: int | None = None
     broker_order_id: str | None = None
     symbol: str

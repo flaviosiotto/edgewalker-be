@@ -26,6 +26,7 @@ from app.models.live_trading import (
     OrderStatus,
     PositionStatus,
 )
+from app.models.strategy import Strategy, StrategyLive
 from app.schemas.live_trading import (
     LiveOrderCreate,
     LiveOrderUpdate,
@@ -167,7 +168,26 @@ def list_account_orders(
         )  # type: ignore[union-attr]
     elif status:
         stmt = stmt.where(LiveOrder.status == status)
-    return list(session.exec(stmt).all())
+
+    orders = list(session.exec(stmt).all())
+    live_ids = sorted({order.strategy_live_id for order in orders if order.strategy_live_id})
+    if not live_ids:
+        return orders
+
+    strategy_name_rows = session.exec(
+        select(StrategyLive.id, Strategy.name)
+        .join(Strategy, StrategyLive.strategy_id == Strategy.id)
+        .where(StrategyLive.id.in_(live_ids))  # type: ignore[union-attr]
+    ).all()
+    strategy_names_by_live_id = {
+        int(live_id): strategy_name
+        for live_id, strategy_name in strategy_name_rows
+    }
+
+    for order in orders:
+        setattr(order, "strategy_name", strategy_names_by_live_id.get(order.strategy_live_id))
+
+    return orders
 
 
 # ═════════════════════════════════════════════════════════════════════
