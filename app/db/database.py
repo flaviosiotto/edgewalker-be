@@ -23,6 +23,8 @@ engine = create_engine(
     pool_pre_ping=True
 )
 
+_MIGRATION_MANAGED_TABLES = {"orders", "fills", "positions"}
+
 
 def create_db_and_tables():
     from app.models.user import User  # noqa: F401
@@ -34,7 +36,12 @@ def create_db_and_tables():
     from app.models.live_trading import LiveOrder, LiveFill, LivePosition  # noqa: F401
     from app.models.marketdata import SymbolCache, SymbolSyncLog  # noqa: F401
 
-    SQLModel.metadata.create_all(engine)
+    bootstrap_tables = [
+        table
+        for table in SQLModel.metadata.sorted_tables
+        if table.name not in _MIGRATION_MANAGED_TABLES
+    ]
+    SQLModel.metadata.create_all(engine, tables=bootstrap_tables)
 
 
 def get_session():

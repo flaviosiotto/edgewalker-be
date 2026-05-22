@@ -1,8 +1,8 @@
-"""
-Live Trading Models: Orders, Trades, and Positions.
+"""Live trading projections for broker accounts.
 
-These tables persist the live trading state for strategies connected
-to broker accounts, enabling startup reconciliation and audit.
+The canonical scope of orders, fills, and positions is the broker account.
+`strategy_live_id` remains optional correlation metadata when a broker event
+can be linked back to a specific live session.
 """
 from __future__ import annotations
 
@@ -66,25 +66,25 @@ class LiveOrder(SQLModel, table=True):
 
     Tracks the full lifecycle: pending → submitted → filled/cancelled/rejected.
     """
-    __tablename__ = "live_orders"
+    __tablename__ = "orders"
     __allow_unmapped__ = True
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    strategy_live_id: int = Field(
-        sa_column=Column(
-            Integer,
-            ForeignKey("strategy_live.id", ondelete="CASCADE"),
-            nullable=False,
-            index=True,
-        )
-    )
-    account_id: Optional[int] = Field(
+    strategy_live_id: Optional[int] = Field(
         default=None,
         sa_column=Column(
             Integer,
-            ForeignKey("accounts.id", ondelete="SET NULL"),
+            ForeignKey("strategy_live.id", ondelete="SET NULL"),
             nullable=True,
+            index=True,
+        )
+    )
+    account_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("accounts.id", ondelete="CASCADE"),
+            nullable=False,
             index=True,
         ),
     )
@@ -166,25 +166,25 @@ class LiveFill(SQLModel, table=True):
     Each fill from the broker creates a LiveFill record.
     Multiple fills may belong to a single order (partial fills).
     """
-    __tablename__ = "live_fills"
+    __tablename__ = "fills"
     __allow_unmapped__ = True
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    strategy_live_id: int = Field(
-        sa_column=Column(
-            Integer,
-            ForeignKey("strategy_live.id", ondelete="CASCADE"),
-            nullable=False,
-            index=True,
-        )
-    )
-    account_id: Optional[int] = Field(
+    strategy_live_id: Optional[int] = Field(
         default=None,
         sa_column=Column(
             Integer,
-            ForeignKey("accounts.id", ondelete="SET NULL"),
+            ForeignKey("strategy_live.id", ondelete="SET NULL"),
             nullable=True,
+            index=True,
+        )
+    )
+    account_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("accounts.id", ondelete="CASCADE"),
+            nullable=False,
             index=True,
         ),
     )
@@ -192,7 +192,7 @@ class LiveFill(SQLModel, table=True):
         default=None,
         sa_column=Column(
             Integer,
-            ForeignKey("live_orders.id", ondelete="SET NULL"),
+            ForeignKey("orders.id", ondelete="SET NULL"),
             nullable=True,
             index=True,
         ),
@@ -241,25 +241,25 @@ class LivePosition(SQLModel, table=True):
 
     Tracks open and closed positions for reconciliation and audit.
     """
-    __tablename__ = "live_positions"
+    __tablename__ = "positions"
     __allow_unmapped__ = True
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    strategy_live_id: int = Field(
-        sa_column=Column(
-            Integer,
-            ForeignKey("strategy_live.id", ondelete="CASCADE"),
-            nullable=False,
-            index=True,
-        )
-    )
-    account_id: Optional[int] = Field(
+    strategy_live_id: Optional[int] = Field(
         default=None,
         sa_column=Column(
             Integer,
-            ForeignKey("accounts.id", ondelete="SET NULL"),
+            ForeignKey("strategy_live.id", ondelete="SET NULL"),
             nullable=True,
+            index=True,
+        )
+    )
+    account_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("accounts.id", ondelete="CASCADE"),
+            nullable=False,
             index=True,
         ),
     )

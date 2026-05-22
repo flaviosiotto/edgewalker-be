@@ -1,12 +1,8 @@
-"""
-Live Trading Service.
+"""Live trading read-side services and reporting helpers.
 
-CRUD operations for live orders, trades, and positions.
-Includes startup reconciliation logic to detect stale states
-between the broker account and the local database.
-
-All operations are keyed to a StrategyLive session (strategy_live_id),
-NOT directly to a Strategy.
+Canonical order, fill, and position writes are owned by the runtime
+order-aggregator service. Backend services should treat these tables as
+read-only projections.
 """
 from __future__ import annotations
 
@@ -49,6 +45,12 @@ from app.schemas.live_strategy import (
 logger = logging.getLogger(__name__)
 
 
+def _projection_write_disabled() -> None:
+    raise RuntimeError(
+        "live trading projection is read-only in the backend; order-aggregator owns writes"
+    )
+
+
 # ═════════════════════════════════════════════════════════════════════
 # ORDERS
 # ═════════════════════════════════════════════════════════════════════
@@ -60,27 +62,8 @@ def create_live_order(
     account_id: int | None,
     payload: LiveOrderCreate,
 ) -> LiveOrder:
-    """Create a new live order."""
-    order = LiveOrder(
-        strategy_live_id=strategy_live_id,
-        account_id=account_id,
-        symbol=payload.symbol,
-        side=payload.side,
-        order_type=payload.order_type,
-        quantity=payload.quantity,
-        limit_price=payload.limit_price,
-        stop_price=payload.stop_price,
-        broker_order_id=payload.broker_order_id,
-        extra=payload.extra,
-    )
-    session.add(order)
-    session.commit()
-    session.refresh(order)
-    logger.info(
-        "Created live order %s: %s %s %s qty=%s (strategy_live=%s)",
-        order.id, order.side, order.order_type, order.symbol, order.quantity, strategy_live_id,
-    )
-    return order
+    _ = (session, strategy_live_id, account_id, payload)
+    _projection_write_disabled()
 
 
 def update_live_order(
@@ -88,21 +71,8 @@ def update_live_order(
     order_id: int,
     payload: LiveOrderUpdate,
 ) -> LiveOrder | None:
-    """Update a live order (status, fill info, etc.)."""
-    order = session.get(LiveOrder, order_id)
-    if order is None:
-        return None
-
-    now = datetime.now(timezone.utc)
-    data = payload.model_dump(exclude_unset=True)
-    for key, value in data.items():
-        setattr(order, key, value)
-    order.updated_at = now
-
-    session.add(order)
-    session.commit()
-    session.refresh(order)
-    return order
+    _ = (session, order_id, payload)
+    _projection_write_disabled()
 
 
 def get_live_order(session: Session, order_id: int) -> LiveOrder | None:
@@ -207,29 +177,8 @@ def create_live_fill(
     account_id: int | None,
     payload: LiveFillCreate,
 ) -> LiveFill:
-    """Record a live fill (immutable event)."""
-    fill = LiveFill(
-        strategy_live_id=strategy_live_id,
-        account_id=account_id,
-        order_id=payload.order_id,
-        symbol=payload.symbol,
-        side=payload.side,
-        quantity=payload.quantity,
-        price=payload.price,
-        commission=payload.commission,
-        realized_pnl=payload.realized_pnl,
-        fill_time=payload.fill_time,
-        broker_fill_id=payload.broker_fill_id,
-        extra=payload.extra,
-    )
-    session.add(fill)
-    session.commit()
-    session.refresh(fill)
-    logger.info(
-        "Recorded live fill %s: %s %s qty=%s @%s (strategy_live=%s)",
-        fill.id, fill.side, fill.symbol, fill.quantity, fill.price, strategy_live_id,
-    )
-    return fill
+    _ = (session, strategy_live_id, account_id, payload)
+    _projection_write_disabled()
 
 
 def list_live_fills(
@@ -277,50 +226,8 @@ def upsert_position(
     account_id: int | None,
     payload: LivePositionCreate,
 ) -> LivePosition:
-    """Create or update an open position for the strategy_live+symbol+account."""
-    pos = get_open_position(session, strategy_live_id, payload.symbol, account_id)
-    now = datetime.now(timezone.utc)
-
-    if pos is None:
-        pos = LivePosition(
-            strategy_live_id=strategy_live_id,
-            account_id=account_id,
-            symbol=payload.symbol,
-            side=payload.side,
-            quantity=payload.quantity,
-            avg_price=payload.avg_price,
-            cost_basis=payload.cost_basis,
-            unrealized_pnl=payload.unrealized_pnl,
-            realized_pnl=payload.realized_pnl,
-            market_value=payload.market_value,
-            extra=payload.extra,
-        )
-        session.add(pos)
-    else:
-        pos.side = payload.side
-        pos.quantity = payload.quantity
-        if payload.avg_price is not None:
-            pos.avg_price = payload.avg_price
-        if payload.cost_basis is not None:
-            pos.cost_basis = payload.cost_basis
-        if payload.unrealized_pnl is not None:
-            pos.unrealized_pnl = payload.unrealized_pnl
-        if payload.realized_pnl is not None:
-            pos.realized_pnl = payload.realized_pnl
-        if payload.market_value is not None:
-            pos.market_value = payload.market_value
-        if payload.extra is not None:
-            pos.extra = payload.extra
-        pos.updated_at = now
-
-        # Close position if flat
-        if payload.side == "flat" or payload.quantity == 0:
-            pos.status = PositionStatus.CLOSED.value
-            pos.closed_at = now
-
-    session.commit()
-    session.refresh(pos)
-    return pos
+    _ = (session, strategy_live_id, account_id, payload)
+    _projection_write_disabled()
 
 
 def list_positions(

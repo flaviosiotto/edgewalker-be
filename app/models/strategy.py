@@ -278,25 +278,13 @@ class StrategyLive(SQLModel, table=True):
     )
 
     orders: list["LiveOrder"] = Relationship(
-        sa_relationship=relationship(
-            "LiveOrder",
-            back_populates="strategy_live",
-            cascade="all, delete-orphan",
-        )
+        sa_relationship=relationship("LiveOrder", back_populates="strategy_live")
     )
     fills: list["LiveFill"] = Relationship(
-        sa_relationship=relationship(
-            "LiveFill",
-            back_populates="strategy_live",
-            cascade="all, delete-orphan",
-        )
+        sa_relationship=relationship("LiveFill", back_populates="strategy_live")
     )
     positions: list["LivePosition"] = Relationship(
-        sa_relationship=relationship(
-            "LivePosition",
-            back_populates="strategy_live",
-            cascade="all, delete-orphan",
-        )
+        sa_relationship=relationship("LivePosition", back_populates="strategy_live")
     )
     alerts: list["LiveAlert"] = Relationship(
         sa_relationship=relationship(

@@ -56,7 +56,6 @@ from app.services.live_trading_service import (
     list_strategy_positions,
     list_strategy_fills,
     reconcile_on_startup,
-    update_live_order,
     validate_account_for_live,
 )
 from app.services.live_alert_service import (
@@ -1122,15 +1121,16 @@ def update_order(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Update a live order (status, fill info - manual corrections)."""
+    """Manual order mutation is disabled; order-aggregator owns projection writes."""
+    _ = payload
     existing_order = get_live_order(session, order_id)
     if existing_order is None:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
     _get_live_or_404(session, existing_order.strategy_live_id, current_user.id)
-    order = update_live_order(session, order_id, payload)
-    if order is None:
-        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
-    return LiveOrderRead.model_validate(order)
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Live order projection is read-only; order-aggregator owns writes",
+    )
 
 
 @router.get("/orders/{order_id}", response_model=LiveOrderRead)

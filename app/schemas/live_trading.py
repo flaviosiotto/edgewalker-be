@@ -56,9 +56,9 @@ class LiveOrderUpdate(BaseModel):
 class LiveOrderRead(BaseModel):
     """Response schema for a live order."""
     id: int
-    strategy_live_id: int
+    strategy_live_id: int | None = None
     strategy_name: str | None = None
-    account_id: int | None = None
+    account_id: int
     broker_order_id: str | None = None
     symbol: str
     side: str
@@ -103,8 +103,8 @@ class LiveFillCreate(BaseModel):
 class LiveFillRead(BaseModel):
     """Response schema for a live fill."""
     id: int
-    strategy_live_id: int
-    account_id: int | None = None
+    strategy_live_id: int | None = None
+    account_id: int
     order_id: int | None = None
     broker_fill_id: str | None = None
     symbol: str
@@ -154,8 +154,8 @@ class LivePositionUpdate(BaseModel):
 class LivePositionRead(BaseModel):
     """Response schema for a live position."""
     id: int
-    strategy_live_id: int
-    account_id: int | None = None
+    strategy_live_id: int | None = None
+    account_id: int
     symbol: str
     side: str
     quantity: float
