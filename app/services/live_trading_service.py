@@ -16,14 +16,16 @@ from sqlmodel import Session, select
 
 from app.models.connection import Account, Connection, ConnectionStatus
 from app.models.live_trading import (
+    LiveFill,
     LiveOrder,
     LivePosition,
-    LiveFill,
     OrderStatus,
     PositionStatus,
 )
 from app.models.strategy import Strategy, StrategyLive
 from app.schemas.live_trading import (
+    AccountPositionComparisonItemRead,
+    AccountPositionComparisonRead,
     LiveOrderCreate,
     LiveOrderRead,
     LiveOrderUpdate,
@@ -43,6 +45,15 @@ from app.schemas.live_strategy import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value in (None, "", "N/A"):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _projection_write_disabled() -> None:
@@ -197,6 +208,25 @@ def list_live_fills(
     return list(session.exec(stmt).all())
 
 
+def list_account_fills(
+    session: Session,
+    account_id: int,
+    *,
+    symbol: str | None = None,
+    limit: int = 200,
+) -> list[LiveFill]:
+    """List persisted fills for a broker account across all live sessions."""
+    stmt = (
+        select(LiveFill)
+        .where(LiveFill.account_id == account_id)
+        .order_by(LiveFill.fill_time.desc())  # type: ignore[union-attr]
+        .limit(limit)
+    )
+    if symbol:
+        stmt = stmt.where(LiveFill.symbol == symbol.upper())
+    return list(session.exec(stmt).all())
+
+
 # ═════════════════════════════════════════════════════════════════════
 # POSITIONS
 # ═════════════════════════════════════════════════════════════════════
@@ -252,6 +282,227 @@ def list_positions(
 def list_open_positions(session: Session, strategy_live_id: int) -> list[LivePosition]:
     """List all open positions for a strategy live session."""
     return list_positions(session, strategy_live_id, status=PositionStatus.OPEN.value)
+
+
+def list_account_positions(
+    session: Session,
+    account_id: int,
+    *,
+    symbol: str | None = None,
+    limit: int = 200,
+) -> list[LivePosition]:
+    """List broker-authoritative current positions for an account."""
+    stmt = (
+        select(LivePosition)
+        .where(LivePosition.account_id == account_id)
+        .order_by(LivePosition.symbol.asc(), LivePosition.position_key.asc())  # type: ignore[union-attr]
+        .limit(limit)
+    )
+    if symbol:
+        stmt = stmt.where(LivePosition.symbol == symbol.upper())
+    return list(session.exec(stmt).all())
+
+
+def compare_account_positions(
+    *,
+    account_id: int,
+    broker_account_id: str,
+    broker_type: str,
+    positions: list[LivePosition],
+    broker_positions: list[dict[str, Any]],
+) -> AccountPositionComparisonRead:
+    positions_by_key = {
+        str(position.position_key): {
+            "position_key": position.position_key,
+            "instrument_key": position.instrument_key,
+            "symbol": position.symbol,
+            "asset_type": position.asset_type,
+            "position_bucket": position.position_bucket,
+            "side": position.side,
+            "quantity": float(position.quantity),
+            "avg_price": position.avg_price,
+            "market_value": position.market_value,
+            "currency": position.currency,
+            "snapshot_id": position.snapshot_id,
+            "observed_at": position.observed_at.isoformat(),
+        }
+        for position in positions
+    }
+    broker_by_key = {
+        str(item["position_key"]): item
+        for item in [_normalise_broker_position_snapshot(raw, broker_type=broker_type) for raw in broker_positions]
+        if item is not None
+    }
+
+    mismatches: list[AccountPositionComparisonItemRead] = []
+    matched_count = 0
+
+    all_keys = sorted(set(positions_by_key.keys()) | set(broker_by_key.keys()))
+    for position_key in all_keys:
+        position_state = positions_by_key.get(position_key)
+        broker_state = broker_by_key.get(position_key)
+
+        if position_state is None:
+            mismatches.append(AccountPositionComparisonItemRead(
+                position_key=position_key,
+                issue="missing_in_projection",
+                position_state=None,
+                broker_state=broker_state,
+            ))
+            continue
+
+        if broker_state is None:
+            mismatches.append(AccountPositionComparisonItemRead(
+                position_key=position_key,
+                issue="missing_on_broker",
+                position_state=position_state,
+                broker_state=None,
+            ))
+            continue
+
+        issue = _compare_position_vs_broker_position(position_state, broker_state)
+        if issue is None:
+            matched_count += 1
+            continue
+
+        mismatches.append(AccountPositionComparisonItemRead(
+            position_key=position_key,
+            issue=issue,
+            position_state=position_state,
+            broker_state=broker_state,
+        ))
+
+    return AccountPositionComparisonRead(
+        account_id=account_id,
+        broker_account_id=broker_account_id,
+        broker_type=broker_type,
+        compared_at=datetime.now(timezone.utc),
+        position_count=len(positions_by_key),
+        broker_count=len(broker_by_key),
+        matched_count=matched_count,
+        mismatches=mismatches,
+    )
+
+
+def _compare_position_vs_broker_position(
+    position_state: dict[str, Any],
+    broker_state: dict[str, Any],
+) -> str | None:
+    if position_state.get("side") != broker_state.get("side"):
+        return "side_mismatch"
+    position_qty = _coerce_float(position_state.get("quantity")) or 0.0
+    broker_qty = _coerce_float(broker_state.get("quantity")) or 0.0
+    if abs(position_qty - broker_qty) > 1e-9:
+        return "quantity_mismatch"
+
+    position_avg = _coerce_float(position_state.get("avg_price"))
+    broker_avg = _coerce_float(broker_state.get("avg_price"))
+    if position_avg is None and broker_avg is None:
+        return None
+    if position_avg is None or broker_avg is None:
+        return "avg_price_mismatch"
+    if abs(position_avg - broker_avg) > 1e-9:
+        return "avg_price_mismatch"
+    return None
+    return None
+
+
+def _normalise_broker_position_snapshot(
+    raw_position: dict[str, Any],
+    *,
+    broker_type: str,
+) -> dict[str, Any] | None:
+    raw_qty = _coerce_float(raw_position.get("quantity")) or 0.0
+    if raw_qty > 0:
+        side = "long"
+        quantity = raw_qty
+    elif raw_qty < 0:
+        side = "short"
+        quantity = abs(raw_qty)
+    else:
+        side = "flat"
+        quantity = 0.0
+
+    symbol = str(raw_position.get("symbol") or "").strip().upper()
+    if not symbol:
+        return None
+
+    asset_type = _normalise_position_asset_type(raw_position)
+    currency = str(raw_position.get("currency") or "").strip().upper() or None
+    broker_instrument_id = str(
+        raw_position.get("broker_instrument_id")
+        or raw_position.get("instrument_id")
+        or raw_position.get("con_id")
+        or ""
+    ).strip() or None
+    market_type = str(raw_position.get("market_type") or "").strip().lower() or None
+    raw_position_bucket = str(
+        raw_position.get("position_bucket")
+        or raw_position.get("position_side")
+        or ""
+    ).strip().lower()
+    position_bucket = raw_position_bucket or "net"
+    instrument_key = _build_position_instrument_key(
+        broker_type=broker_type,
+        symbol=symbol,
+        asset_type=asset_type,
+        currency=currency,
+        broker_instrument_id=broker_instrument_id,
+        market_type=market_type,
+    )
+    return {
+        "position_key": f"{instrument_key}:{position_bucket}",
+        "instrument_key": instrument_key,
+        "symbol": symbol,
+        "asset_type": asset_type,
+        "position_bucket": position_bucket,
+        "side": side,
+        "quantity": quantity,
+        "avg_price": _coerce_float(raw_position.get("avg_price") or raw_position.get("avg_cost")),
+        "market_value": _coerce_float(raw_position.get("market_value")),
+        "currency": currency,
+    }
+
+
+def _normalise_position_asset_type(raw_position: dict[str, Any]) -> str | None:
+    sec_type = str(raw_position.get("sec_type") or raw_position.get("asset_type") or "").strip().lower()
+    if sec_type:
+        return sec_type
+
+    market_type = str(raw_position.get("market_type") or "").strip().lower()
+    if market_type:
+        return market_type
+
+    account = str(raw_position.get("account") or "").strip().lower()
+    if account in {"spot", "futures", "margin"}:
+        return account
+    return None
+
+
+def _build_position_instrument_key(
+    *,
+    broker_type: str,
+    symbol: str,
+    asset_type: str | None,
+    currency: str | None,
+    broker_instrument_id: str | None,
+    market_type: str | None,
+) -> str:
+    if broker_instrument_id:
+        return ":".join([
+            broker_type or "broker",
+            asset_type or market_type or "instrument",
+            broker_instrument_id,
+        ])
+
+    parts = [
+        broker_type or "broker",
+        asset_type or market_type or "instrument",
+        symbol or "unknown",
+    ]
+    if currency:
+        parts.append(currency)
+    return ":".join(parts)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -449,20 +700,6 @@ def get_live_dashboard_overview(
     )
     fills = list(session.exec(fills_stmt).all())
 
-    closed_positions_stmt = (
-        select(LivePosition)
-        .join(StrategyLive, LivePosition.strategy_live_id == StrategyLive.id)
-        .join(Strategy, StrategyLive.strategy_id == Strategy.id)
-        .where(Strategy.user_id == user_id)
-        .where(LivePosition.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
-        .where(LivePosition.status == PositionStatus.CLOSED.value)
-        .where(LivePosition.closed_at.is_not(None))
-        .where(LivePosition.closed_at >= range_start)
-        .where(LivePosition.closed_at < range_end)
-        .order_by(LivePosition.closed_at.asc())  # type: ignore[union-attr]
-    )
-    closed_positions = list(session.exec(closed_positions_stmt).all())
-
     open_positions_stmt = (
         select(LivePosition)
         .join(StrategyLive, LivePosition.strategy_live_id == StrategyLive.id)
@@ -539,53 +776,30 @@ def get_live_dashboard_overview(
         bucket["realized_pnl"] += realized_pnl
         bucket["commission"] += commission
         bucket["net_pnl"] += realized_pnl - commission
+        if fill.realized_pnl is not None:
+            bucket["trade_count"] += 1
+            if realized_pnl > 0:
+                bucket["winning_trades"] += 1
+            elif realized_pnl < 0:
+                bucket["losing_trades"] += 1
 
         item = account_breakdown[fill.account_id]
         item["realized_pnl"] += realized_pnl
         item["net_pnl"] += realized_pnl - commission
+        if fill.realized_pnl is not None:
+            item["total_trades"] += 1
+            if realized_pnl > 0:
+                item["winning_trades"] += 1
+            elif realized_pnl < 0:
+                item["losing_trades"] += 1
         if item["last_activity_at"] is None or fill.fill_time > item["last_activity_at"]:
             item["last_activity_at"] = fill.fill_time
-
-    for position in closed_positions:
-        if position.account_id is None or position.account_id not in account_breakdown:
-            continue
-        if position.closed_at is None:
-            continue
-
-        bucket_date = position.closed_at.astimezone(timezone.utc).date()
-        bucket = daily_buckets.setdefault(bucket_date, {
-            "realized_pnl": 0.0,
-            "commission": 0.0,
-            "net_pnl": 0.0,
-            "trade_count": 0,
-            "winning_trades": 0,
-            "losing_trades": 0,
-        })
-        bucket["trade_count"] += 1
-
-        realized_pnl = float(position.realized_pnl or 0.0)
-        if realized_pnl > 0:
-            bucket["winning_trades"] += 1
-        elif realized_pnl < 0:
-            bucket["losing_trades"] += 1
-
-        item = account_breakdown[position.account_id]
-        item["total_trades"] += 1
-        if realized_pnl > 0:
-            item["winning_trades"] += 1
-        elif realized_pnl < 0:
-            item["losing_trades"] += 1
-        if item["last_activity_at"] is None or position.closed_at > item["last_activity_at"]:
-            item["last_activity_at"] = position.closed_at
 
     for position in open_positions:
         if position.account_id is None or position.account_id not in account_breakdown:
             continue
-        unrealized_pnl = float(position.unrealized_pnl or 0.0)
         item = account_breakdown[position.account_id]
         item["open_positions"] += 1
-        item["unrealized_pnl"] += unrealized_pnl
-        item["net_pnl"] += unrealized_pnl
         if item["last_activity_at"] is None or position.updated_at > item["last_activity_at"]:
             item["last_activity_at"] = position.updated_at
 
@@ -756,8 +970,7 @@ def reconcile_on_startup(
 
     This function:
     1. Cancels stale local orders that are no longer active on the broker
-    2. Flags positions that differ between DB and broker
-    3. Syncs broker positions that are missing from DB
+    2. Flags positions that differ between the canonical projection and broker
 
     Args:
         strategy_live_id: The strategy_live session being started
@@ -857,13 +1070,7 @@ def reconcile_on_startup(
                 broker_state=None,
                 action_taken="closed",
             ))
-            db_pos.status = PositionStatus.CLOSED.value
-            db_pos.closed_at = now
-            db_pos.quantity = 0
-            db_pos.side = "flat"
-            db_pos.updated_at = now
-            db_pos.extra = {**(db_pos.extra or {}), "reconciled": True, "reconciled_at": now.isoformat()}
-            session.add(db_pos)
+            continue
         else:
             # Both exist — check for quantity / side mismatch
             broker_qty = broker_pos.get("quantity", 0)
@@ -885,16 +1092,9 @@ def reconcile_on_startup(
                         "quantity": broker_qty,
                         "avg_price": broker_avg,
                     },
-                    action_taken="synced_to_broker",
+                    action_taken="reported",
                 ))
-                # Sync to broker state (broker is source of truth)
-                db_pos.side = broker_side
-                db_pos.quantity = broker_qty
-                if broker_avg is not None:
-                    db_pos.avg_price = broker_avg
-                db_pos.updated_at = now
-                db_pos.extra = {**(db_pos.extra or {}), "reconciled": True, "reconciled_at": now.isoformat()}
-                session.add(db_pos)
+                continue
 
     # Check for broker positions not in DB
     for sym, bp in broker_pos_map.items():
@@ -912,22 +1112,8 @@ def reconcile_on_startup(
                         "quantity": broker_qty,
                         "avg_price": bp.get("avg_price"),
                     },
-                    action_taken="created",
+                    action_taken="reported",
                 ))
-                # Create position in DB to match broker
-                new_pos = LivePosition(
-                    strategy_live_id=strategy_live_id,
-                    account_id=account_id,
-                    symbol=sym,
-                    side=broker_side,
-                    quantity=broker_qty,
-                    avg_price=bp.get("avg_price"),
-                    cost_basis=bp.get("cost_basis"),
-                    unrealized_pnl=bp.get("unrealized_pnl"),
-                    market_value=bp.get("market_value"),
-                    extra={"reconciled": True, "reconciled_at": now.isoformat()},
-                )
-                session.add(new_pos)
 
     session.commit()
 

@@ -156,7 +156,14 @@ class LivePositionRead(BaseModel):
     id: int
     strategy_live_id: int | None = None
     account_id: int
+    connection_id: int | None = None
+    broker_account_id: str | None = None
+    broker_type: str | None = None
+    position_key: str | None = None
+    instrument_key: str | None = None
     symbol: str
+    asset_type: str | None = None
+    position_bucket: str | None = None
     side: str
     quantity: float
     avg_price: float | None = None
@@ -164,7 +171,10 @@ class LivePositionRead(BaseModel):
     unrealized_pnl: float | None = None
     realized_pnl: float | None = None
     market_value: float | None = None
+    currency: str | None = None
     status: str
+    snapshot_id: str | None = None
+    observed_at: datetime | None = None
     opened_at: datetime
     closed_at: datetime | None = None
     updated_at: datetime
@@ -180,6 +190,28 @@ class LivePositionRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AccountPositionComparisonItemRead(BaseModel):
+    """Single mismatch or missing-item entry when comparing projection vs broker."""
+
+    position_key: str
+    issue: str
+    position_state: dict[str, Any] | None = None
+    broker_state: dict[str, Any] | None = None
+
+
+class AccountPositionComparisonRead(BaseModel):
+    """Comparison report between projected positions and the live broker snapshot."""
+
+    account_id: int
+    broker_account_id: str
+    broker_type: str
+    compared_at: datetime
+    position_count: int
+    broker_count: int
+    matched_count: int
+    mismatches: list[AccountPositionComparisonItemRead]
 
 
 # ── Alert Schemas ────────────────────────────────────────────────────

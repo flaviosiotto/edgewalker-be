@@ -23,7 +23,7 @@ engine = create_engine(
     pool_pre_ping=True
 )
 
-_MIGRATION_MANAGED_TABLES = {"orders", "fills", "positions"}
+_MIGRATION_MANAGED_TABLES = {"orders", "fills", "account_positions"}
 
 
 def create_db_and_tables():

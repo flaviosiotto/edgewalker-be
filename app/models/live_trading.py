@@ -236,12 +236,8 @@ class LiveFill(SQLModel, table=True):
 
 
 class LivePosition(SQLModel, table=True):
-    """
-    Current or historical position held by a strategy on a broker account.
-
-    Tracks open and closed positions for reconciliation and audit.
-    """
-    __tablename__ = "positions"
+    """Broker-authoritative current position held on a broker account."""
+    __tablename__ = "account_positions"
     __allow_unmapped__ = True
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -263,36 +259,39 @@ class LivePosition(SQLModel, table=True):
             index=True,
         ),
     )
+    connection_id: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True, index=True))
+    broker_account_id: str = Field(sa_column=Column(String(64), nullable=False, index=True))
+    broker_type: str = Field(sa_column=Column(String(32), nullable=False, index=True))
+    position_key: str = Field(sa_column=Column(String(255), nullable=False, index=True))
+    instrument_key: str = Field(sa_column=Column(String(255), nullable=False))
 
     # Position details
-    symbol: str = Field(sa_column=Column(String(32), nullable=False, index=True))
+    symbol: str = Field(sa_column=Column(String(64), nullable=False, index=True))
+    asset_type: Optional[str] = Field(default=None, sa_column=Column(String(32), nullable=True, index=True))
+    position_bucket: str = Field(default="net", sa_column=Column(String(32), nullable=False))
     side: str = Field(
         default=PositionSide.FLAT.value,
         sa_column=Column(String(10), nullable=False),
     )
     quantity: float = Field(default=0.0, sa_column=Column(Float, nullable=False))
     avg_price: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
-    cost_basis: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
-
-    # P&L
-    unrealized_pnl: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
-    realized_pnl: Optional[float] = Field(default=0.0, sa_column=Column(Float, nullable=True))
     market_value: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    currency: Optional[str] = Field(default=None, sa_column=Column(String(16), nullable=True))
 
     # Status
     status: str = Field(
         default=PositionStatus.OPEN.value,
         sa_column=Column(String(10), nullable=False, index=True),
     )
+    snapshot_id: str = Field(sa_column=Column(String(255), nullable=False, index=True))
+    observed_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
+    )
 
     # Timestamps
     opened_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),
-    )
-    closed_at: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column(DateTime(timezone=True), nullable=True),
     )
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
@@ -306,3 +305,21 @@ class LivePosition(SQLModel, table=True):
     strategy_live: Optional["StrategyLive"] = Relationship(
         sa_relationship=relationship("StrategyLive", back_populates="positions")
     )
+
+    @property
+    def cost_basis(self) -> float | None:
+        if self.avg_price is None:
+            return None
+        return float(self.avg_price) * float(self.quantity or 0.0)
+
+    @property
+    def realized_pnl(self) -> float:
+        return 0.0
+
+    @property
+    def unrealized_pnl(self) -> float | None:
+        return None
+
+    @property
+    def closed_at(self) -> datetime | None:
+        return None

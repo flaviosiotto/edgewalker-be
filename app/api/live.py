@@ -363,12 +363,12 @@ def _compute_live_performance_summary(session: Session, sl: StrategyLive) -> Liv
     ).all()
 
     open_positions = [pos for pos in positions if pos.status == PositionStatus.OPEN.value]
-    closed_positions = [pos for pos in positions if pos.status == PositionStatus.CLOSED.value]
+    realized_fills = [fill for fill in fills if fill.realized_pnl is not None]
 
-    realized_pnl = sum((pos.realized_pnl or 0.0) for pos in closed_positions)
-    unrealized_pnl = sum((pos.unrealized_pnl or 0.0) for pos in open_positions)
-    total_trades = len(closed_positions)
-    wins = sum(1 for pos in closed_positions if (pos.realized_pnl or 0.0) > 0)
+    realized_pnl = sum((fill.realized_pnl or 0.0) for fill in realized_fills)
+    unrealized_pnl = 0.0
+    total_trades = len(realized_fills)
+    wins = sum(1 for fill in realized_fills if (fill.realized_pnl or 0.0) > 0)
     win_rate = (wins / total_trades * 100.0) if total_trades else None
     position_side = open_positions[0].side if open_positions else "flat"
 
@@ -663,20 +663,6 @@ def _stop_live_instance_internal(
             "Failed to clear config-live Hash for live instance %s: %s",
             sl.id, lt_err,
         )
-
-    open_positions = session.exec(
-        select(LivePosition)
-        .where(LivePosition.strategy_live_id == sl.id)
-        .where(LivePosition.status == PositionStatus.OPEN.value)
-    ).all()
-    for pos in open_positions:
-        pos.status = PositionStatus.CLOSED.value
-        pos.side = "flat"
-        pos.quantity = 0
-        pos.closed_at = datetime.now(timezone.utc)
-        pos.updated_at = datetime.now(timezone.utc)
-        pos.extra = {**(pos.extra or {}), "closed_by": "backend_stop"}
-        session.add(pos)
 
     sl.status = LiveStatus.STOPPED.value
     sl.container_id = None
@@ -1258,8 +1244,12 @@ def _enrich_position(pos) -> LivePositionRead:
     # Extract total commission from position extra
     total_comm = (pos.extra or {}).get("total_commission", 0) or 0
     data.total_commission = total_comm
-
-    data.net_pnl = (pos.realized_pnl or 0) - total_comm
+    if data.cost_basis is None and data.avg_price is not None:
+        data.cost_basis = float(data.avg_price) * float(data.quantity)
+    data.realized_pnl = 0.0
+    data.unrealized_pnl = None
+    data.computed_market_value = data.market_value
+    data.net_pnl = -total_comm if total_comm else 0.0
 
     return data
 
@@ -1299,7 +1289,7 @@ def list_all_strategy_fills(
 @router.get("/strategies/{strategy_id}/positions", response_model=list[LivePositionRead])
 def list_all_strategy_positions(
     strategy_id: int,
-    status: str | None = Query(None, description="Filter by status: open/closed"),
+    status: str | None = Query(None, description="Filter by status: current positions are always open"),
     limit: int = Query(200, ge=1, le=2000),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
