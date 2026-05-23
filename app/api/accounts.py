@@ -10,19 +10,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session
 
 from app.db.database import get_session
-from app.models.connection import Connection
 from app.models.user import User
 from app.schemas.connection import AccountListResponse, AccountRead
 from app.schemas.live_trading import (
-    AccountPositionComparisonRead,
     LiveFillRead,
     LiveOrderRead,
     LivePositionRead,
 )
-from app.services.connection_service import get_account, get_connection, list_accounts, list_all_accounts
-from app.services.gateway_client import GatewayClient
+from app.services.connection_service import get_account, list_accounts, list_all_accounts
 from app.services.live_trading_service import (
-    compare_account_positions,
     list_account_fills,
     list_account_orders,
     list_account_positions,
@@ -133,44 +129,3 @@ def list_account_positions_endpoint(
         limit=limit,
     )
     return [LivePositionRead.model_validate(position) for position in positions]
-
-
-@router.get("/{account_id}/positions/compare", response_model=AccountPositionComparisonRead)
-async def compare_account_positions_endpoint(
-    account_id: int,
-    symbol: str | None = Query(default=None),
-    limit: int = Query(default=200, ge=1, le=1000),
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_or_consultative_user),
-):
-    account = get_account(session, account_id, current_user.id)
-    if account is None:
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    connection = get_connection(session, account.connection_id, current_user.id)
-    if connection is None:
-        raise HTTPException(status_code=404, detail="Connection not found")
-
-    positions = list_account_positions(
-        session,
-        account.id,
-        symbol=symbol,
-        limit=limit,
-    )
-
-    client = GatewayClient(connection.id, broker_type=connection.broker_type)
-    broker_positions = await client.list_positions(account=account.account_id)
-    if symbol:
-        expected_symbol = symbol.upper()
-        broker_positions = [
-            position for position in broker_positions
-            if str(position.get("symbol") or "").strip().upper() == expected_symbol
-        ]
-
-    return compare_account_positions(
-        account_id=account.id,
-        broker_account_id=account.account_id,
-        broker_type=connection.broker_type,
-        positions=positions,
-        broker_positions=broker_positions,
-    )

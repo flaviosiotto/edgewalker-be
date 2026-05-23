@@ -192,28 +192,6 @@ class LivePositionRead(BaseModel):
         from_attributes = True
 
 
-class AccountPositionComparisonItemRead(BaseModel):
-    """Single mismatch or missing-item entry when comparing projection vs broker."""
-
-    position_key: str
-    issue: str
-    position_state: dict[str, Any] | None = None
-    broker_state: dict[str, Any] | None = None
-
-
-class AccountPositionComparisonRead(BaseModel):
-    """Comparison report between projected positions and the live broker snapshot."""
-
-    account_id: int
-    broker_account_id: str
-    broker_type: str
-    compared_at: datetime
-    position_count: int
-    broker_count: int
-    matched_count: int
-    mismatches: list[AccountPositionComparisonItemRead]
-
-
 # ── Alert Schemas ────────────────────────────────────────────────────
 
 
