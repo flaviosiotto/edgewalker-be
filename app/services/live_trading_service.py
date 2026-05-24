@@ -22,7 +22,7 @@ from app.models.live_trading import (
     OrderStatus,
     PositionStatus,
 )
-from app.models.strategy import Strategy, StrategyLive
+from app.models.strategy import LiveStatus, Strategy, StrategyLive
 from app.schemas.live_trading import (
     LiveOrderCreate,
     LiveOrderRead,
