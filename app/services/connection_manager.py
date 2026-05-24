@@ -1158,9 +1158,21 @@ class ConnectionManager:
             try:
                 client = self.get_gateway_client(connection_id, broker_type)
                 is_alive = await client.is_connected()
-                actual = ConnectionStatus.CONNECTED if is_alive else ConnectionStatus.DISCONNECTED
+                if is_alive:
+                    actual = ConnectionStatus.CONNECTED
+                elif stored_status == ConnectionStatus.CONNECTING.value:
+                    # Preserve an in-flight connect attempt while the gateway
+                    # container is still alive; the explicit connect() flow
+                    # will promote to CONNECTED or fail to ERROR on timeout.
+                    actual = ConnectionStatus.CONNECTING
+                else:
+                    actual = ConnectionStatus.DISCONNECTED
             except Exception:
-                actual = ConnectionStatus.DISCONNECTED
+                actual = (
+                    ConnectionStatus.CONNECTING
+                    if stored_status == ConnectionStatus.CONNECTING.value
+                    else ConnectionStatus.DISCONNECTED
+                )
 
         status_changed = actual.value != stored_status
 
