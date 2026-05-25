@@ -230,6 +230,11 @@ class GatewayClient:
         resp = await self._get("/orders")
         return resp.get("orders", [])
 
+    async def reread_orders(self, since: str | None = None) -> dict:
+        """Reset the gateway order-history checkpoint and force a reread."""
+        payload = {"since": since} if since else None
+        return await self._post("/orders/reread", json=payload)
+
     async def list_positions(self, account: str | None = None) -> list[dict]:
         """List current positions from the gateway (for reconciliation)."""
         params = {"account": account} if account else None

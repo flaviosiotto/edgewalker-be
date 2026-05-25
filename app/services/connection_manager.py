@@ -199,6 +199,30 @@ def _binance_env(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def resolve_order_history_lookback_hours(
+    config: dict[str, Any] | None,
+    *,
+    default_hours: int = 24,
+) -> int:
+    raw_value = (config or {}).get("order_history_lookback_hours")
+    if raw_value in (None, ""):
+        return default_hours
+
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return default_hours
+
+    return max(parsed, 1)
+
+
+def _broker_sync_env(config: dict[str, Any]) -> dict[str, str]:
+    lookback_hours = resolve_order_history_lookback_hours(config)
+    return {
+        "BROKER_SYNC_HISTORY_LOOKBACK_S": str(lookback_hours * 3600),
+    }
+
+
 @dataclass
 class GatewaySpec:
     """Specification for a broker gateway Docker container."""
@@ -785,6 +809,7 @@ class ConnectionManager:
             env["REDIS_USERNAME"] = REDIS_USERNAME
         if REDIS_PASSWORD:
             env["REDIS_PASSWORD"] = REDIS_PASSWORD
+        env.update(_broker_sync_env(config))
         # Broker-specific env vars (from registry)
         env.update(spec.env_mapper(config))
 

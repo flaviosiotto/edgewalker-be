@@ -9,11 +9,12 @@ gateway container.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -42,6 +43,7 @@ from app.services.connection_service import (
 )
 from app.services.client_portal_service import is_client_portal_transport
 from app.services.connection_manager import get_connection_manager
+from app.services.connection_manager import resolve_order_history_lookback_hours
 from app.utils.auth_utils import get_current_active_user
 
 logger = logging.getLogger(__name__)
@@ -180,6 +182,19 @@ class ClientPortalFlowSignalResponse(BaseModel):
     message: str | None = None
 
 
+class OrdersRereadRequest(BaseModel):
+    lookback_hours: int | None = Field(default=None, ge=1, le=24 * 90)
+
+
+class OrdersRereadResponse(BaseModel):
+    success: bool
+    connection_id: int
+    orders_since: datetime
+    published_count: int = 0
+    latest_event_at: datetime | None = None
+    message: str | None = None
+
+
 @router.post("/{connection_id}/connect", response_model=ConnectDisconnectResponse)
 async def connect_endpoint(
     connection_id: int,
@@ -291,6 +306,61 @@ async def disconnect_endpoint(
     return ConnectDisconnectResponse(
         success=result.success,
         message=result.message,
+    )
+
+
+@router.post("/{connection_id}/orders/reread", response_model=OrdersRereadResponse)
+async def reread_orders_endpoint(
+    connection_id: int,
+    payload: OrdersRereadRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    conn = get_connection(session, connection_id, current_user.id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    manager = get_connection_manager()
+    status_value = await manager.check_connection_status(connection_id)
+    if status_value != "connected":
+        raise HTTPException(
+            status_code=409,
+            detail="Connection must be connected to reread orders",
+        )
+
+    lookback_hours = payload.lookback_hours or resolve_order_history_lookback_hours(conn.config)
+    orders_since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+
+    try:
+        client = manager.get_gateway_client(connection_id, conn.broker_type)
+        result = await client.reread_orders(since=orders_since.isoformat())
+    except Exception as exc:
+        logger.warning(
+            "Failed to trigger order reread for connection %s: %s",
+            connection_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to trigger order reread: {exc}",
+        ) from exc
+
+    latest_event_at_raw = result.get("latest_event_at")
+    latest_event_at = None
+    if isinstance(latest_event_at_raw, str):
+        latest_event_at = datetime.fromisoformat(latest_event_at_raw)
+
+    return OrdersRereadResponse(
+        success=bool(result.get("success", True)),
+        connection_id=connection_id,
+        orders_since=orders_since,
+        published_count=int(result.get("published_count") or 0),
+        latest_event_at=latest_event_at,
+        message=(
+            f"Triggered order reread from the last {lookback_hours}h"
+            if result.get("success", True)
+            else "Gateway did not accept the order reread request"
+        ),
     )
 
 
