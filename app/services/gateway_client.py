@@ -230,19 +230,19 @@ class GatewayClient:
         resp = await self._get("/orders")
         return resp.get("orders", [])
 
-        async def reread_orders(
-                self,
-                since: str | None = None,
-                *,
-                account: str | None = None,
-                persist_checkpoint: bool = True,
-        ) -> dict:
-                """Trigger a gateway-side order reread, optionally scoped to one broker account."""
-                payload: dict[str, Any] = {"persist_checkpoint": persist_checkpoint}
-                if since:
-                    payload["since"] = since
-                if account:
-                    payload["account"] = account
+    async def reread_orders(
+        self,
+        since: str | None = None,
+        *,
+        account: str | None = None,
+        persist_checkpoint: bool = True,
+    ) -> dict:
+        """Trigger a gateway-side order reread, optionally scoped to one broker account."""
+        payload: dict[str, Any] = {"persist_checkpoint": persist_checkpoint}
+        if since:
+            payload["since"] = since
+        if account:
+            payload["account"] = account
         return await self._post("/orders/reread", json=payload)
 
     async def list_positions(self, account: str | None = None) -> list[dict]:
