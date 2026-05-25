@@ -6,7 +6,10 @@ APIs or connection-management routes.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -18,14 +21,32 @@ from app.schemas.live_trading import (
     LivePositionRead,
 )
 from app.services.connection_service import get_account, list_accounts, list_all_accounts
+from app.services.connection_service import get_connection
+from app.services.connection_manager import get_connection_manager, resolve_order_history_lookback_hours
 from app.services.live_trading_service import (
     list_account_fills,
     list_account_orders,
     list_account_positions,
+    purge_account_orders,
 )
 from app.utils.auth_utils import get_current_active_or_consultative_user
 
 router = APIRouter(prefix="/accounts", tags=["Accounts"])
+
+
+class AccountOrdersResetRequest(BaseModel):
+    lookback_hours: int | None = Field(default=None, ge=1, le=24 * 90)
+
+
+class AccountOrdersResetResponse(BaseModel):
+    success: bool
+    account_id: int
+    connection_id: int
+    deleted_count: int
+    orders_since: datetime
+    published_count: int = 0
+    latest_event_at: datetime | None = None
+    message: str | None = None
 
 
 @router.get("/", response_model=AccountListResponse)
@@ -87,6 +108,65 @@ def list_account_orders_endpoint(
         limit=limit,
     )
     return orders
+
+
+@router.post("/{account_id}/orders/reset", response_model=AccountOrdersResetResponse)
+async def reset_account_orders_endpoint(
+    account_id: int,
+    payload: AccountOrdersResetRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    connection = get_connection(session, account.connection_id, current_user.id)
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    manager = get_connection_manager()
+    status_value = await manager.check_connection_status(connection.id)
+    if status_value != "connected":
+        raise HTTPException(
+            status_code=409,
+            detail="Connection must be connected to reset account orders",
+        )
+
+    lookback_hours = payload.lookback_hours or resolve_order_history_lookback_hours(connection.config)
+    orders_since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    deleted_count = purge_account_orders(session, account.id)
+
+    try:
+        client = manager.get_gateway_client(connection.id, connection.broker_type)
+        result = await client.reread_orders(
+            since=orders_since.isoformat(),
+            account=account.account_id,
+            persist_checkpoint=False,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to reload account orders from broker: {exc}",
+        ) from exc
+
+    latest_event_at_raw = result.get("latest_event_at")
+    latest_event_at = None
+    if isinstance(latest_event_at_raw, str):
+        latest_event_at = datetime.fromisoformat(latest_event_at_raw)
+
+    return AccountOrdersResetResponse(
+        success=bool(result.get("success", True)),
+        account_id=account.id,
+        connection_id=connection.id,
+        deleted_count=deleted_count,
+        orders_since=orders_since,
+        published_count=int(result.get("published_count") or 0),
+        latest_event_at=latest_event_at,
+        message=(
+            f"Deleted {deleted_count} persisted orders and triggered a broker reread for account {account.account_id}"
+        ),
+    )
 
 
 @router.get("/{account_id}/fills", response_model=list[LiveFillRead])

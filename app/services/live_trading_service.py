@@ -12,6 +12,7 @@ import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from app.models.connection import Account, Connection, ConnectionStatus
@@ -173,6 +174,21 @@ def list_account_orders(
         )
         for order in orders
     ]
+
+
+def purge_account_orders(session: Session, account_id: int) -> int:
+    """Delete persisted orders for one broker account without dropping fills."""
+    order_ids = list(session.exec(
+        select(LiveOrder.id).where(LiveOrder.account_id == account_id)
+    ).all())
+    if not order_ids:
+        return 0
+
+    session.exec(
+        delete(LiveOrder).where(LiveOrder.account_id == account_id)
+    )
+    session.commit()
+    return len(order_ids)
 
 
 # ═════════════════════════════════════════════════════════════════════
