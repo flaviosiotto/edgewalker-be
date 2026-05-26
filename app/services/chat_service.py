@@ -225,6 +225,8 @@ def _default_sender_kind(message_type: str | None) -> str | None:
         return "user"
     if message_type == "ai":
         return "agent"
+    if message_type == "tool":
+        return "tool_result"
     return message_type
 
 
@@ -235,15 +237,55 @@ def _default_sender_label(sender_kind: str | None) -> str | None:
         return "Agent"
     if sender_kind == "system":
         return "System"
+    if sender_kind in ("tool_call", "tool_result"):
+        return "Tool"
     return None
+
+
+def _summarize_tool_calls(tool_calls: list[Any]) -> list[dict[str, Any]]:
+    """Strip noisy fields from LangChain tool_calls for the frontend."""
+    out: list[dict[str, Any]] = []
+    for call in tool_calls or []:
+        if not isinstance(call, dict):
+            continue
+        out.append(
+            {
+                "id": call.get("id"),
+                "name": call.get("name"),
+                "args": call.get("args"),
+            }
+        )
+    return out
 
 
 def _serialize_history_message(entry: N8nChatHistory) -> ChatHistoryMessageRead:
     message = _coerce_message_dict(entry.message)
-    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    metadata_src = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    metadata = dict(metadata_src)
     message_type = message.get("type") if isinstance(message.get("type"), str) else None
 
-    if isinstance(message.get("sender_kind"), str):
+    # LangChain tool semantics:
+    #   - type=ai with non-empty tool_calls  → agent planning a tool invocation
+    #   - type=tool                          → tool execution result
+    # Both are protocol noise and should render as collapsed steps, not chat bubbles.
+    raw_tool_calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+    has_tool_calls = bool(raw_tool_calls)
+
+    if message_type == "ai" and has_tool_calls:
+        forced_kind: str | None = "tool_call"
+        metadata["tool_calls"] = _summarize_tool_calls(raw_tool_calls)
+    elif message_type == "tool":
+        forced_kind = "tool_result"
+        if isinstance(message.get("name"), str):
+            metadata["tool_name"] = message["name"]
+        if isinstance(message.get("tool_call_id"), str):
+            metadata["tool_call_id"] = message["tool_call_id"]
+    else:
+        forced_kind = None
+
+    if forced_kind is not None:
+        sender_kind: str | None = forced_kind
+    elif isinstance(message.get("sender_kind"), str):
         sender_kind = message["sender_kind"]
     elif isinstance(metadata.get("sender_kind"), str):
         sender_kind = metadata["sender_kind"]
@@ -275,6 +317,16 @@ def _serialize_history_message(entry: N8nChatHistory) -> ChatHistoryMessageRead:
         metadata=metadata,
         format=fmt,
     )
+
+
+def get_chat_session_id(session: Session, *, chat_id: int, user_id: int) -> str:
+    """Resolve the n8n session id for a chat owned by ``user_id``.
+
+    Used by realtime SSE consumers to subscribe to LISTEN/NOTIFY payloads.
+    Raises 404 if the chat is not visible to the user.
+    """
+    chat = _get_owned_chat(session, chat_id, user_id)
+    return _chat_session_id(chat)
 
 
 def list_chat_history(
@@ -423,21 +475,69 @@ def _extract_ndjson_chunk(line: str) -> str | None:
     return None
 
 
+_JSON_DECODER = json.JSONDecoder()
+
+
 def _drain_stream_buffer(buffer: str, full_text: str) -> tuple[str, str, list[str]]:
+    """Consume zero or more n8n stream envelopes from ``buffer``.
+
+    n8n's streaming webhook emits a sequence of JSON objects (``{"type":"begin"|"item"|"end", ...}``)
+    that may be separated by newlines, ``\\r\\n``, blank space, or nothing at all depending on
+    the version/transport.  Splitting on ``\\n`` was unreliable and caused entire concatenated
+    envelopes to be dumped as raw text into the assistant message.  We instead scan with
+    ``json.JSONDecoder.raw_decode`` to extract objects regardless of separators, and fall back
+    to line-based handling only for non-JSON tails.
+    """
+
     emitted_parts: list[str] = []
 
-    while "\n" in buffer:
-        line, buffer = buffer.split("\n", 1)
-        handled, emitted = _parse_n8n_stream_event(line)
-        if handled:
-            if emitted:
-                full_text += emitted
-                emitted_parts.append(emitted)
+    while True:
+        # Skip whitespace / common separators between envelopes.
+        idx = 0
+        while idx < len(buffer) and buffer[idx] in " \t\r\n":
+            idx += 1
+        if idx:
+            buffer = buffer[idx:]
+
+        if not buffer:
+            break
+
+        if buffer[0] == "{":
+            try:
+                obj, end = _JSON_DECODER.raw_decode(buffer)
+            except json.JSONDecodeError:
+                # Incomplete object — wait for more bytes.
+                break
+
+            raw_chunk = buffer[:end]
+            buffer = buffer[end:]
+            handled, emitted = _parse_n8n_stream_event(raw_chunk)
+            if handled:
+                if emitted:
+                    full_text += emitted
+                    emitted_parts.append(emitted)
+                continue
+
+            # Unrecognised JSON object: forward its extracted text if possible,
+            # else fall back to the raw payload to avoid losing data.
+            try:
+                payload = json.loads(raw_chunk)
+            except json.JSONDecodeError:
+                payload = None
+            extracted = _extract_text(payload) if isinstance(payload, dict) else None
+            piece = extracted if extracted else raw_chunk
+            full_text += piece
+            emitted_parts.append(piece)
             continue
 
-        raw_line = f"{line}\n"
-        full_text += raw_line
-        emitted_parts.append(raw_line)
+        # Non-JSON prefix: emit one line at a time.
+        newline_idx = buffer.find("\n")
+        if newline_idx == -1:
+            break
+        line = buffer[: newline_idx + 1]
+        buffer = buffer[newline_idx + 1 :]
+        full_text += line
+        emitted_parts.append(line)
 
     return buffer, full_text, emitted_parts
 
@@ -546,58 +646,21 @@ async def stream_chat_message(
                     headers=headers,
                 ) as response:
                     response.raise_for_status()
-                    content_type = (response.headers.get("content-type") or "").lower()
 
-                    if "application/json" in content_type:
-                        payload = await response.aread()
-                        decoded = payload.decode("utf-8", errors="replace").strip()
-                        if decoded:
-                            full_text, emitted = _emit_terminal_buffer(decoded, full_text)
-                            if emitted:
-                                yield _sse_event(
-                                    "message_chunk",
-                                    {
-                                        "request_id": request_id,
-                                        "delta": emitted,
-                                    },
-                                )
-                    else:
-                        async for chunk in response.aiter_bytes():
-                            if not chunk:
-                                continue
+                    # Always iterate chunks with the raw_decode-based drain parser.
+                    # n8n returns ``application/json`` even when emitting multiple concatenated
+                    # envelopes (begin/item/end), so a single ``json.loads`` on the body would
+                    # fail and leak the raw payload into the chat.  ``_drain_stream_buffer``
+                    # handles both true streaming (chunked) and one-shot JSON-array-like bodies.
+                    async for chunk in response.aiter_bytes():
+                        if not chunk:
+                            continue
 
-                            text_chunk = decoder.decode(chunk)
-                            if not text_chunk:
-                                continue
+                        text_chunk = decoder.decode(chunk)
+                        if not text_chunk:
+                            continue
 
-                            buffer += text_chunk
-
-                            buffer, full_text, emitted_parts = _drain_stream_buffer(buffer, full_text)
-                            for emitted in emitted_parts:
-                                if emitted:
-                                    yield _sse_event(
-                                        "message_chunk",
-                                        {
-                                            "request_id": request_id,
-                                            "delta": emitted,
-                                        },
-                                    )
-
-                            probe = buffer.lstrip()
-                            if buffer and not probe.startswith("{"):
-                                full_text += buffer
-                                yield _sse_event(
-                                    "message_chunk",
-                                    {
-                                        "request_id": request_id,
-                                        "delta": buffer,
-                                    },
-                                )
-                                buffer = ""
-
-                        tail = decoder.decode(b"", final=True)
-                        if tail:
-                            buffer += tail
+                        buffer += text_chunk
 
                         buffer, full_text, emitted_parts = _drain_stream_buffer(buffer, full_text)
                         for emitted in emitted_parts:
@@ -610,16 +673,31 @@ async def stream_chat_message(
                                     },
                                 )
 
-                        if buffer:
-                            full_text, emitted = _emit_terminal_buffer(buffer, full_text)
-                            if emitted:
-                                yield _sse_event(
-                                    "message_chunk",
-                                    {
-                                        "request_id": request_id,
-                                        "delta": emitted,
-                                    },
-                                )
+                    tail = decoder.decode(b"", final=True)
+                    if tail:
+                        buffer += tail
+
+                    buffer, full_text, emitted_parts = _drain_stream_buffer(buffer, full_text)
+                    for emitted in emitted_parts:
+                        if emitted:
+                            yield _sse_event(
+                                "message_chunk",
+                                {
+                                    "request_id": request_id,
+                                    "delta": emitted,
+                                },
+                            )
+
+                    if buffer:
+                        full_text, emitted = _emit_terminal_buffer(buffer, full_text)
+                        if emitted:
+                            yield _sse_event(
+                                "message_chunk",
+                                {
+                                    "request_id": request_id,
+                                    "delta": emitted,
+                                },
+                            )
 
             yield _sse_event(
                 "message_end",
