@@ -27,6 +27,7 @@ from app.schemas.strategy import (
 from app.schemas.chat import ChatCreate
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
+    build_n8n_backend_api_metadata,
     build_n8n_webhook_auth_headers,
     issue_n8n_api_access_token,
     issue_n8n_webhook_auth_token,
@@ -742,6 +743,9 @@ def trigger_rule_agent(
         purpose="n8n_rule_trigger_api_access",
         token=api_auth_token,
         expires_at=api_auth_expires_at,
+        backend_api=build_n8n_backend_api_metadata(
+            session, user_id=chat.user_id, chat_id=chat_id,
+        ),
     )
     
     # Build payload using the same sendMessage envelope as chat and runner flows.
@@ -990,6 +994,12 @@ def notify_manager_live_start(
             purpose="n8n_live_start_api_access",
             token=api_auth_token,
             expires_at=api_auth_expires_at,
+            backend_api=build_n8n_backend_api_metadata(
+                session,
+                user_id=strategy.user_id,
+                chat_id=live_chat.id,
+                strategy_id=strategy_id,
+            ),
         )
         with httpx.Client(timeout=30.0) as client:
             response = client.post(
@@ -1095,6 +1105,12 @@ def post_manager_message(
                         purpose="n8n_manager_message_api_access",
                         token=api_auth_token,
                         expires_at=api_auth_expires_at,
+                        backend_api=build_n8n_backend_api_metadata(
+                            session,
+                            user_id=live_chat.user_id,
+                            chat_id=live_chat.id,
+                            strategy_id=strategy_id,
+                        ),
                     )
                     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
                     with httpx.Client(timeout=10.0) as client:

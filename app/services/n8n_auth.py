@@ -5,11 +5,15 @@ from typing import Any
 
 from fastapi import HTTPException, status
 from jose import jwt
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.core.config import settings
+from app.models.strategy import LiveStatus, StrategyLive
 from app.models.user import User
-from app.utils.auth_utils import create_access_token, create_user_delegated_token
+from app.utils.auth_utils import (
+    create_access_token,
+    create_user_delegated_token,
+)
 
 
 def _get_user(session: Session, user_id: int) -> User:
@@ -110,6 +114,7 @@ def build_n8n_api_auth_metadata(
     purpose: str,
     token: str | None = None,
     expires_at: datetime | None = None,
+    backend_api: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata = {
         "mode": "authorization_header",
@@ -125,4 +130,93 @@ def build_n8n_api_auth_metadata(
         metadata["token"] = token
     if expires_at is not None:
         metadata["expires_at"] = expires_at.isoformat()
+    if backend_api is not None:
+        metadata["backend_api"] = backend_api
     return metadata
+
+
+_DEFAULT_N8N_CONSULTATIVE_SCOPES = ["accounts:read", "account_orders:read"]
+
+
+def _resolve_active_strategy_live(
+    session: Session,
+    *,
+    chat_id: int | None,
+    strategy_id: int | None,
+) -> StrategyLive | None:
+    """Find an active StrategyLive bound to the given chat or strategy."""
+    if chat_id is not None:
+        sl = session.exec(
+            select(StrategyLive)
+            .where(StrategyLive.chat_id == chat_id)
+            .where(StrategyLive.status != LiveStatus.STOPPED.value)
+            .order_by(StrategyLive.id.desc())
+        ).first()
+        if sl is not None:
+            return sl
+    if strategy_id is not None:
+        sl = session.exec(
+            select(StrategyLive)
+            .where(StrategyLive.strategy_id == strategy_id)
+            .where(StrategyLive.status != LiveStatus.STOPPED.value)
+            .order_by(StrategyLive.id.desc())
+        ).first()
+        if sl is not None:
+            return sl
+    return None
+
+
+def build_n8n_backend_api_metadata(
+    session: Session,
+    *,
+    user_id: int | None,
+    chat_id: int | None = None,
+    strategy_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Issue a consultative `agent_backend_consult` token bound to a live session.
+
+    The token has `no_expiry=True` and is gated at decode time by
+    `StrategyLive.status` (see `get_current_consultative_principal`).
+    Returns None if no active live session can be resolved from
+    `chat_id` or `strategy_id` — in that case the agent has no live
+    context to read account data against.
+    """
+    if user_id is None:
+        return None
+
+    sl = _resolve_active_strategy_live(
+        session, chat_id=chat_id, strategy_id=strategy_id
+    )
+    if sl is None:
+        return None
+
+    token = create_user_delegated_token(
+        session,
+        user_id=user_id,
+        audience=settings.AGENT_TOKEN_AUDIENCE,
+        purpose="agent_backend_consult",
+        no_expiry=True,
+        extra_claims={
+            "strategy_id": sl.strategy_id,
+            "live_id": sl.id,
+            "connection_id": sl.connection_id,
+            "account_id": sl.account_id,
+            "scopes": list(_DEFAULT_N8N_CONSULTATIVE_SCOPES),
+        },
+    )
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "audience": settings.AGENT_TOKEN_AUDIENCE,
+        "purpose": "agent_backend_consult",
+        "scopes": list(_DEFAULT_N8N_CONSULTATIVE_SCOPES),
+        "account_id": sl.account_id,
+        "connection_id": sl.connection_id,
+        "live_id": sl.id,
+        "strategy_id": sl.strategy_id,
+        "paths": {
+            "accounts": "/accounts",
+            "account": f"/accounts/{sl.account_id}" if sl.account_id else None,
+            "account_orders": f"/accounts/{sl.account_id}/orders" if sl.account_id else None,
+        },
+    }

@@ -20,6 +20,7 @@ from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
     build_n8n_webhook_auth_headers,
     issue_n8n_api_access_token,
+    build_n8n_backend_api_metadata,
     issue_n8n_webhook_auth_token,
 )
 
@@ -408,6 +409,9 @@ def send_chat_message(
         purpose="n8n_chat_api_access",
         token=api_auth_token,
         expires_at=api_auth_expires_at,
+        backend_api=build_n8n_backend_api_metadata(
+            session, user_id=chat.user_id, chat_id=chat.id,
+        ),
     )
     webhook_payload = _build_webhook_payload(
         chat,
@@ -612,6 +616,9 @@ async def stream_chat_message(
         purpose="n8n_chat_api_access",
         token=api_auth_token,
         expires_at=api_auth_expires_at,
+        backend_api=build_n8n_backend_api_metadata(
+            session, user_id=chat.user_id, chat_id=chat.id,
+        ),
     )
     webhook_payload = _build_webhook_payload(
         chat,
