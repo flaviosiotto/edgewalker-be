@@ -97,6 +97,7 @@ def _normalize_root_path(value: str | None) -> str:
 
 API_ROOT_PATH = _normalize_root_path(os.getenv("API_ROOT_PATH", "/api"))
 RUNNER_TRAEFIK_ENTRYPOINTS = os.getenv("RUNNER_TRAEFIK_ENTRYPOINTS", "").strip()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 
 
 def _docker_runtime_requirements() -> str:
@@ -306,6 +307,12 @@ class LiveRunnerService:
         env["CORS_ALLOW_CREDENTIALS"] = str(RUNNER_CORS_ALLOW_CREDENTIALS).lower()
         if backend_auth_token:
             env["BACKEND_AUTH_TOKEN"] = backend_auth_token
+
+        if PUBLIC_BASE_URL:
+            env["RUNNER_PUBLIC_BASE_URL"] = (
+                f"{PUBLIC_BASE_URL}"
+                f"{_public_runner_route('live', 'instances', str(live_id), 'runner')}"
+            )
 
         # Manager agent webhook (so the runner can call the agent directly)
         if manager_webhook_url:
