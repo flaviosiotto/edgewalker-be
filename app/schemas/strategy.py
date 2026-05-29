@@ -4,6 +4,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel
 
 from app.schemas.chat import ChatRead
+from app.schemas.live_strategy import LiveStrategySummaryRead
 
 
 # Live status enum values
@@ -63,6 +64,10 @@ class StrategyRead(BaseModel):
 
     # Current live session (if any)
     live: Optional[StrategyLiveRead] = None
+
+    # Runtime summary of the current live session (performance + container/sync state).
+    # Populated only when a live session exists; null otherwise.
+    live_summary: Optional[LiveStrategySummaryRead] = None
 
     # UI layout persistence
     layout_config: Optional[dict[str, Any]] = None

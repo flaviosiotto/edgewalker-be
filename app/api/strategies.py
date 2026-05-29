@@ -19,6 +19,7 @@ from app.schemas.strategy import (
     LayoutConfigUpdate,
 )
 from app.schemas.chat import ChatCreate, ChatRead
+from app.services.live_summary_service import build_live_summary
 from app.services.strategy_service import (
     create_strategy,
     delete_strategy,
@@ -46,13 +47,23 @@ from app.utils.auth_utils import get_current_active_user
 router = APIRouter(prefix="/strategies", tags=["Strategies"])
 
 
+def _serialize_strategy_with_live(session: Session, strategy) -> StrategyRead:
+    """Build a StrategyRead and attach `live_summary` if a live session exists."""
+    payload = StrategyRead.model_validate(strategy)
+    sl = strategy.live
+    if sl is not None:
+        payload.live_summary = build_live_summary(session, sl)
+    return payload
+
+
 @router.post("/", response_model=StrategyRead)
 def create_strategy_endpoint(
     payload: StrategyCreate,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    return create_strategy(session, payload, current_user.id)
+    strategy = create_strategy(session, payload, current_user.id)
+    return _serialize_strategy_with_live(session, strategy)
 
 
 @router.get("/", response_model=list[StrategyRead])
@@ -60,7 +71,8 @@ def list_strategies_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    return list_strategies(session, current_user.id)
+    strategies = list_strategies(session, current_user.id)
+    return [_serialize_strategy_with_live(session, s) for s in strategies]
 
 
 @router.get("/{strategy_id}", response_model=StrategyRead)
@@ -69,7 +81,8 @@ def get_strategy_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    return get_strategy(session, strategy_id, current_user.id)
+    strategy = get_strategy(session, strategy_id, current_user.id)
+    return _serialize_strategy_with_live(session, strategy)
 
 
 @router.patch("/{strategy_id}", response_model=StrategyRead)
@@ -79,7 +92,8 @@ def update_strategy_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    return update_strategy(session, strategy_id, payload, current_user.id)
+    strategy = update_strategy(session, strategy_id, payload, current_user.id)
+    return _serialize_strategy_with_live(session, strategy)
 
 
 @router.delete("/{strategy_id}")
@@ -100,7 +114,8 @@ def update_strategy_layout_endpoint(
     current_user: User = Depends(get_current_active_user),
 ):
     """Update only the UI layout configuration for a strategy."""
-    return update_strategy_layout(session, strategy_id, payload, current_user.id)
+    strategy = update_strategy_layout(session, strategy_id, payload, current_user.id)
+    return _serialize_strategy_with_live(session, strategy)
 
 
 @router.post("/{strategy_id}/backtests", response_model=BacktestRead)
