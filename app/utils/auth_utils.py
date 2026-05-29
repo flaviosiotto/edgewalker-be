@@ -270,13 +270,25 @@ async def get_current_consultative_principal(
     if payload is None:
         raise credentials_exception
 
-    return _load_principal_from_payload(
+    principal = _load_principal_from_payload(
         payload,
         session,
         allowed_token_types={"delegated"},
         allowed_purposes={"agent_backend_consult", "n8n_backend_consult"},
         credentials_exception=credentials_exception,
     )
+
+    # Tokens issued with no_expiry are gated by the live session lifecycle:
+    # stopping the live session implicitly revokes them.
+    live_id = principal.claims.get("live_id")
+    if live_id is not None:
+        strategy_live = session.get(StrategyLive, live_id)
+        if strategy_live is None:
+            raise _credentials_exception("Consultative token live session not found")
+        if strategy_live.status == LiveStatus.STOPPED.value:
+            raise _credentials_exception("Consultative token live session is no longer active")
+
+    return principal
 
 
 async def get_current_active_or_runner_user(

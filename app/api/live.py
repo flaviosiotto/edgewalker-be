@@ -1488,15 +1488,17 @@ def issue_live_agent_token_endpoint(
     if runner_strategy_id is not None and str(runner_strategy_id) != str(sl.strategy_id):
         raise HTTPException(status_code=403, detail="Runner token does not match this strategy")
 
-    expires_delta = timedelta(minutes=settings.AGENT_CALLBACK_TOKEN_EXPIRE_MINUTES)
-    expires_at = datetime.now(timezone.utc) + expires_delta
+    # Tokens are bound to the live session lifecycle (live_id claim).
+    # Validity is gated by StrategyLive.status at decode time (see auth_utils),
+    # not by a TTL: stopping the live session implicitly revokes both tokens.
+    expires_at = datetime.now(timezone.utc) + timedelta(days=365)
     purpose = "agent_runner_callback"
     token = create_user_delegated_token(
         session,
         user_id=runner_principal.user.id,
         audience=settings.AGENT_TOKEN_AUDIENCE,
         purpose=purpose,
-        expires_delta=expires_delta,
+        no_expiry=True,
         extra_claims={
             "strategy_id": sl.strategy_id,
             "live_id": sl.id,
@@ -1512,7 +1514,7 @@ def issue_live_agent_token_endpoint(
         user_id=runner_principal.user.id,
         audience=settings.AGENT_TOKEN_AUDIENCE,
         purpose=consultative_purpose,
-        expires_delta=expires_delta,
+        no_expiry=True,
         extra_claims={
             "strategy_id": sl.strategy_id,
             "live_id": sl.id,
