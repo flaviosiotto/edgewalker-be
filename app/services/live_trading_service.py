@@ -130,6 +130,7 @@ def list_account_orders(
     *,
     status: str | None = None,
     active_only: bool = False,
+    symbol: str | None = None,
     limit: int = 100,
 ) -> list[LiveOrderRead]:
     """List persisted orders for a broker account across all live sessions."""
@@ -139,6 +140,8 @@ def list_account_orders(
         .order_by(LiveOrder.created_at.desc())  # type: ignore[union-attr]
         .limit(limit)
     )
+    if symbol:
+        stmt = stmt.where(LiveOrder.symbol == symbol.upper())
     if active_only:
         stmt = stmt.where(
             LiveOrder.status.in_([

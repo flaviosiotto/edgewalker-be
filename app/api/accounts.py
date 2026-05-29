@@ -92,6 +92,7 @@ def list_account_orders_endpoint(
     account_id: int,
     status: str | None = Query(default=None),
     active_only: bool = False,
+    symbol: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
@@ -105,6 +106,7 @@ def list_account_orders_endpoint(
         account.id,
         status=status,
         active_only=active_only,
+        symbol=symbol,
         limit=limit,
     )
     return orders
