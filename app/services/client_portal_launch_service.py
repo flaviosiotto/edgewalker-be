@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from http.cookies import CookieError, SimpleCookie
 import json
 import os
 import secrets
@@ -17,7 +18,6 @@ from app.models.connection import Connection
 from app.services.client_portal_service import (
     is_client_portal_transport,
     resolve_client_portal_base_url,
-    resolve_client_portal_browser_url,
     resolve_client_portal_verify_ssl,
 )
 
@@ -56,6 +56,10 @@ def _create_async_redis_client() -> aioredis.Redis:
 
 def _launch_session_key(token: str) -> str:
     return f"client-portal:launch:{token}"
+
+
+def _launch_session_cookie_key(token: str) -> str:
+    return f"client-portal:launch-cookies:{token}"
 
 
 def _normalized_access_base_url() -> str | None:
@@ -104,7 +108,10 @@ async def create_client_portal_launch_url(
 ) -> str:
     access_base_url = _normalized_access_base_url()
     if not access_base_url:
-        return resolve_client_portal_browser_url(config)
+        raise HTTPException(
+            status_code=500,
+            detail="CLIENT_PORTAL_ACCESS_BASE_URL is required for on-demand private Client Portal launch",
+        )
 
     token = secrets.token_urlsafe(32)
     payload = {
@@ -133,6 +140,10 @@ async def get_client_portal_launch_session(launch_token: str) -> dict[str, Any] 
     redis = _create_async_redis_client()
     try:
         payload = await redis.get(_launch_session_key(launch_token))
+        if payload:
+            ttl_seconds = get_client_portal_launch_cookie_ttl_seconds()
+            await redis.expire(_launch_session_key(launch_token), ttl_seconds)
+            await redis.expire(_launch_session_cookie_key(launch_token), ttl_seconds)
     finally:
         await redis.aclose()
 
@@ -148,18 +159,107 @@ async def get_client_portal_launch_session(launch_token: str) -> dict[str, Any] 
     return data
 
 
-def _filtered_proxy_headers(headers) -> dict[str, str]:
+async def _get_client_portal_launch_cookies(launch_token: str) -> dict[str, str]:
+    if not launch_token.strip():
+        return {}
+
+    redis = _create_async_redis_client()
+    try:
+        payload = await redis.get(_launch_session_cookie_key(launch_token))
+        if payload:
+            await redis.expire(_launch_session_cookie_key(launch_token), get_client_portal_launch_cookie_ttl_seconds())
+    finally:
+        await redis.aclose()
+
+    if not payload:
+        return {}
+
+    try:
+        cookies = json.loads(payload)
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(cookies, dict):
+        return {}
+
+    return {
+        str(name): str(value)
+        for name, value in cookies.items()
+        if isinstance(name, str) and isinstance(value, str) and name and value
+    }
+
+
+async def _set_client_portal_launch_cookies(launch_token: str, cookies: dict[str, str]) -> None:
+    redis = _create_async_redis_client()
+    try:
+        if cookies:
+            await redis.setex(
+                _launch_session_cookie_key(launch_token),
+                get_client_portal_launch_cookie_ttl_seconds(),
+                json.dumps(cookies),
+            )
+        else:
+            await redis.delete(_launch_session_cookie_key(launch_token))
+    finally:
+        await redis.aclose()
+
+
+def _merge_set_cookie_headers(current: dict[str, str], set_cookie_headers: list[str]) -> dict[str, str]:
+    updated = dict(current)
+    for raw_cookie in set_cookie_headers:
+        parsed = SimpleCookie()
+        try:
+            parsed.load(raw_cookie)
+        except CookieError:
+            continue
+
+        for morsel in parsed.values():
+            if morsel.value:
+                updated[morsel.key] = morsel.value
+            else:
+                updated.pop(morsel.key, None)
+
+    return updated
+
+
+async def _capture_client_portal_launch_cookies(launch_token: str, upstream_headers) -> None:
+    if not launch_token.strip():
+        return
+
+    try:
+        set_cookie_headers = upstream_headers.get_list("set-cookie")
+    except AttributeError:
+        set_cookie_headers = [
+            value
+            for key, value in upstream_headers.multi_items()
+            if str(key).lower() == "set-cookie"
+        ]
+
+    if not set_cookie_headers:
+        return
+
+    current = await _get_client_portal_launch_cookies(launch_token)
+    updated = _merge_set_cookie_headers(current, set_cookie_headers)
+    await _set_client_portal_launch_cookies(launch_token, updated)
+
+
+def _filtered_proxy_headers(headers, session_cookies: dict[str, str] | None = None) -> dict[str, str]:
     filtered: dict[str, str] = {}
     for key, value in headers.items():
         lower = key.lower()
-        if lower in _HOP_BY_HOP_HEADERS or lower == "host":
+        if lower in _HOP_BY_HOP_HEADERS or lower in {"host", "cookie"}:
             continue
         filtered[key] = value
     filtered["Accept-Encoding"] = "identity"
+    if session_cookies:
+        filtered["Cookie"] = "; ".join(
+            f"{name}={value}"
+            for name, value in sorted(session_cookies.items())
+        )
     return filtered
 
 
-async def resolve_client_portal_proxy_target(request: Request) -> tuple[str, bool]:
+async def resolve_client_portal_proxy_target(request: Request) -> tuple[str, str, bool]:
     launch_token = request.cookies.get(get_client_portal_launch_cookie_name(), "").strip()
     launch_session = await get_client_portal_launch_session(launch_token)
     if launch_session is None:
@@ -179,12 +279,13 @@ async def resolve_client_portal_proxy_target(request: Request) -> tuple[str, boo
             raise HTTPException(status_code=400, detail="Connection is not configured for IBKR Client Portal")
         config = dict(conn.config or {})
 
-    return resolve_client_portal_base_url(config), resolve_client_portal_verify_ssl(config)
+    return launch_token, resolve_client_portal_base_url(config), resolve_client_portal_verify_ssl(config)
 
 
 async def proxy_http_request(
     request: Request,
     *,
+    launch_token: str,
     upstream_base_url: str,
     verify_ssl: bool,
 ) -> httpx.Response:
@@ -196,11 +297,16 @@ async def proxy_http_request(
         upstream_url = f"{upstream_url}?{query_string.decode('utf-8')}"
 
     body = await request.body()
+    session_cookies = await _get_client_portal_launch_cookies(launch_token)
 
     async with httpx.AsyncClient(verify=verify_ssl, follow_redirects=False, timeout=120.0) as client:
-        return await client.request(
+        response = await client.request(
             request.method,
             upstream_url,
-            headers=_filtered_proxy_headers(request.headers),
+            headers=_filtered_proxy_headers(request.headers, session_cookies),
             content=body if body else None,
         )
+    await _capture_client_portal_launch_cookies(launch_token, response.headers)
+    if path == "/v1/api/logout":
+        await _set_client_portal_launch_cookies(launch_token, {})
+    return response

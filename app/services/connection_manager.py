@@ -17,6 +17,7 @@ required in ConnectionManager itself.
 from __future__ import annotations
 
 import asyncio
+import httpx
 import json
 import logging
 import os
@@ -38,7 +39,6 @@ from app.services.client_portal_service import (
     is_client_portal_transport,
     logout_client_portal_session,
     resolve_client_portal_base_url,
-    resolve_client_portal_browser_url,
     resolve_client_portal_verify_ssl,
 )
 from app.services.client_portal_launch_service import create_client_portal_launch_url
@@ -70,6 +70,21 @@ HOST_PUID = os.getenv("PUID", "").strip()
 HOST_PGID = os.getenv("PGID", "").strip()
 SPAWN_CONTAINER_USER = os.getenv("SPAWN_CONTAINER_USER", "").strip()
 SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
+CLIENT_PORTAL_GATEWAY_IMAGE = os.getenv(
+    "CLIENT_PORTAL_GATEWAY_IMAGE",
+    "edgewalker-devops-ibkr-client-portal-gw:latest",
+).strip()
+CLIENT_PORTAL_GATEWAY_PREFIX = os.getenv("CLIENT_PORTAL_GATEWAY_PREFIX", "cpgw-").strip() or "cpgw-"
+CLIENT_PORTAL_GATEWAY_PORT = max(1, int(os.getenv("CLIENT_PORTAL_GATEWAY_PORT", "5000")))
+CLIENT_PORTAL_GATEWAY_STARTUP_TIMEOUT_SECONDS = max(
+    5,
+    int(os.getenv("CLIENT_PORTAL_GATEWAY_STARTUP_TIMEOUT_SECONDS", "90")),
+)
+CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS = max(
+    0.5,
+    float(os.getenv("CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS", "2")),
+)
+CLIENT_PORTAL_PROXY_BRIDGE_TOKEN = os.getenv("CLIENT_PORTAL_PROXY_BRIDGE_TOKEN", "").strip()
 
 # Shared Redis settings propagated to dynamically spawned gateway containers.
 REDIS_URL = os.getenv("REDIS_URL", "")
@@ -94,6 +109,9 @@ CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE = (
     "Dispatcher ricevuto. Attendo l'apertura della brokerage session IBKR."
 )
 CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY = "_client_portal_dispatcher_received_at"
+CLIENT_PORTAL_RUNTIME_BASE_URL_KEY = "_client_portal_runtime_base_url"
+CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY = "_client_portal_runtime_verify_ssl"
+CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY = "_client_portal_runtime_container_name"
 
 
 def _safe_float(value: Any) -> float | None:
@@ -118,6 +136,39 @@ def _parse_snapshot_at(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
+def _client_portal_runtime_base_url(container_name: str) -> str:
+    return f"https://{container_name}:{CLIENT_PORTAL_GATEWAY_PORT}"
+
+
+def _with_client_portal_runtime_state(
+    config: dict[str, Any] | None,
+    *,
+    base_url: str,
+    container_name: str,
+    verify_ssl: bool = False,
+) -> dict[str, Any]:
+    updated = dict(config or {})
+    updated[CLIENT_PORTAL_RUNTIME_BASE_URL_KEY] = base_url.rstrip("/")
+    updated[CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY] = bool(verify_ssl)
+    updated[CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY] = container_name
+    return updated
+
+
+def _clear_client_portal_runtime_state(config: dict[str, Any] | None) -> dict[str, Any]:
+    updated = dict(config or {})
+    updated.pop(CLIENT_PORTAL_RUNTIME_BASE_URL_KEY, None)
+    updated.pop(CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY, None)
+    updated.pop(CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY, None)
+    return updated
+
+
+def _has_client_portal_runtime_state(config: dict[str, Any] | None) -> bool:
+    if not isinstance(config, dict):
+        return False
+    value = config.get(CLIENT_PORTAL_RUNTIME_BASE_URL_KEY)
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _docker_runtime_requirements() -> str:
     return (
         "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST), "
@@ -133,10 +184,6 @@ def _spawn_container_user() -> str | None:
     if HOST_PUID and HOST_PGID:
         return f"{HOST_PUID}:{HOST_PGID}"
     return None
-
-
-def _shared_client_portal_base_url() -> str:
-    return resolve_client_portal_base_url()
 
 
 def _parse_client_portal_dispatcher_received_at(config: dict[str, Any] | None) -> datetime | None:
@@ -185,7 +232,6 @@ def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
         "IBKR_TRANSPORT": transport,
         "CLIENT_PORTAL_ENABLED": str(config.get("client_portal_enabled", transport == "client_portal")).lower(),
         "CLIENT_PORTAL_BASE_URL": resolve_client_portal_base_url(config),
-        "CLIENT_PORTAL_BROWSER_URL": resolve_client_portal_browser_url(config),
         "CLIENT_PORTAL_VERIFY_SSL": str(resolve_client_portal_verify_ssl(config)).lower(),
     }
 
@@ -600,6 +646,121 @@ class ConnectionManager:
     def _clear_client_portal_dispatcher_grace(self, connection_id: int) -> None:
         self._client_portal_dispatcher_received_at.pop(connection_id, None)
 
+    def _client_portal_container_name(self, connection_id: int) -> str:
+        return f"{CLIENT_PORTAL_GATEWAY_PREFIX}{connection_id}"
+
+    def _get_client_portal_container(self, connection_id: int):
+        if not self._docker:
+            return None
+        try:
+            return self._docker.containers.get(self._client_portal_container_name(connection_id))
+        except NotFound:
+            return None
+        except Exception as e:
+            logger.warning("Docker error checking Client Portal container: %s", e)
+            return None
+
+    def _spawn_client_portal_gateway(self, connection_id: int) -> tuple[str, str]:
+        if not self._docker:
+            raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}")
+        if not CLIENT_PORTAL_GATEWAY_IMAGE:
+            raise RuntimeError("CLIENT_PORTAL_GATEWAY_IMAGE is not configured")
+
+        container_name = self._client_portal_container_name(connection_id)
+        existing = self._get_client_portal_container(connection_id)
+        if existing:
+            if existing.status == "running":
+                return container_name, _client_portal_runtime_base_url(container_name)
+            existing.remove(force=True)
+
+        env = {
+            "CLIENT_PORTAL_ALLOW_REMOTE": "true",
+            "LOG_LEVEL": "INFO",
+        }
+        if CLIENT_PORTAL_PROXY_BRIDGE_TOKEN:
+            env["CLIENT_PORTAL_PROXY_BRIDGE_TOKEN"] = CLIENT_PORTAL_PROXY_BRIDGE_TOKEN
+
+        labels = {
+            "edgewalker.type": "client-portal",
+            "edgewalker.connection_id": str(connection_id),
+        }
+
+        try:
+            user = _spawn_container_user()
+            self._docker.containers.run(
+                image=CLIENT_PORTAL_GATEWAY_IMAGE,
+                name=container_name,
+                environment=env,
+                labels=labels,
+                network=DOCKER_NETWORK,
+                user=user,
+                detach=True,
+                restart_policy={"Name": "unless-stopped"},
+            )
+            logger.info("Spawned Client Portal container %s", container_name)
+        except APIError as e:
+            logger.error("Failed to spawn Client Portal container: %s", e)
+            raise
+
+        return container_name, _client_portal_runtime_base_url(container_name)
+
+    def _destroy_client_portal_gateway(self, connection_id: int) -> None:
+        container = self._get_client_portal_container(connection_id)
+        if container:
+            try:
+                container.stop(timeout=10)
+                container.remove(force=True)
+                logger.info("Destroyed Client Portal container %s", self._client_portal_container_name(connection_id))
+            except Exception as e:
+                logger.warning("Error destroying Client Portal container: %s", e)
+
+    async def _wait_for_client_portal_gateway(self, base_url: str, *, verify_ssl: bool) -> None:
+        deadline = asyncio.get_running_loop().time() + CLIENT_PORTAL_GATEWAY_STARTUP_TIMEOUT_SECONDS
+        last_error = ""
+
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                async with httpx.AsyncClient(
+                    base_url=base_url,
+                    verify=verify_ssl,
+                    timeout=5.0,
+                    follow_redirects=True,
+                ) as client:
+                    response = await client.get("/")
+                if response.status_code < 500:
+                    return
+                last_error = f"HTTP {response.status_code}"
+            except Exception as exc:
+                last_error = str(exc)
+
+            await asyncio.sleep(CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS)
+
+        raise RuntimeError(
+            f"Client Portal gateway did not become ready in time: {last_error or 'timeout'}"
+        )
+
+    async def _ensure_client_portal_runtime(self, connection_id: int, config: dict[str, Any]) -> dict[str, Any]:
+        container_name, base_url = self._spawn_client_portal_gateway(connection_id)
+        try:
+            await self._wait_for_client_portal_gateway(base_url, verify_ssl=False)
+        except Exception:
+            self._destroy_client_portal_gateway(connection_id)
+            raise
+
+        updated_config = _with_client_portal_runtime_state(
+            config,
+            base_url=base_url,
+            container_name=container_name,
+            verify_ssl=False,
+        )
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is not None:
+                conn.config = updated_config
+                conn.updated_at = datetime.now(timezone.utc)
+                session.commit()
+        return updated_config
+
     def _client_portal_dispatcher_grace_deadline(
         self,
         connection_id: int,
@@ -670,7 +831,6 @@ class ConnectionManager:
             "gateway_started": gateway_started,
             "connection_status": connection_status,
             "launch_url": None,
-            "auth_url": resolve_client_portal_browser_url(config),
             "message": CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE,
         }
 
@@ -711,64 +871,6 @@ class ConnectionManager:
         except Exception as e:
             logger.warning("Docker error checking container: %s", e)
             return None
-
-    def _restart_client_portal_gateway(self) -> None:
-        """Restart the shared Client Portal gateway to clear sticky auth state."""
-        if not self._docker:
-            return
-
-        candidates = []
-        try:
-            candidates = self._docker.containers.list(
-                all=True,
-                filters={"label": "com.docker.compose.service=ibkr-client-portal-gw"},
-            )
-        except Exception as e:
-            logger.warning("Docker error listing Client Portal gateway containers: %s", e)
-            return
-
-        if not candidates:
-            try:
-                candidates = [
-                    container
-                    for container in self._docker.containers.list(all=True)
-                    if "ibkr-client-portal-gw" in container.name
-                ]
-            except Exception as e:
-                logger.warning("Docker error scanning Client Portal gateway containers: %s", e)
-                return
-
-        for container in candidates:
-            try:
-                logger.info("Restarting shared Client Portal gateway container %s", container.name)
-                container.restart(timeout=10)
-            except Exception as e:
-                logger.warning("Could not restart Client Portal gateway container %s: %s", container.name, e)
-
-    def _has_other_active_client_portal_connections(self, connection_id: int, base_url: str) -> bool:
-        active_statuses = {
-            ConnectionStatus.CONNECTING.value,
-            ConnectionStatus.CONNECTED.value,
-            ConnectionStatus.AWAITING_AUTH.value,
-        }
-
-        with get_session_context() as session:
-            candidates = list(
-                session.exec(
-                    select(Connection).where(Connection.id != connection_id).where(Connection.broker_type == "ibkr")
-                ).all()
-            )
-
-        for candidate in candidates:
-            candidate_config = dict(candidate.config or {})
-            if not is_client_portal_transport(candidate_config):
-                continue
-            if candidate.status not in active_statuses:
-                continue
-            if resolve_client_portal_base_url(candidate_config) == base_url:
-                return True
-
-        return False
 
     def _spawn_gateway(self, connection_id: int, broker_type: str, config: dict[str, Any]) -> None:
         """Spawn a gateway container for the given Connection.
@@ -902,6 +1004,25 @@ class ConnectionManager:
             conn.config = config
             session.commit()
 
+        try:
+            config = await self._ensure_client_portal_runtime(connection_id, config)
+        except Exception as exc:
+            message = f"Client Portal non raggiungibile: {exc}"
+            with get_session_context() as session:
+                conn = session.get(Connection, connection_id)
+                if conn is not None:
+                    conn.status = ConnectionStatus.ERROR.value
+                    conn.status_message = message
+                    conn.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+            return {
+                "service_ready": False,
+                "authenticated": False,
+                "ready_to_connect": False,
+                "launch_url": None,
+                "message": message,
+            }
+
         auth = await get_client_portal_auth_status(config)
         message = "Autenticazione IBKR richiesta nel popup Client Portal."
         if auth["ready_to_connect"]:
@@ -921,18 +1042,34 @@ class ConnectionManager:
                 conn.updated_at = datetime.now(timezone.utc)
                 session.commit()
 
-        launch_url = await create_client_portal_launch_url(
-            connection_id=connection_id,
-            user_id=user_id,
-            config=config,
-        )
+        try:
+            launch_url = await create_client_portal_launch_url(
+                connection_id=connection_id,
+                user_id=user_id,
+                config=config,
+            )
+        except Exception as exc:
+            message = f"Client Portal launch non disponibile: {exc}"
+            with get_session_context() as session:
+                conn = session.get(Connection, connection_id)
+                if conn is not None:
+                    conn.status = ConnectionStatus.ERROR.value
+                    conn.status_message = message
+                    conn.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+            return {
+                "service_ready": False,
+                "authenticated": False,
+                "ready_to_connect": False,
+                "launch_url": None,
+                "message": message,
+            }
 
         return {
             "service_ready": auth["service_ready"],
             "authenticated": auth["authenticated"],
             "ready_to_connect": auth["ready_to_connect"],
             "launch_url": launch_url,
-            "auth_url": launch_url,
             "message": message,
         }
 
@@ -942,6 +1079,11 @@ class ConnectionManager:
             if conn is None:
                 return ConnectorResult(success=False, message="Connection not found")
             config = dict(conn.config or {})
+
+        try:
+            config = await self._ensure_client_portal_runtime(connection_id, config)
+        except Exception as exc:
+            return ConnectorResult(success=False, message=f"Client Portal non raggiungibile: {exc}")
 
         auth = await get_client_portal_auth_status(config)
         if not auth["service_ready"]:
@@ -982,6 +1124,8 @@ class ConnectionManager:
             status_message = conn.status_message
             updated_at = conn.updated_at
 
+        config = await self._ensure_client_portal_runtime(connection_id, config)
+
         container = self._get_container(connection_id, broker_type)
         gateway_started = bool(container and container.status == "running")
 
@@ -1012,7 +1156,6 @@ class ConnectionManager:
             "gateway_started": gateway_started,
             "connection_status": status_value,
             "launch_url": None,
-            "auth_url": resolve_client_portal_browser_url(config),
             "message": auth["message"],
         }
 
@@ -1142,32 +1285,23 @@ class ConnectionManager:
             pass  # Container may already be gone
 
         if is_client_portal_transport(config):
-            client_portal_base_url = resolve_client_portal_base_url(config)
-            has_peers = self._has_other_active_client_portal_connections(connection_id, client_portal_base_url)
-
-            if not has_peers:
+            if _has_client_portal_runtime_state(config):
                 try:
                     await logout_client_portal_session(config)
                 except Exception:
                     pass
-
-                if client_portal_base_url == _shared_client_portal_base_url():
-                    self._restart_client_portal_gateway()
-            else:
-                logger.info(
-                    "Skipping Client Portal logout/reset for connection %s because another active connection uses %s",
-                    connection_id,
-                    client_portal_base_url,
-                )
+                self._destroy_client_portal_gateway(connection_id)
 
         # Destroy the container
         self._destroy_gateway(connection_id, broker_type)
 
         with get_session_context() as session:
-            _update_connection_status(
-                session, connection_id, ConnectionStatus.DISCONNECTED,
-                "Disconnected",
-            )
+            _update_connection_status(session, connection_id, ConnectionStatus.DISCONNECTED, "Disconnected")
+            conn = session.get(Connection, connection_id)
+            if conn is not None:
+                conn.config = _clear_client_portal_runtime_state(conn.config)
+                conn.updated_at = datetime.now(timezone.utc)
+                session.commit()
 
         return ConnectorResult(success=True, message="Disconnected")
 

@@ -159,7 +159,6 @@ class ConnectDisconnectResponse(BaseModel):
     accounts_discovered: int = 0
     auth_required: bool = False
     launch_url: str | None = None
-    auth_url: str | None = None
 
 
 class ClientPortalAuthStatusResponse(BaseModel):
@@ -175,7 +174,6 @@ class ClientPortalAuthStatusResponse(BaseModel):
     gateway_started: bool
     connection_status: str
     launch_url: str | None = None
-    auth_url: str | None = None
     message: str | None = None
 
 
@@ -228,7 +226,6 @@ async def connect_endpoint(
             message=auth["message"],
             auth_required=auth["service_ready"],
             launch_url=auth.get("launch_url"),
-            auth_url=auth.get("auth_url"),
         )
 
     result = await manager.connect(connection_id)

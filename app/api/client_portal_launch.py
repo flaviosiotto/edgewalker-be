@@ -40,7 +40,7 @@ def _ensure_access_request(request: Request) -> None:
 def _copy_response_headers(response: Response, upstream_headers, *, request: Request, upstream_base_url: str) -> None:
     for key, value in upstream_headers.multi_items():
         lower = key.lower()
-        if lower in _HOP_BY_HOP_HEADERS or lower == "content-length":
+        if lower in _HOP_BY_HOP_HEADERS or lower in {"content-length", "set-cookie"}:
             continue
         if lower == "location":
             value = _rewrite_location_header(value, request=request, upstream_base_url=upstream_base_url)
@@ -90,9 +90,10 @@ async def start_client_portal_launch(launch_token: str, request: Request):
 async def client_portal_access_proxy(path: str, request: Request):
     _ensure_access_request(request)
 
-    upstream_base_url, verify_ssl = await resolve_client_portal_proxy_target(request)
+    launch_token, upstream_base_url, verify_ssl = await resolve_client_portal_proxy_target(request)
     upstream_response = await proxy_http_request(
         request,
+        launch_token=launch_token,
         upstream_base_url=upstream_base_url,
         verify_ssl=verify_ssl,
     )

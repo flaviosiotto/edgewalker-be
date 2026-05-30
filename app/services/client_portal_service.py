@@ -16,12 +16,13 @@ logger = logging.getLogger(__name__)
 
 _CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY = "_client_portal_dispatcher_received_at"
 _CLIENT_PORTAL_PROXY_BRIDGE_HEADER = "X-Edgewalker-Client-Portal-Bridge"
+_CLIENT_PORTAL_RUNTIME_BASE_URL_KEY = "_client_portal_runtime_base_url"
+_CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY = "_client_portal_runtime_verify_ssl"
+
+_DEFAULT_CLIENT_PORTAL_INTERNAL_BASE_URL = "https://ibkr-client-portal-gw:5000"
 
 _CLIENT_PORTAL_CONFIG_KEYS = frozenset(
     {
-        "client_portal_base_url",
-        "client_portal_browser_url",
-        "client_portal_verify_ssl",
         "client_portal_enabled",
         "transport",
     }
@@ -150,72 +151,35 @@ def sanitize_connection_config(
     if not _needs_client_portal_sanitization(normalized):
         return normalized
 
-    try:
-        normalized["client_portal_base_url"] = _validated_client_portal_url(
-            normalized.get("client_portal_base_url"),
-            default_url=settings.CLIENT_PORTAL_BASE_URL,
-            allowed_urls=settings.CLIENT_PORTAL_ALLOWED_BASE_URLS,
-            include_trailing_slash=False,
-            field_name="client_portal_base_url",
-        )
-        normalized["client_portal_browser_url"] = _validated_client_portal_url(
-            normalized.get("client_portal_browser_url"),
-            default_url=settings.CLIENT_PORTAL_BROWSER_URL,
-            allowed_urls=settings.CLIENT_PORTAL_ALLOWED_BROWSER_URLS,
-            include_trailing_slash=True,
-            field_name="client_portal_browser_url",
-        )
-    except HTTPException:
-        if strict:
-            raise
-        logger.warning("Falling back to trusted Client Portal defaults for IBKR connection config")
-        normalized["client_portal_base_url"] = _normalize_client_portal_url(
-            settings.CLIENT_PORTAL_BASE_URL,
-            default_url=settings.CLIENT_PORTAL_BASE_URL,
-            include_trailing_slash=False,
-            field_name="client_portal_base_url",
-        )
-        normalized["client_portal_browser_url"] = _normalize_client_portal_url(
-            settings.CLIENT_PORTAL_BROWSER_URL,
-            default_url=settings.CLIENT_PORTAL_BROWSER_URL,
-            include_trailing_slash=True,
-            field_name="client_portal_browser_url",
-        )
-
-    normalized["client_portal_verify_ssl"] = settings.CLIENT_PORTAL_VERIFY_SSL
+    normalized.pop("client_portal_base_url", None)
+    normalized.pop("client_portal_browser_url", None)
+    normalized.pop("client_portal_verify_ssl", None)
+    normalized.pop("client_portal_spawn_mode", None)
     return normalized
 
 
 def resolve_client_portal_base_url(config: dict[str, Any] | None = None) -> str:
-    config = sanitize_connection_config("ibkr", config, strict=False)
-    return str(config.get("client_portal_base_url", settings.CLIENT_PORTAL_BASE_URL)).rstrip("/")
-
-
-def resolve_client_portal_browser_url(config: dict[str, Any] | None = None) -> str:
-    config = sanitize_connection_config("ibkr", config, strict=False)
-    browser_url = str(config.get("client_portal_browser_url", settings.CLIENT_PORTAL_BROWSER_URL))
-    normalized = browser_url.rstrip("/")
-    if (
-        not normalized
-        or normalized.endswith("/ibkr-client-portal")
-        or normalized.endswith("/sso/Login?forwardTo=22&RL=1&ip2loc=US")
-    ):
-        parts = urlsplit(browser_url)
-        return urlunsplit(
-            (
-                parts.scheme or "https",
-                parts.netloc or "localhost:5000",
-                "/",
-                "",
-                "",
+    runtime_url = None
+    if isinstance(config, dict):
+        candidate = config.get(_CLIENT_PORTAL_RUNTIME_BASE_URL_KEY)
+        if isinstance(candidate, str) and candidate.strip():
+            runtime_url = _normalize_client_portal_url(
+                candidate,
+                default_url=candidate,
+                include_trailing_slash=False,
+                field_name=_CLIENT_PORTAL_RUNTIME_BASE_URL_KEY,
             )
-        )
-    return browser_url
+    if runtime_url:
+        return runtime_url.rstrip("/")
+
+    return _DEFAULT_CLIENT_PORTAL_INTERNAL_BASE_URL
 
 
 def resolve_client_portal_verify_ssl(config: dict[str, Any] | None = None) -> bool:
-    config = sanitize_connection_config("ibkr", config, strict=False)
-    return _as_bool(config.get("client_portal_verify_ssl", settings.CLIENT_PORTAL_VERIFY_SSL), default=False)
+    if isinstance(config, dict) and _CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY in config:
+        return _as_bool(config.get(_CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY), default=False)
+
+    return False
 
 
 def is_client_portal_transport(config: dict[str, Any] | None = None) -> bool:
@@ -470,7 +434,6 @@ def _has_dispatcher_marker(config: dict[str, Any] | None) -> bool:
 
 async def get_client_portal_auth_status(config: dict[str, Any] | None = None) -> dict[str, Any]:
     base_url = resolve_client_portal_base_url(config)
-    browser_url = resolve_client_portal_browser_url(config)
     verify_ssl = resolve_client_portal_verify_ssl(config)
     dispatcher_marker_present = _has_dispatcher_marker(config)
 
@@ -485,7 +448,6 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
         "bridge_ready": False,
         "ready_to_connect": False,
         "accounts": [],
-        "auth_url": browser_url,
         "base_url": base_url,
         "message": None,
         "payload": None,

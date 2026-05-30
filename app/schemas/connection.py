@@ -21,9 +21,6 @@ class ConnectionConfig(BaseModel):
     port: int | None = None
     client_id: int | None = None
     client_portal_enabled: bool | None = None
-    client_portal_base_url: str | None = None
-    client_portal_browser_url: str | None = None
-    client_portal_verify_ssl: bool | None = None
     # Generic
     api_key: str | None = None
     api_secret: str | None = None
