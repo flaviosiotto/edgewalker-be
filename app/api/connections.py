@@ -158,6 +158,7 @@ class ConnectDisconnectResponse(BaseModel):
     message: str | None = None
     accounts_discovered: int = 0
     auth_required: bool = False
+    launch_url: str | None = None
     auth_url: str | None = None
 
 
@@ -173,6 +174,7 @@ class ClientPortalAuthStatusResponse(BaseModel):
     ready_to_connect: bool = False
     gateway_started: bool
     connection_status: str
+    launch_url: str | None = None
     auth_url: str | None = None
     message: str | None = None
 
@@ -209,7 +211,10 @@ async def connect_endpoint(
     manager = get_connection_manager()
 
     if conn.broker_type == "ibkr" and is_client_portal_transport(conn.config or {}):
-        auth = await manager.begin_client_portal_auth(connection_id)
+        auth = await manager.begin_client_portal_auth(
+            connection_id,
+            user_id=current_user.id,
+        )
         if auth["ready_to_connect"]:
             result = await manager.complete_client_portal_connect(connection_id)
             return ConnectDisconnectResponse(
@@ -222,7 +227,8 @@ async def connect_endpoint(
             success=auth["service_ready"],
             message=auth["message"],
             auth_required=auth["service_ready"],
-            auth_url=auth["auth_url"],
+            launch_url=auth.get("launch_url"),
+            auth_url=auth.get("auth_url"),
         )
 
     result = await manager.connect(connection_id)

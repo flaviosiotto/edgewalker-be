@@ -41,6 +41,7 @@ from app.services.client_portal_service import (
     resolve_client_portal_browser_url,
     resolve_client_portal_verify_ssl,
 )
+from app.services.client_portal_launch_service import create_client_portal_launch_url
 from app.services.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
@@ -636,12 +637,15 @@ class ConnectionManager:
         self,
         connection_id: int,
         *,
-        config: dict[str, Any],
         gateway_started: bool,
         connection_status: str,
         status_message: str | None,
         updated_at: datetime | None,
     ) -> dict[str, Any] | None:
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            config = dict(conn.config or {}) if conn is not None else {}
+
         dispatcher_received_at = _parse_client_portal_dispatcher_received_at(config)
         deadline = self._client_portal_dispatcher_grace_deadline(
             connection_id,
@@ -665,6 +669,7 @@ class ConnectionManager:
             "ready_to_connect": False,
             "gateway_started": gateway_started,
             "connection_status": connection_status,
+            "launch_url": None,
             "auth_url": resolve_client_portal_browser_url(config),
             "message": CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE,
         }
@@ -887,7 +892,7 @@ class ConnectionManager:
             _gateway_clients[connection_id] = GatewayClient(connection_id, broker_type=broker_type)
         return _gateway_clients[connection_id]
 
-    async def begin_client_portal_auth(self, connection_id: int) -> dict[str, Any]:
+    async def begin_client_portal_auth(self, connection_id: int, *, user_id: int) -> dict[str, Any]:
         self._clear_client_portal_dispatcher_grace(connection_id)
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
@@ -916,11 +921,18 @@ class ConnectionManager:
                 conn.updated_at = datetime.now(timezone.utc)
                 session.commit()
 
+        launch_url = await create_client_portal_launch_url(
+            connection_id=connection_id,
+            user_id=user_id,
+            config=config,
+        )
+
         return {
             "service_ready": auth["service_ready"],
             "authenticated": auth["authenticated"],
             "ready_to_connect": auth["ready_to_connect"],
-            "auth_url": resolve_client_portal_browser_url(config),
+            "launch_url": launch_url,
+            "auth_url": launch_url,
             "message": message,
         }
 
@@ -975,7 +987,6 @@ class ConnectionManager:
 
         grace_payload = self._client_portal_dispatcher_grace_payload(
             connection_id,
-            config=config,
             gateway_started=gateway_started,
             connection_status=status_value,
             status_message=status_message,
@@ -1000,6 +1011,7 @@ class ConnectionManager:
             "ready_to_connect": auth.get("ready_to_connect", False),
             "gateway_started": gateway_started,
             "connection_status": status_value,
+            "launch_url": None,
             "auth_url": resolve_client_portal_browser_url(config),
             "message": auth["message"],
         }

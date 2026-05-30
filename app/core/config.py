@@ -12,10 +12,12 @@ class Settings(BaseSettings):
 
     CLIENT_PORTAL_BASE_URL: str = "https://ibkr-client-portal-gw:5000"
     CLIENT_PORTAL_BROWSER_URL: str = "https://localhost:5000/"
+    CLIENT_PORTAL_ACCESS_BASE_URL: str = ""
     CLIENT_PORTAL_VERIFY_SSL: bool = False
     CLIENT_PORTAL_ALLOWED_BASE_URLS: str = ""
     CLIENT_PORTAL_ALLOWED_BROWSER_URLS: str = ""
     CLIENT_PORTAL_PROXY_BRIDGE_TOKEN: str = ""
+    CLIENT_PORTAL_LAUNCH_TTL_SECONDS: int = 900
 
     DATABASE_URL: str = "sqlite:///./app.db"
 
