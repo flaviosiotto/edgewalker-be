@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(include_in_schema=False)
 
+_CLIENT_PORTAL_LOGIN_PATH = "/sso/Login?forwardTo=22&RL=1&ip2loc=US"
+
 _HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -139,7 +141,7 @@ async def start_client_portal_launch(launch_token: str, request: Request):
     if launch_session is None:
         raise HTTPException(status_code=404, detail="Launch session not found or expired")
 
-    response = RedirectResponse(url="/", status_code=HTTPStatus.TEMPORARY_REDIRECT)
+    response = RedirectResponse(url=_CLIENT_PORTAL_LOGIN_PATH, status_code=HTTPStatus.TEMPORARY_REDIRECT)
     response.set_cookie(
         key=get_client_portal_launch_cookie_name(),
         value=launch_token,
