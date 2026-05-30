@@ -83,13 +83,7 @@ async def start_client_portal_launch(launch_token: str, request: Request):
     return response
 
 
-@router.api_route(
-    "/{path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-)
-async def client_portal_access_proxy(path: str, request: Request):
-    _ensure_access_request(request)
-
+async def _proxy_client_portal_access(request: Request):
     launch_token, upstream_base_url, verify_ssl = await resolve_client_portal_proxy_target(request)
     upstream_response = await proxy_http_request(
         request,
@@ -111,3 +105,21 @@ async def client_portal_access_proxy(path: str, request: Request):
         upstream_base_url=upstream_base_url,
     )
     return response
+
+
+@router.api_route(
+    "/",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+)
+async def client_portal_access_proxy_root(request: Request):
+    _ensure_access_request(request)
+    return await _proxy_client_portal_access(request)
+
+
+@router.api_route(
+    "/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+)
+async def client_portal_access_proxy(path: str, request: Request):
+    _ensure_access_request(request)
+    return await _proxy_client_portal_access(request)
