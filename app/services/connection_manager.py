@@ -853,7 +853,7 @@ class ConnectionManager:
                     base_url=base_url,
                     verify=verify_ssl,
                     timeout=5.0,
-                    follow_redirects=True,
+                    follow_redirects=False,
                 ) as client:
                     response = await client.get("/")
                 if response.status_code < 500:
@@ -869,12 +869,21 @@ class ConnectionManager:
         )
 
     async def _ensure_client_portal_runtime(self, connection_id: int, config: dict[str, Any]) -> dict[str, Any]:
+        existing = self._get_client_portal_container(connection_id)
+        runtime_already_running = bool(existing and existing.status == "running")
         container_name, base_url, runtime_session_id = self._spawn_client_portal_gateway(connection_id)
-        try:
-            await self._wait_for_client_portal_gateway(base_url, verify_ssl=False)
-        except Exception:
-            self._destroy_client_portal_gateway(connection_id)
-            raise
+        if not runtime_already_running:
+            try:
+                await self._wait_for_client_portal_gateway(base_url, verify_ssl=False)
+            except Exception:
+                self._destroy_client_portal_gateway(connection_id)
+                raise
+        else:
+            logger.info(
+                "Reusing running Client Portal container %s for connection %s without readiness probe",
+                container_name,
+                connection_id,
+            )
 
         updated_config = _with_client_portal_runtime_state(
             config,

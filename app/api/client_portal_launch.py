@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(include_in_schema=False)
 
 _CLIENT_PORTAL_LOGIN_PATH = "/sso/Login?forwardTo=22&RL=1&ip2loc=US"
+_DISPATCHER_MESSAGE_MARKER = "edgewalker:client-portal-dispatcher-submit"
+_DISPATCHER_BRIDGE_SCRIPT = (
+    "<script>(function(){"
+    "try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:'edgewalker:client-portal-dispatcher-submit'},'*');}}catch(error){}"
+    "})();</script>"
+)
 
 _HOP_BY_HOP_HEADERS = {
     "connection",
@@ -40,10 +46,18 @@ def _ensure_access_request(request: Request) -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
-def _copy_response_headers(response: Response, upstream_headers, *, request: Request, upstream_base_url: str) -> None:
+def _copy_response_headers(
+    response: Response,
+    upstream_headers,
+    *,
+    request: Request,
+    upstream_base_url: str,
+    excluded_headers: set[str] | None = None,
+) -> None:
+    excluded = {header.lower() for header in (excluded_headers or set())}
     for key, value in upstream_headers.multi_items():
         lower = key.lower()
-        if lower in _HOP_BY_HOP_HEADERS or lower in {"content-length", "set-cookie"}:
+        if lower in _HOP_BY_HOP_HEADERS or lower in {"content-length", "set-cookie"} or lower in excluded:
             continue
         if lower == "location":
             value = _rewrite_location_header(value, request=request, upstream_base_url=upstream_base_url)
@@ -113,24 +127,49 @@ async def _mark_dispatcher_received_from_launch(launch_token: str) -> None:
         logger.warning("Failed to persist Client Portal Dispatcher for connection %s: %s", connection_id, exc)
 
 
-def _dispatcher_bridge_response() -> Response:
-    return Response(
-        content=(
+def _dispatcher_bridge_response_content(body: bytes, content_type: str | None) -> str:
+    normalized_content_type = (content_type or "").lower()
+
+    if _DISPATCHER_MESSAGE_MARKER.encode("utf-8") in body:
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError:
+            return (
+                "<!DOCTYPE html>"
+                "<html><head><meta charset='utf-8'><title>Interactive Brokers</title>"
+                "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
+                f"<body>{_DISPATCHER_BRIDGE_SCRIPT}Authorization received. Edgewalker is waiting for the brokerage session.</body></html>"
+            )
+
+    if "text/html" not in normalized_content_type:
+        return (
             "<!DOCTYPE html>"
             "<html><head><meta charset='utf-8'><title>Interactive Brokers</title>"
             "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
-            "<body><script>(function(){"
-            "try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:'edgewalker:client-portal-dispatcher-submit'},'*');}}catch(error){}"
-            "try{window.close();}catch(error){}"
-            "})();</script>Authorization received. You can close this window.</body></html>"
-        ),
-        status_code=HTTPStatus.OK,
-        media_type="text/html",
-        headers={
-            "Cache-Control": "no-store",
-            "Pragma": "no-cache",
-        },
-    )
+            f"<body>{_DISPATCHER_BRIDGE_SCRIPT}Authorization received. Edgewalker is waiting for the brokerage session.</body></html>"
+        )
+
+    try:
+        html = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return (
+            "<!DOCTYPE html>"
+            "<html><head><meta charset='utf-8'><title>Interactive Brokers</title>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
+            f"<body>{_DISPATCHER_BRIDGE_SCRIPT}Authorization received. Edgewalker is waiting for the brokerage session.</body></html>"
+        )
+
+    lowered_html = html.lower()
+    body_close_index = lowered_html.rfind("</body>")
+    html_close_index = lowered_html.rfind("</html>")
+
+    if body_close_index != -1:
+        return f"{html[:body_close_index]}{_DISPATCHER_BRIDGE_SCRIPT}{html[body_close_index:]}"
+
+    if html_close_index != -1:
+        return f"{html[:html_close_index]}{_DISPATCHER_BRIDGE_SCRIPT}{html[html_close_index:]}"
+
+    return f"{html}{_DISPATCHER_BRIDGE_SCRIPT}"
 
 
 @router.get("/client-portal/launch/{launch_token}")
@@ -170,7 +209,26 @@ async def _proxy_client_portal_access(request: Request):
         upstream_response.content,
     ):
         await _mark_dispatcher_received_from_launch(launch_token)
-        return _dispatcher_bridge_response()
+        response = Response(
+            content=_dispatcher_bridge_response_content(
+                upstream_response.content,
+                upstream_response.headers.get("content-type"),
+            ),
+            status_code=HTTPStatus.OK,
+            media_type="text/html",
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+            },
+        )
+        _copy_response_headers(
+            response,
+            upstream_response.headers,
+            request=request,
+            upstream_base_url=upstream_base_url,
+            excluded_headers={"content-type", "content-disposition", "cache-control", "pragma"},
+        )
+        return response
 
     status_code = upstream_response.status_code
     if request.method.upper() == "HEAD" or 100 <= status_code < 200 or status_code in {204, 304}:
