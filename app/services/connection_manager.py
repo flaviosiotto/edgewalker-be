@@ -87,6 +87,14 @@ CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS = max(
     0.5,
     float(os.getenv("CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS", "2")),
 )
+CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS = max(
+    0,
+    int(os.getenv("CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS", os.getenv("CLIENT_PORTAL_LAUNCH_TTL_SECONDS", "900"))),
+)
+CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS = max(
+    5.0,
+    float(os.getenv("CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS", "30")),
+)
 CLIENT_PORTAL_PROXY_BRIDGE_TOKEN = os.getenv("CLIENT_PORTAL_PROXY_BRIDGE_TOKEN", "").strip()
 
 # Shared Redis settings propagated to dynamically spawned gateway containers.
@@ -110,6 +118,9 @@ CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE = (
 )
 CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE = (
     "Dispatcher ricevuto. Attendo l'apertura della brokerage session IBKR."
+)
+CLIENT_PORTAL_RUNTIME_IDLE_STOP_MESSAGE = (
+    "Sessione Client Portal arrestata automaticamente per inattivita'. Riapri il login se vuoi riprovare."
 )
 CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY = "_client_portal_dispatcher_received_at"
 CLIENT_PORTAL_RUNTIME_BASE_URL_KEY = "_client_portal_runtime_base_url"
@@ -721,6 +732,117 @@ class ConnectionManager:
             except Exception as e:
                 logger.warning("Error destroying Client Portal container: %s", e)
 
+    async def _expire_idle_client_portal_runtime(
+        self,
+        *,
+        connection_id: int,
+        user_id: int,
+        config: dict[str, Any],
+        status_value: str,
+        age_seconds: float,
+    ) -> None:
+        logger.info(
+            "Stopping idle Client Portal container for connection %s after %.0fs (status=%s)",
+            connection_id,
+            age_seconds,
+            status_value,
+        )
+
+        self._clear_client_portal_dispatcher_grace(connection_id)
+
+        if _has_client_portal_runtime_state(config):
+            try:
+                await logout_client_portal_session(config)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to logout stale Client Portal session for connection %s: %s",
+                    connection_id,
+                    exc,
+                )
+
+        self._destroy_client_portal_gateway(connection_id)
+
+        try:
+            await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to clear stale Client Portal launch session for connection %s: %s",
+                connection_id,
+                exc,
+            )
+
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                return
+
+            conn.status = ConnectionStatus.DISCONNECTED.value
+            conn.status_message = CLIENT_PORTAL_RUNTIME_IDLE_STOP_MESSAGE
+            conn.updated_at = datetime.now(timezone.utc)
+            conn.config = _with_client_portal_dispatcher_received_at(
+                _clear_client_portal_runtime_state(conn.config),
+                None,
+            )
+            session.commit()
+
+    async def _cleanup_idle_client_portal_runtimes(self) -> None:
+        if CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS <= 0:
+            return
+
+        now = datetime.now(timezone.utc)
+        candidates: list[dict[str, Any]] = []
+
+        with get_session_context() as session:
+            connections = list(session.exec(select(Connection).where(Connection.broker_type == "ibkr")).all())
+
+        for conn in connections:
+            config = dict(conn.config or {})
+            if not is_client_portal_transport(config) or not _has_client_portal_runtime_state(config):
+                continue
+
+            if conn.status not in {
+                ConnectionStatus.AWAITING_AUTH.value,
+                ConnectionStatus.DISCONNECTED.value,
+                ConnectionStatus.ERROR.value,
+            }:
+                continue
+
+            updated_at = conn.updated_at
+            if updated_at is None:
+                continue
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            else:
+                updated_at = updated_at.astimezone(timezone.utc)
+
+            age_seconds = (now - updated_at).total_seconds()
+            if age_seconds < CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS:
+                continue
+
+            candidates.append(
+                {
+                    "connection_id": conn.id,
+                    "user_id": conn.user_id,
+                    "config": config,
+                    "status_value": conn.status,
+                    "age_seconds": age_seconds,
+                }
+            )
+
+        for candidate in candidates:
+            await self._expire_idle_client_portal_runtime(**candidate)
+
+    async def _run_client_portal_runtime_cleanup(self) -> None:
+        while self._running:
+            try:
+                await self._cleanup_idle_client_portal_runtimes()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Client Portal runtime cleanup iteration failed: %s", exc, exc_info=True)
+
+            await asyncio.sleep(CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS)
+
     async def _wait_for_client_portal_gateway(self, base_url: str, *, verify_ssl: bool) -> None:
         deadline = asyncio.get_running_loop().time() + CLIENT_PORTAL_GATEWAY_STARTUP_TIMEOUT_SECONDS
         last_error = ""
@@ -856,6 +978,11 @@ class ConnectionManager:
             session.commit()
 
         self._client_portal_dispatcher_received_at[connection_id] = dispatcher_received_at
+        logger.info(
+            "Recorded Client Portal Dispatcher for connection %s at %s",
+            connection_id,
+            dispatcher_received_at.isoformat(),
+        )
         return {
             "success": True,
             "message": CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE,
@@ -1016,6 +1143,11 @@ class ConnectionManager:
             config = await self._ensure_client_portal_runtime(connection_id, config)
         except Exception as exc:
             message = f"Client Portal non raggiungibile: {exc}"
+            logger.warning(
+                "Client Portal auth start failed for connection %s: %s",
+                connection_id,
+                exc,
+            )
             with get_session_context() as session:
                 conn = session.get(Connection, connection_id)
                 if conn is not None:
@@ -1059,6 +1191,11 @@ class ConnectionManager:
             )
         except Exception as exc:
             message = f"Client Portal launch non disponibile: {exc}"
+            logger.warning(
+                "Client Portal launch URL creation failed for connection %s: %s",
+                connection_id,
+                exc,
+            )
             with get_session_context() as session:
                 conn = session.get(Connection, connection_id)
                 if conn is not None:
@@ -1074,6 +1211,15 @@ class ConnectionManager:
                 "message": message,
             }
 
+        logger.info(
+            "Client Portal auth started for connection %s: service_ready=%s authenticated=%s ready_to_connect=%s launch_url=%s message=%s",
+            connection_id,
+            auth["service_ready"],
+            auth["authenticated"],
+            auth["ready_to_connect"],
+            bool(launch_url),
+            message,
+        )
         return {
             "service_ready": auth["service_ready"],
             "authenticated": auth["authenticated"],
@@ -1096,6 +1242,17 @@ class ConnectionManager:
             return ConnectorResult(success=False, message=f"Client Portal non raggiungibile: {exc}")
 
         auth = await get_client_portal_auth_status(config)
+        logger.info(
+            "Client Portal connect readiness for connection %s: service_ready=%s gateway_session_ready=%s session_authenticated=%s authenticated=%s bridge_ready=%s ready_to_connect=%s message=%s",
+            connection_id,
+            auth["service_ready"],
+            auth.get("gateway_session_ready", False),
+            auth.get("session_authenticated", False),
+            auth["authenticated"],
+            auth.get("bridge_ready", False),
+            auth.get("ready_to_connect", False),
+            auth.get("message"),
+        )
         if not auth["service_ready"]:
             return ConnectorResult(success=False, message=f"Client Portal non raggiungibile: {auth['message']}")
         if not auth["ready_to_connect"]:
@@ -1122,6 +1279,7 @@ class ConnectionManager:
                     conn.config = _with_client_portal_dispatcher_received_at(conn.config, None)
                     session.commit()
             await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
+            logger.info("Client Portal connect completed for connection %s", connection_id)
         return result
 
     async def client_portal_auth_status(self, connection_id: int, *, user_id: int | None = None) -> dict[str, Any]:
@@ -1164,13 +1322,21 @@ class ConnectionManager:
         )
         if grace_payload is not None:
             grace_payload["launch_url"] = launch_url
+            logger.info(
+                "Client Portal auth-status grace for connection %s: gateway_started=%s connection_status=%s launch_url=%s message=%s",
+                connection_id,
+                gateway_started,
+                status_value,
+                bool(launch_url),
+                grace_payload["message"],
+            )
             return grace_payload
 
         auth = await get_client_portal_auth_status(config)
         if auth.get("authenticated") or auth.get("session_authenticated") or auth.get("bridge_ready") or auth.get("ready_to_connect"):
             self._clear_client_portal_dispatcher_grace(connection_id)
 
-        return {
+        payload = {
             "service_ready": auth["service_ready"],
             "gateway_session_ready": auth.get("gateway_session_ready", False),
             "connected": auth.get("connected", False),
@@ -1185,6 +1351,21 @@ class ConnectionManager:
             "launch_url": launch_url,
             "message": auth["message"],
         }
+        logger.info(
+            "Client Portal auth-status for connection %s: service_ready=%s gateway_session_ready=%s session_authenticated=%s authenticated=%s bridge_ready=%s ready_to_connect=%s gateway_started=%s connection_status=%s launch_url=%s message=%s",
+            connection_id,
+            payload["service_ready"],
+            payload["gateway_session_ready"],
+            payload["session_authenticated"],
+            payload["authenticated"],
+            payload["bridge_ready"],
+            payload["ready_to_connect"],
+            payload["gateway_started"],
+            payload["connection_status"],
+            bool(payload["launch_url"]),
+            payload["message"],
+        )
+        return payload
 
     # ── Connect ──────────────────────────────────────────────────────
 
@@ -1523,6 +1704,9 @@ class ConnectionManager:
 
         if BROKER_ACCOUNT_SYNC_ENABLED:
             self._tasks.append(asyncio.create_task(self._run_broker_account_sync_consumer()))
+
+        if CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS > 0:
+            self._tasks.append(asyncio.create_task(self._run_client_portal_runtime_cleanup()))
 
         # On (re)start, no broker connections can be alive
         self._reset_connected_on_startup()
