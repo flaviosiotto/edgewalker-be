@@ -29,6 +29,7 @@ REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
 CLIENT_PORTAL_LAUNCH_COOKIE_NAME = "edgewalker_client_portal_launch"
+CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY = "_client_portal_runtime_session_id"
 
 _HOP_BY_HOP_HEADERS = {
     "connection",
@@ -60,6 +61,76 @@ def _launch_session_key(token: str) -> str:
 
 def _launch_session_cookie_key(token: str) -> str:
     return f"client-portal:launch-cookies:{token}"
+
+
+def _connection_launch_session_key(connection_id: int, user_id: int) -> str:
+    return f"client-portal:launch-connection:{user_id}:{connection_id}"
+
+
+def _decode_launch_session_payload(payload: str | None) -> dict[str, Any] | None:
+    if not payload:
+        return None
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    return data
+
+
+def _runtime_session_id_from_config(config: dict[str, Any] | None) -> str:
+    if not isinstance(config, dict):
+        return ""
+
+    value = config.get(CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY)
+    if not isinstance(value, str):
+        return ""
+
+    return value.strip()
+
+
+def _launch_session_matches(
+    launch_session: dict[str, Any],
+    *,
+    connection_id: int,
+    user_id: int,
+    runtime_session_id: str,
+) -> bool:
+    try:
+        payload_connection_id = int(launch_session.get("connection_id"))
+        payload_user_id = int(launch_session.get("user_id"))
+    except (TypeError, ValueError):
+        return False
+
+    if payload_connection_id != connection_id or payload_user_id != user_id:
+        return False
+
+    return str(launch_session.get("runtime_session_id") or "").strip() == runtime_session_id
+
+
+async def _refresh_launch_session_ttl(
+    redis: aioredis.Redis,
+    launch_token: str,
+    launch_session: dict[str, Any] | None = None,
+) -> None:
+    ttl_seconds = get_client_portal_launch_cookie_ttl_seconds()
+    await redis.expire(_launch_session_key(launch_token), ttl_seconds)
+    await redis.expire(_launch_session_cookie_key(launch_token), ttl_seconds)
+
+    if launch_session is None:
+        return
+
+    try:
+        connection_id = int(launch_session.get("connection_id"))
+        user_id = int(launch_session.get("user_id"))
+    except (TypeError, ValueError):
+        return
+
+    await redis.expire(_connection_launch_session_key(connection_id, user_id), ttl_seconds)
 
 
 def _normalized_access_base_url() -> str | None:
@@ -105,6 +176,7 @@ async def create_client_portal_launch_url(
     connection_id: int,
     user_id: int,
     config: dict[str, Any] | None,
+    force_new: bool = False,
 ) -> str:
     access_base_url = _normalized_access_base_url()
     if not access_base_url:
@@ -113,50 +185,86 @@ async def create_client_portal_launch_url(
             detail="CLIENT_PORTAL_ACCESS_BASE_URL is required for on-demand private Client Portal launch",
         )
 
-    token = secrets.token_urlsafe(32)
-    payload = {
-        "connection_id": connection_id,
-        "user_id": user_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
+    ttl_seconds = get_client_portal_launch_cookie_ttl_seconds()
+    mapping_key = _connection_launch_session_key(connection_id, user_id)
+    runtime_session_id = _runtime_session_id_from_config(config)
 
     redis = _create_async_redis_client()
     try:
-        await redis.setex(
-            _launch_session_key(token),
-            get_client_portal_launch_cookie_ttl_seconds(),
-            json.dumps(payload),
-        )
+        existing_token = str(await redis.get(mapping_key) or "").strip()
+        existing_session = None
+        if existing_token:
+            existing_session = _decode_launch_session_payload(
+                await redis.get(_launch_session_key(existing_token))
+            )
+
+        if (
+            not force_new
+            and existing_token
+            and existing_session is not None
+            and _launch_session_matches(
+                existing_session,
+                connection_id=connection_id,
+                user_id=user_id,
+                runtime_session_id=runtime_session_id,
+            )
+        ):
+            await _refresh_launch_session_ttl(redis, existing_token, existing_session)
+            return f"{access_base_url}/client-portal/launch/{existing_token}"
+
+        token = secrets.token_urlsafe(32)
+        payload = {
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "runtime_session_id": runtime_session_id,
+        }
+
+        await redis.setex(_launch_session_key(token), ttl_seconds, json.dumps(payload))
+        await redis.setex(mapping_key, ttl_seconds, token)
+
+        if existing_token and existing_token != token:
+            await redis.delete(
+                _launch_session_key(existing_token),
+                _launch_session_cookie_key(existing_token),
+            )
     finally:
         await redis.aclose()
 
     return f"{access_base_url}/client-portal/launch/{token}"
 
 
+async def clear_client_portal_launch_session(*, connection_id: int, user_id: int) -> None:
+    redis = _create_async_redis_client()
+    mapping_key = _connection_launch_session_key(connection_id, user_id)
+    try:
+        launch_token = str(await redis.get(mapping_key) or "").strip()
+        keys = [mapping_key]
+        if launch_token:
+            keys.extend([
+                _launch_session_key(launch_token),
+                _launch_session_cookie_key(launch_token),
+            ])
+        await redis.delete(*keys)
+    finally:
+        await redis.aclose()
+
+
 async def get_client_portal_launch_session(launch_token: str) -> dict[str, Any] | None:
     if not launch_token.strip():
         return None
 
+    payload = None
     redis = _create_async_redis_client()
     try:
         payload = await redis.get(_launch_session_key(launch_token))
-        if payload:
-            ttl_seconds = get_client_portal_launch_cookie_ttl_seconds()
-            await redis.expire(_launch_session_key(launch_token), ttl_seconds)
-            await redis.expire(_launch_session_cookie_key(launch_token), ttl_seconds)
+        launch_session = _decode_launch_session_payload(payload)
+        if launch_session is not None:
+            await _refresh_launch_session_ttl(redis, launch_token, launch_session)
     finally:
         await redis.aclose()
 
-    if not payload:
-        return None
-
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data
+    return _decode_launch_session_payload(payload)
 
 
 async def _get_client_portal_launch_cookies(launch_token: str) -> dict[str, str]:

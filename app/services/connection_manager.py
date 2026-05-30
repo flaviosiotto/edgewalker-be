@@ -41,7 +41,10 @@ from app.services.client_portal_service import (
     resolve_client_portal_base_url,
     resolve_client_portal_verify_ssl,
 )
-from app.services.client_portal_launch_service import create_client_portal_launch_url
+from app.services.client_portal_launch_service import (
+    clear_client_portal_launch_session,
+    create_client_portal_launch_url,
+)
 from app.services.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
@@ -112,6 +115,7 @@ CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY = "_client_portal_dispatcher_received_a
 CLIENT_PORTAL_RUNTIME_BASE_URL_KEY = "_client_portal_runtime_base_url"
 CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY = "_client_portal_runtime_verify_ssl"
 CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY = "_client_portal_runtime_container_name"
+CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY = "_client_portal_runtime_session_id"
 
 
 def _safe_float(value: Any) -> float | None:
@@ -145,12 +149,14 @@ def _with_client_portal_runtime_state(
     *,
     base_url: str,
     container_name: str,
+    runtime_session_id: str,
     verify_ssl: bool = False,
 ) -> dict[str, Any]:
     updated = dict(config or {})
     updated[CLIENT_PORTAL_RUNTIME_BASE_URL_KEY] = base_url.rstrip("/")
     updated[CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY] = bool(verify_ssl)
     updated[CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY] = container_name
+    updated[CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY] = runtime_session_id.strip()
     return updated
 
 
@@ -159,6 +165,7 @@ def _clear_client_portal_runtime_state(config: dict[str, Any] | None) -> dict[st
     updated.pop(CLIENT_PORTAL_RUNTIME_BASE_URL_KEY, None)
     updated.pop(CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY, None)
     updated.pop(CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY, None)
+    updated.pop(CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY, None)
     return updated
 
 
@@ -660,7 +667,7 @@ class ConnectionManager:
             logger.warning("Docker error checking Client Portal container: %s", e)
             return None
 
-    def _spawn_client_portal_gateway(self, connection_id: int) -> tuple[str, str]:
+    def _spawn_client_portal_gateway(self, connection_id: int) -> tuple[str, str, str]:
         if not self._docker:
             raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}")
         if not CLIENT_PORTAL_GATEWAY_IMAGE:
@@ -670,7 +677,7 @@ class ConnectionManager:
         existing = self._get_client_portal_container(connection_id)
         if existing:
             if existing.status == "running":
-                return container_name, _client_portal_runtime_base_url(container_name)
+                return container_name, _client_portal_runtime_base_url(container_name), existing.id
             existing.remove(force=True)
 
         env = {
@@ -687,7 +694,7 @@ class ConnectionManager:
 
         try:
             user = _spawn_container_user()
-            self._docker.containers.run(
+            container = self._docker.containers.run(
                 image=CLIENT_PORTAL_GATEWAY_IMAGE,
                 name=container_name,
                 environment=env,
@@ -702,7 +709,7 @@ class ConnectionManager:
             logger.error("Failed to spawn Client Portal container: %s", e)
             raise
 
-        return container_name, _client_portal_runtime_base_url(container_name)
+        return container_name, _client_portal_runtime_base_url(container_name), container.id
 
     def _destroy_client_portal_gateway(self, connection_id: int) -> None:
         container = self._get_client_portal_container(connection_id)
@@ -740,7 +747,7 @@ class ConnectionManager:
         )
 
     async def _ensure_client_portal_runtime(self, connection_id: int, config: dict[str, Any]) -> dict[str, Any]:
-        container_name, base_url = self._spawn_client_portal_gateway(connection_id)
+        container_name, base_url, runtime_session_id = self._spawn_client_portal_gateway(connection_id)
         try:
             await self._wait_for_client_portal_gateway(base_url, verify_ssl=False)
         except Exception:
@@ -751,6 +758,7 @@ class ConnectionManager:
             config,
             base_url=base_url,
             container_name=container_name,
+            runtime_session_id=runtime_session_id,
             verify_ssl=False,
         )
         with get_session_context() as session:
@@ -1047,6 +1055,7 @@ class ConnectionManager:
                 connection_id=connection_id,
                 user_id=user_id,
                 config=config,
+                force_new=True,
             )
         except Exception as exc:
             message = f"Client Portal launch non disponibile: {exc}"
@@ -1079,6 +1088,7 @@ class ConnectionManager:
             if conn is None:
                 return ConnectorResult(success=False, message="Connection not found")
             config = dict(conn.config or {})
+            user_id = conn.user_id
 
         try:
             config = await self._ensure_client_portal_runtime(connection_id, config)
@@ -1111,9 +1121,10 @@ class ConnectionManager:
                 if conn is not None:
                     conn.config = _with_client_portal_dispatcher_received_at(conn.config, None)
                     session.commit()
+            await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
         return result
 
-    async def client_portal_auth_status(self, connection_id: int) -> dict[str, Any]:
+    async def client_portal_auth_status(self, connection_id: int, *, user_id: int | None = None) -> dict[str, Any]:
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
             if conn is None:
@@ -1126,6 +1137,21 @@ class ConnectionManager:
 
         config = await self._ensure_client_portal_runtime(connection_id, config)
 
+        launch_url = None
+        if user_id is not None and status_value == ConnectionStatus.AWAITING_AUTH.value:
+            try:
+                launch_url = await create_client_portal_launch_url(
+                    connection_id=connection_id,
+                    user_id=user_id,
+                    config=config,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to refresh Client Portal launch URL for connection %s: %s",
+                    connection_id,
+                    exc,
+                )
+
         container = self._get_container(connection_id, broker_type)
         gateway_started = bool(container and container.status == "running")
 
@@ -1137,6 +1163,7 @@ class ConnectionManager:
             updated_at=updated_at,
         )
         if grace_payload is not None:
+            grace_payload["launch_url"] = launch_url
             return grace_payload
 
         auth = await get_client_portal_auth_status(config)
@@ -1155,7 +1182,7 @@ class ConnectionManager:
             "ready_to_connect": auth.get("ready_to_connect", False),
             "gateway_started": gateway_started,
             "connection_status": status_value,
-            "launch_url": None,
+            "launch_url": launch_url,
             "message": auth["message"],
         }
 

@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
+from app.services.connection_manager import get_connection_manager
 from app.services.client_portal_launch_service import (
     get_client_portal_launch_cookie_name,
     get_client_portal_launch_cookie_ttl_seconds,
@@ -62,6 +63,74 @@ def _rewrite_location_header(location: str, *, request: Request, upstream_base_u
     return location
 
 
+def _is_dispatcher_success_response(
+    request: Request,
+    status_code: int,
+    content_type: str | None,
+    body: bytes,
+) -> bool:
+    path = (str(request.scope.get("path") or "/").rstrip("/") or "/")
+    if path != "/sso/Dispatcher":
+        return False
+    if request.method.upper() == "HEAD" or status_code >= 400:
+        return False
+
+    normalized_content_type = (content_type or "").lower()
+    if normalized_content_type and "text/html" not in normalized_content_type and "text/plain" not in normalized_content_type:
+        return False
+
+    normalized_body = body.lower()
+    if b"client login succeeds" in normalized_body:
+        return True
+
+    # The unauthenticated login shell can still render on /sso/Dispatcher with a
+    # 200 response; do not treat that page as a completed authorization.
+    if (
+        b"jquery-3.7.0/jquery.min.js" in normalized_body
+        or b"forge-1.3.1.all.min.js" in normalized_body
+        or b"js.cookie.min.js" in normalized_body
+    ):
+        return False
+
+    return request.method.upper() == "POST"
+
+
+async def _mark_dispatcher_received_from_launch(launch_token: str) -> None:
+    launch_session = await get_client_portal_launch_session(launch_token)
+    if launch_session is None:
+        return
+
+    try:
+        connection_id = int(launch_session.get("connection_id"))
+    except (TypeError, ValueError):
+        return
+
+    try:
+        await get_connection_manager().mark_client_portal_dispatcher_received(connection_id)
+    except Exception as exc:
+        logger.warning("Failed to persist Client Portal Dispatcher for connection %s: %s", connection_id, exc)
+
+
+def _dispatcher_bridge_response() -> Response:
+    return Response(
+        content=(
+            "<!DOCTYPE html>"
+            "<html><head><meta charset='utf-8'><title>Interactive Brokers</title>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
+            "<body><script>(function(){"
+            "try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:'edgewalker:client-portal-dispatcher-submit'},'*');}}catch(error){}"
+            "try{window.close();}catch(error){}"
+            "})();</script>Authorization received. You can close this window.</body></html>"
+        ),
+        status_code=HTTPStatus.OK,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+        },
+    )
+
+
 @router.get("/client-portal/launch/{launch_token}")
 async def start_client_portal_launch(launch_token: str, request: Request):
     _ensure_access_request(request)
@@ -91,6 +160,15 @@ async def _proxy_client_portal_access(request: Request):
         upstream_base_url=upstream_base_url,
         verify_ssl=verify_ssl,
     )
+
+    if _is_dispatcher_success_response(
+        request,
+        upstream_response.status_code,
+        upstream_response.headers.get("content-type"),
+        upstream_response.content,
+    ):
+        await _mark_dispatcher_received_from_launch(launch_token)
+        return _dispatcher_bridge_response()
 
     status_code = upstream_response.status_code
     if request.method.upper() == "HEAD" or 100 <= status_code < 200 or status_code in {204, 304}:

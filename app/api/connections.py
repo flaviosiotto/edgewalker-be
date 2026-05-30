@@ -250,7 +250,7 @@ async def client_portal_auth_status_endpoint(
         raise HTTPException(status_code=400, detail="Connection is not configured for IBKR Client Portal")
 
     manager = get_connection_manager()
-    payload = await manager.client_portal_auth_status(connection_id)
+    payload = await manager.client_portal_auth_status(connection_id, user_id=current_user.id)
     return ClientPortalAuthStatusResponse(**payload)
 
 
