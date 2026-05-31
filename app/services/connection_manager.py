@@ -1172,16 +1172,7 @@ class ConnectionManager:
                 "message": message,
             }
 
-        auth = await get_client_portal_auth_status(config)
         message = "Autenticazione IBKR richiesta nel popup Client Portal."
-        if auth["ready_to_connect"]:
-            message = "Sessione Client Portal pronta per il gateway."
-        elif auth["gateway_session_ready"] and not auth["authenticated"]:
-            message = "Login Client Portal completato. In attesa dell'apertura della brokerage session IBKR."
-        elif auth["service_ready"] and auth.get("session_authenticated") and not auth.get("bridge_ready"):
-            message = "Sessione Client Portal autenticata ma bridge brokerage non pronto. Attendi il completamento del login IBKR."
-        elif not auth["service_ready"]:
-            message = f"Client Portal non raggiungibile: {auth['message']}"
 
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
@@ -1223,16 +1214,16 @@ class ConnectionManager:
         logger.info(
             "Client Portal auth started for connection %s: service_ready=%s authenticated=%s ready_to_connect=%s launch_url=%s message=%s",
             connection_id,
-            auth["service_ready"],
-            auth["authenticated"],
-            auth["ready_to_connect"],
+            True,
+            False,
+            False,
             bool(launch_url),
             message,
         )
         return {
-            "service_ready": auth["service_ready"],
-            "authenticated": auth["authenticated"],
-            "ready_to_connect": auth["ready_to_connect"],
+            "service_ready": True,
+            "authenticated": False,
+            "ready_to_connect": False,
             "launch_url": launch_url,
             "message": message,
         }
