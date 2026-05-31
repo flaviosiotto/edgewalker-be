@@ -64,6 +64,26 @@ def _copy_response_headers(
         response.headers.append(key, value)
 
 
+def _describe_set_cookie(raw_cookie: str) -> str:
+    parts = [segment.strip() for segment in raw_cookie.split(";") if segment.strip()]
+    if not parts:
+        return "<empty>"
+
+    name = parts[0].split("=", 1)[0].strip()
+    attributes: list[str] = []
+    for segment in parts[1:]:
+        if "=" in segment:
+            key, value = segment.split("=", 1)
+            attributes.append(f"{key.strip()}={value.strip()}")
+        else:
+            attributes.append(segment.strip())
+
+    descriptor = name
+    if attributes:
+        descriptor = f"{name} [{'; '.join(attributes)}]"
+    return descriptor
+
+
 def _log_dispatcher_upstream_headers(
     upstream_headers,
     *,
@@ -80,13 +100,13 @@ def _log_dispatcher_upstream_headers(
         ]
 
     logger.warning(
-        "Dispatcher upstream headers: status=%s login_shell=%s content_type=%s location=%s set_cookie_count=%s set_cookie_names=%s",
+        "Dispatcher upstream headers: status=%s login_shell=%s content_type=%s location=%s set_cookie_count=%s set_cookie_attrs=%s",
         status_code,
         login_shell,
         str(upstream_headers.get("content-type", "")),
         str(upstream_headers.get("location", "")),
         len(set_cookie_headers),
-        [cookie.split("=", 1)[0].strip() for cookie in set_cookie_headers],
+        [_describe_set_cookie(cookie) for cookie in set_cookie_headers],
     )
 
 
