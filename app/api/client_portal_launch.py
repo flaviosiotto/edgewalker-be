@@ -64,6 +64,32 @@ def _copy_response_headers(
         response.headers.append(key, value)
 
 
+def _log_dispatcher_upstream_headers(
+    upstream_headers,
+    *,
+    status_code: int,
+    login_shell: bool,
+) -> None:
+    try:
+        set_cookie_headers = upstream_headers.get_list("set-cookie")
+    except AttributeError:
+        set_cookie_headers = [
+            value
+            for key, value in upstream_headers.multi_items()
+            if str(key).lower() == "set-cookie"
+        ]
+
+    logger.warning(
+        "Dispatcher upstream headers: status=%s login_shell=%s content_type=%s location=%s set_cookie_count=%s set_cookie_names=%s",
+        status_code,
+        login_shell,
+        str(upstream_headers.get("content-type", "")),
+        str(upstream_headers.get("location", "")),
+        len(set_cookie_headers),
+        [cookie.split("=", 1)[0].strip() for cookie in set_cookie_headers],
+    )
+
+
 def _rewrite_location_header(location: str, *, request: Request, upstream_base_url: str) -> str:
     if not location:
         return location
@@ -202,12 +228,20 @@ async def _proxy_client_portal_access(request: Request):
         verify_ssl=verify_ssl,
     )
 
-    if _is_dispatcher_success_response(
+    dispatcher_response = _is_dispatcher_success_response(
         request,
         upstream_response.status_code,
         upstream_response.headers.get("content-type"),
         upstream_response.content,
-    ):
+    )
+    if (str(request.scope.get("path") or "/").rstrip("/") or "/") == "/sso/Dispatcher":
+        _log_dispatcher_upstream_headers(
+            upstream_response.headers,
+            status_code=upstream_response.status_code,
+            login_shell=not dispatcher_response,
+        )
+
+    if dispatcher_response:
         await _mark_dispatcher_received_from_launch(launch_token)
         response = Response(
             content=_dispatcher_bridge_response_content(
