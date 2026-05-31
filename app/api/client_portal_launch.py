@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from http import HTTPStatus
 import logging
+import secrets
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
@@ -256,7 +257,13 @@ async def start_client_portal_launch(launch_token: str, request: Request):
             raise HTTPException(status_code=404, detail="Launch session not found or expired")
 
         prefix = client_portal_path_prefix(connection_id)
-        redirect_url = f"{prefix}{_CLIENT_PORTAL_LOGIN_PATH}"
+        # Cache-busting nonce: during the period the Traefik router was broken,
+        # browsers heuristically cached the SPA shell for /ib-access/* URLs (nginx
+        # served index.html with etag/last-modified and no Cache-Control). A fresh
+        # nonce forces the browser to request a never-seen URL so it cannot serve
+        # the stale SPA from cache and instead hits the forwardAuth gate + cpgw.
+        cache_bust = secrets.token_urlsafe(8)
+        redirect_url = f"{prefix}{_CLIENT_PORTAL_LOGIN_PATH}&_cb={cache_bust}"
         cookie_path = prefix
     else:
         _ensure_access_request(request)
