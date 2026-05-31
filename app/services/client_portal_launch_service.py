@@ -410,22 +410,36 @@ async def proxy_http_request(
     body = await request.body()
     session_cookies = await _get_client_portal_launch_cookies(launch_token)
 
+    # The browser carries the authoritative SSO cookie set, including JS-set login
+    # challenge cookies (e.g. XYZAB, XYZAB_AM.LOGIN) that are never emitted via
+    # Set-Cookie and therefore never make it into the Redis snapshot. Merge the
+    # browser cookies over the snapshot (browser wins) so the IBKR gateway receives
+    # the same cookies a co-located browser would send, while keeping snapshot-only
+    # cookies (e.g. URL_PARAM, web) as a fallback for server-side polling requests.
+    launch_cookie_name = get_client_portal_launch_cookie_name()
+    browser_cookies = {
+        name: value
+        for name, value in request.cookies.items()
+        if name != launch_cookie_name
+    }
+    forwarded_cookies = {**session_cookies, **browser_cookies}
+
     if path in ("/sso/Dispatcher", "/sso/Authenticator"):
-        browser_cookie_names = sorted(request.cookies.keys())
         logger.warning(
             "Client Portal proxy %s request cookies: method=%s browser_cookie_names=%s "
-            "injected_session_cookie_names=%s (browser cookies are stripped, Redis snapshot is forwarded)",
+            "snapshot_cookie_names=%s forwarded_cookie_names=%s",
             path,
             request.method,
-            browser_cookie_names,
+            sorted(browser_cookies.keys()),
             sorted(session_cookies.keys()),
+            sorted(forwarded_cookies.keys()),
         )
 
     async with httpx.AsyncClient(verify=verify_ssl, follow_redirects=False, timeout=120.0) as client:
         response = await client.request(
             request.method,
             upstream_url,
-            headers=_filtered_proxy_headers(request.headers, session_cookies),
+            headers=_filtered_proxy_headers(request.headers, forwarded_cookies),
             content=body if body else None,
         )
     await _capture_client_portal_launch_cookies(launch_token, response.headers)
