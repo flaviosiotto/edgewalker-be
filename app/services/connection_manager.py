@@ -1312,6 +1312,7 @@ class ConnectionManager:
 
         container = self._get_container(connection_id, broker_type)
         gateway_started = bool(container and container.status == "running")
+        dispatcher_received_at = _parse_client_portal_dispatcher_received_at(config)
 
         grace_payload = self._client_portal_dispatcher_grace_payload(
             connection_id,
@@ -1331,6 +1332,35 @@ class ConnectionManager:
                 grace_payload["message"],
             )
             return grace_payload
+
+        if (
+            status_value == ConnectionStatus.AWAITING_AUTH.value
+            and dispatcher_received_at is None
+        ):
+            payload = {
+                "service_ready": True,
+                "gateway_session_ready": False,
+                "connected": False,
+                "session_authenticated": False,
+                "authenticated": False,
+                "established": False,
+                "competing": False,
+                "bridge_ready": False,
+                "ready_to_connect": False,
+                "gateway_started": gateway_started,
+                "connection_status": status_value,
+                "launch_url": launch_url,
+                "message": status_message or "Sessione Client Portal non autenticata. Completa il login nel popup.",
+            }
+            logger.info(
+                "Client Portal auth-status pre-dispatcher for connection %s: gateway_started=%s connection_status=%s launch_url=%s message=%s",
+                connection_id,
+                gateway_started,
+                status_value,
+                bool(launch_url),
+                payload["message"],
+            )
+            return payload
 
         auth = await get_client_portal_auth_status(config)
         if auth.get("authenticated") or auth.get("session_authenticated") or auth.get("bridge_ready") or auth.get("ready_to_connect"):
