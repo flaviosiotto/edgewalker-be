@@ -271,6 +271,11 @@ async def start_client_portal_launch(launch_token: str, request: Request):
         cookie_path = "/"
 
     response = RedirectResponse(url=redirect_url, status_code=HTTPStatus.TEMPORARY_REDIRECT)
+    # The launch URL is stable across auth-status polls (same launch token is
+    # reused), so the browser must never cache this 307. A cached redirect would
+    # replay a stale Location and serve the previously cached SPA shell for
+    # /ib-access/* instead of re-hitting the forwardAuth gate + cpgw container.
+    response.headers["Cache-Control"] = "no-store"
     response.set_cookie(
         key=get_client_portal_launch_cookie_name(),
         value=launch_token,
