@@ -135,6 +135,22 @@ CLIENT_PORTAL_TRAEFIK_SERVERSTRANSPORT = os.getenv(
 CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE = os.getenv(
     "CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE", ""
 ).strip()
+# Traefik API base URL (e.g. http://dokploy-traefik:8080) used to confirm the
+# per-connection cpgw router has actually been discovered before the backend
+# hands the launch URL to the browser. Without this check the popup can open
+# BEFORE Traefik picks up the new container's labels, so the first request to
+# /ib-access/{id}/* falls through to the lower-priority frontend SPA router and
+# the user sees the SPA until they refresh (by which point the router exists).
+# Empty disables the router-readiness wait (falls back to shim-only probe).
+CLIENT_PORTAL_TRAEFIK_API_URL = os.getenv("CLIENT_PORTAL_TRAEFIK_API_URL", "").strip().rstrip("/")
+CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS = max(
+    0.0,
+    float(os.getenv("CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS", "15")),
+)
+CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS = max(
+    0.25,
+    float(os.getenv("CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS", "0.5")),
+)
 
 
 def _client_portal_path_prefix(connection_id: int) -> str:
@@ -968,6 +984,63 @@ class ConnectionManager:
             f"Client Portal gateway did not become ready in time: {last_error or 'timeout'}"
         )
 
+    async def _wait_for_client_portal_router(self, connection_id: int) -> None:
+        """Wait until Traefik has discovered the per-connection ``cpgw-{id}``
+        router. The Docker provider picks up the new container's labels
+        asynchronously, so the browser popup can open before the router exists.
+        Until then the lower-priority frontend SPA router answers /ib-access/{id},
+        which is why the user sees the SPA on first open and the login only after
+        a refresh. Polling the Traefik API closes that race deterministically.
+        """
+        if not CLIENT_PORTAL_TRAEFIK_API_URL or CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS <= 0:
+            return
+
+        router_name = f"{CLIENT_PORTAL_GATEWAY_PREFIX}{connection_id}"
+        deadline = asyncio.get_running_loop().time() + CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS
+        last_error = ""
+
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                async with httpx.AsyncClient(
+                    base_url=CLIENT_PORTAL_TRAEFIK_API_URL,
+                    timeout=5.0,
+                    follow_redirects=False,
+                ) as client:
+                    response = await client.get("/api/rawdata")
+                if response.status_code < 500:
+                    routers = (response.json() or {}).get("routers", {})
+                    for name, router in routers.items():
+                        # Provider-qualified names look like "cpgw-4@docker".
+                        if name.split("@", 1)[0] != router_name:
+                            continue
+                        if str(router.get("status", "")).lower() in ("", "enabled"):
+                            logger.info(
+                                "Traefik router %s discovered for connection %s",
+                                name,
+                                connection_id,
+                            )
+                            return
+                    last_error = "router not yet present"
+                else:
+                    last_error = f"HTTP {response.status_code}"
+            except Exception as exc:
+                last_error = str(exc)
+
+            await asyncio.sleep(CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS)
+
+        # Non-fatal: the router usually appears within a second of timeout and a
+        # browser refresh recovers. Surface a warning instead of failing the
+        # launch so users are never blocked by a slow Traefik provider refresh.
+        logger.warning(
+            "Traefik router %s not confirmed within %.0fs for connection %s (%s); "
+            "proceeding anyway",
+            router_name,
+            CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS,
+            connection_id,
+            last_error or "timeout",
+        )
+
+
     async def _ensure_client_portal_runtime(self, connection_id: int, config: dict[str, Any]) -> dict[str, Any]:
         existing = self._get_client_portal_container(connection_id)
         runtime_already_running = bool(existing and existing.status == "running")
@@ -984,6 +1057,12 @@ class ConnectionManager:
                 container_name,
                 connection_id,
             )
+
+        # Confirm Traefik has discovered the router before returning the launch
+        # URL, otherwise the popup may open before the route exists and the first
+        # request falls through to the frontend SPA (visible until a refresh).
+        if CLIENT_PORTAL_PATH_ROUTING_ENABLED:
+            await self._wait_for_client_portal_router(connection_id)
 
         updated_config = _with_client_portal_runtime_state(
             config,
