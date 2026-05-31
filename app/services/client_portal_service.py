@@ -277,6 +277,15 @@ async def _post_with_get_fallback(
     *,
     json_body: Any | None = None,
 ) -> httpx.Response:
+    # The gateway proxy bridges the browser-authenticated session cookies onto
+    # these server-side /v1/api calls, but ONLY when the request carries no
+    # Cookie header of its own.  httpx persists Set-Cookie from each (401)
+    # response into its jar and would replay it on the next request, which
+    # suppresses the bridge override and locks every probe at 401.  Clear the
+    # jar before each request so the gateway always re-injects the bridged
+    # session cookies.
+    client.cookies.clear()
+
     post_kwargs: dict[str, Any]
     if json_body is None:
         post_kwargs = {"headers": {"Content-Length": "0"}}
@@ -287,6 +296,7 @@ async def _post_with_get_fallback(
     if response.status_code not in _CLIENT_PORTAL_SESSION_POST_FALLBACK_STATUS_CODES:
         return response
 
+    client.cookies.clear()
     return await client.get(path)
 
 
@@ -308,6 +318,7 @@ async def _initialize_client_portal_brokerage_session(
     result["attempted"] = True
 
     try:
+        client.cookies.clear()
         response = await client.post(
             "/v1/api/iserver/auth/ssodh/init",
             json={"publish": True, "compete": False},
@@ -548,6 +559,7 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
                         result["session_authenticated"] = True
                         result["authenticated"] = True
                 else:
+                    client.cookies.clear()
                     accounts_response = await client.get("/v1/api/portfolio/accounts")
                     if accounts_response.status_code != 401:
                         accounts_response.raise_for_status()
@@ -567,6 +579,7 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
 
             if session_authenticated:
                 try:
+                    client.cookies.clear()
                     bridge_response = await client.get("/v1/api/iserver/accounts")
                     if bridge_response.status_code != 401:
                         bridge_response.raise_for_status()
@@ -626,6 +639,7 @@ async def logout_client_portal_session(config: dict[str, Any] | None = None) -> 
             follow_redirects=True,
             headers=_client_portal_proxy_headers(),
         ) as client:
+            client.cookies.clear()
             response = await client.post("/v1/api/logout", headers={"Content-Length": "0"})
             if response.status_code not in (200, 204, 401):
                 response.raise_for_status()
