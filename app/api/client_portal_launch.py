@@ -12,8 +12,11 @@ from app.services.client_portal_launch_service import (
     get_client_portal_launch_cookie_ttl_seconds,
     get_client_portal_launch_session,
     is_client_portal_access_request,
+    is_client_portal_path_routing_enabled,
+    client_portal_path_prefix,
     proxy_http_request,
     resolve_client_portal_proxy_target,
+    validate_client_portal_access,
 )
 
 
@@ -239,13 +242,28 @@ def _dispatcher_bridge_response_content(body: bytes, content_type: str | None) -
 
 @router.get("/client-portal/launch/{launch_token}")
 async def start_client_portal_launch(launch_token: str, request: Request):
-    _ensure_access_request(request)
-
     launch_session = await get_client_portal_launch_session(launch_token)
     if launch_session is None:
+        if is_client_portal_path_routing_enabled():
+            raise HTTPException(status_code=404, detail="Launch session not found or expired")
+        _ensure_access_request(request)
         raise HTTPException(status_code=404, detail="Launch session not found or expired")
 
-    response = RedirectResponse(url=_CLIENT_PORTAL_LOGIN_PATH, status_code=HTTPStatus.TEMPORARY_REDIRECT)
+    if is_client_portal_path_routing_enabled():
+        try:
+            connection_id = int(launch_session.get("connection_id"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=404, detail="Launch session not found or expired")
+
+        prefix = client_portal_path_prefix(connection_id)
+        redirect_url = f"{prefix}{_CLIENT_PORTAL_LOGIN_PATH}"
+        cookie_path = prefix
+    else:
+        _ensure_access_request(request)
+        redirect_url = _CLIENT_PORTAL_LOGIN_PATH
+        cookie_path = "/"
+
+    response = RedirectResponse(url=redirect_url, status_code=HTTPStatus.TEMPORARY_REDIRECT)
     response.set_cookie(
         key=get_client_portal_launch_cookie_name(),
         value=launch_token,
@@ -253,9 +271,24 @@ async def start_client_portal_launch(launch_token: str, request: Request):
         httponly=True,
         samesite="lax",
         secure=request.url.scheme == "https",
-        path="/",
+        path=cookie_path,
     )
     return response
+
+
+@router.api_route(
+    "/client-portal/access-check/{connection_id}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+)
+async def client_portal_access_check(connection_id: int, request: Request):
+    """forwardAuth gate invoked by Traefik before forwarding the browser to the
+    per-connection Client Portal container. Returns 200 only when the launch
+    cookie maps to a live launch session owning *connection_id*.
+    """
+    launch_token = request.cookies.get(get_client_portal_launch_cookie_name(), "")
+    if not await validate_client_portal_access(launch_token, connection_id):
+        raise HTTPException(status_code=HTTPStatus.UNAUTHORIZED, detail="Unauthorized")
+    return Response(status_code=HTTPStatus.OK)
 
 
 async def _proxy_client_portal_access(request: Request):

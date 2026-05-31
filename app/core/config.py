@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     CLIENT_PORTAL_ACCESS_BASE_URL: str = ""
     CLIENT_PORTAL_PROXY_BRIDGE_TOKEN: str = ""
     CLIENT_PORTAL_LAUNCH_TTL_SECONDS: int = 900
+    # Path-based browser routing: when enabled, the launch flow redirects the
+    # browser straight to the per-connection container under
+    # ``CLIENT_PORTAL_ROUTING_BASE_URL/<prefix>/<connection_id>`` instead of
+    # proxying the login through this backend.
+    CLIENT_PORTAL_PATH_ROUTING_ENABLED: bool = False
+    CLIENT_PORTAL_ROUTING_BASE_URL: str = ""
+    CLIENT_PORTAL_PATH_PREFIX_BASE: str = "/ib-access"
 
     DATABASE_URL: str = "sqlite:///./app.db"
 

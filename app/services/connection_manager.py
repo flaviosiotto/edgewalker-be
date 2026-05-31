@@ -101,6 +101,39 @@ CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS = max(
 )
 CLIENT_PORTAL_PROXY_BRIDGE_TOKEN = os.getenv("CLIENT_PORTAL_PROXY_BRIDGE_TOKEN", "").strip()
 
+# ── Client Portal path-based browser routing ─────────────────────────
+# When enabled, the browser reaches each spawned Client Portal container
+# directly through Traefik under a stable per-connection path prefix
+# (e.g. https://app.edgewalker.tech/ib-access/{id}). The gateway is configured
+# with a matching portalBaseURL so it emits prefixed URLs/cookies natively, which
+# removes the need for the backend httpx proxy to rewrite the login response body.
+# Each interactive login is serialized per user (one IBKR connection at a time),
+# so the shared public origin's browser cookie jar never hosts two logins at once.
+CLIENT_PORTAL_PATH_ROUTING_ENABLED = (
+    os.getenv("CLIENT_PORTAL_PATH_ROUTING_ENABLED", "false").lower() == "true"
+)
+CLIENT_PORTAL_PATH_PREFIX_BASE = (
+    os.getenv("CLIENT_PORTAL_PATH_PREFIX_BASE", "/ib-access").strip().rstrip("/") or "/ib-access"
+)
+CLIENT_PORTAL_ROUTING_HOST = os.getenv("CLIENT_PORTAL_ROUTING_HOST", "").strip()
+CLIENT_PORTAL_TRAEFIK_NETWORK = os.getenv(
+    "CLIENT_PORTAL_TRAEFIK_NETWORK", os.getenv("DOCKER_NETWORK", "")
+).strip()
+CLIENT_PORTAL_TRAEFIK_ENTRYPOINT = os.getenv("CLIENT_PORTAL_TRAEFIK_ENTRYPOINT", "websecure").strip()
+CLIENT_PORTAL_TRAEFIK_CERTRESOLVER = os.getenv("CLIENT_PORTAL_TRAEFIK_CERTRESOLVER", "letsencrypt").strip()
+CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY = os.getenv("CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY", "1000").strip()
+# forwardAuth gate: Traefik calls this backend URL before forwarding the browser
+# to the container; the backend validates the short-lived launch cookie and that
+# the requesting user owns the connection. {connection_id} is substituted.
+CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE = os.getenv(
+    "CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE", ""
+).strip()
+
+
+def _client_portal_path_prefix(connection_id: int) -> str:
+    return f"{CLIENT_PORTAL_PATH_PREFIX_BASE}/{connection_id}"
+
+
 # Shared Redis settings propagated to dynamically spawned gateway containers.
 REDIS_URL = os.getenv("REDIS_URL", "")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
@@ -682,6 +715,51 @@ class ConnectionManager:
             logger.warning("Docker error checking Client Portal container: %s", e)
             return None
 
+    def _client_portal_traefik_labels(self, connection_id: int, prefix: str) -> dict[str, str]:
+        """Build Traefik Docker-provider labels that route the public host's
+        ``<prefix>`` straight to this container's HTTPS shim port. A forwardAuth
+        middleware (when configured) gates the browser behind the backend's
+        short-lived launch session before Traefik forwards the request.
+        """
+        if not CLIENT_PORTAL_ROUTING_HOST:
+            raise RuntimeError(
+                "CLIENT_PORTAL_ROUTING_HOST is required when CLIENT_PORTAL_PATH_ROUTING_ENABLED=true"
+            )
+
+        router = f"cpgw-{connection_id}"
+        service = f"cpgw-{connection_id}"
+        rule = f"Host(`{CLIENT_PORTAL_ROUTING_HOST}`) && PathPrefix(`{prefix}`)"
+        labels: dict[str, str] = {
+            "traefik.enable": "true",
+            f"traefik.http.routers.{router}.rule": rule,
+            f"traefik.http.routers.{router}.entrypoints": CLIENT_PORTAL_TRAEFIK_ENTRYPOINT,
+            f"traefik.http.routers.{router}.priority": CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY,
+            f"traefik.http.routers.{router}.service": service,
+            f"traefik.http.services.{service}.loadbalancer.server.port": str(CLIENT_PORTAL_GATEWAY_PORT),
+            # The shim only serves HTTPS (self-signed) on the gateway port, so the
+            # upstream scheme must be https with certificate verification skipped.
+            f"traefik.http.services.{service}.loadbalancer.server.scheme": "https",
+            f"traefik.http.services.{service}.loadbalancer.serverstransport": "cpgwinsecure@docker",
+            "traefik.http.serverstransports.cpgwinsecure.insecureskipverify": "true",
+        }
+
+        if CLIENT_PORTAL_TRAEFIK_CERTRESOLVER:
+            labels[f"traefik.http.routers.{router}.tls.certresolver"] = CLIENT_PORTAL_TRAEFIK_CERTRESOLVER
+        else:
+            labels[f"traefik.http.routers.{router}.tls"] = "true"
+
+        if CLIENT_PORTAL_TRAEFIK_NETWORK:
+            labels["traefik.docker.network"] = CLIENT_PORTAL_TRAEFIK_NETWORK
+
+        if CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE:
+            middleware = f"cpgw-auth-{connection_id}"
+            auth_url = CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE.format(connection_id=connection_id)
+            labels[f"traefik.http.middlewares.{middleware}.forwardauth.address"] = auth_url
+            labels[f"traefik.http.middlewares.{middleware}.forwardauth.trustForwardHeader"] = "true"
+            labels[f"traefik.http.routers.{router}.middlewares"] = f"{middleware}@docker"
+
+        return labels
+
     def _spawn_client_portal_gateway(self, connection_id: int) -> tuple[str, str, str]:
         if not self._docker:
             raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}")
@@ -706,6 +784,11 @@ class ConnectionManager:
             "edgewalker.type": "client-portal",
             "edgewalker.connection_id": str(connection_id),
         }
+
+        if CLIENT_PORTAL_PATH_ROUTING_ENABLED:
+            prefix = _client_portal_path_prefix(connection_id)
+            env["CLIENT_PORTAL_BASE_PATH"] = prefix
+            labels.update(self._client_portal_traefik_labels(connection_id, prefix))
 
         try:
             user = _spawn_container_user()

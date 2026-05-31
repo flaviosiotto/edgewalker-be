@@ -157,6 +157,40 @@ def _normalized_access_host() -> str | None:
     return urlsplit(access_base_url).hostname or None
 
 
+def _normalized_routing_base_url() -> str | None:
+    raw = (settings.CLIENT_PORTAL_ROUTING_BASE_URL or "").strip()
+    if not raw:
+        return None
+
+    parts = urlsplit(raw)
+    scheme = (parts.scheme or "https").lower()
+    netloc = parts.netloc or parts.path
+    if not netloc:
+        raise HTTPException(status_code=500, detail="CLIENT_PORTAL_ROUTING_BASE_URL is invalid")
+
+    return urlunsplit((scheme, netloc, "", "", "")).rstrip("/")
+
+
+def _launch_base_url() -> str:
+    """Base URL that serves the launch endpoint and hosts the launch cookie.
+
+    With path routing the browser is sent straight to the per-connection
+    container under the routing host, so the launch cookie must be set on that
+    same host for the forwardAuth gate to see it.
+    """
+    if is_client_portal_path_routing_enabled():
+        routing_base_url = _normalized_routing_base_url()
+        if routing_base_url:
+            return routing_base_url
+    access_base_url = _normalized_access_base_url()
+    if not access_base_url:
+        raise HTTPException(
+            status_code=500,
+            detail="CLIENT_PORTAL_ACCESS_BASE_URL is required for on-demand private Client Portal launch",
+        )
+    return access_base_url
+
+
 def get_client_portal_launch_cookie_name() -> str:
     return CLIENT_PORTAL_LAUNCH_COOKIE_NAME
 
@@ -174,6 +208,40 @@ def is_client_portal_access_request(request: Request) -> bool:
     return host_header == expected_host.lower()
 
 
+def is_client_portal_path_routing_enabled() -> bool:
+    return bool(settings.CLIENT_PORTAL_PATH_ROUTING_ENABLED)
+
+
+def _client_portal_path_prefix_base() -> str:
+    base = (settings.CLIENT_PORTAL_PATH_PREFIX_BASE or "/ib-access").strip().rstrip("/")
+    if not base:
+        return "/ib-access"
+    return base if base.startswith("/") else f"/{base}"
+
+
+def client_portal_path_prefix(connection_id: int) -> str:
+    return f"{_client_portal_path_prefix_base()}/{int(connection_id)}"
+
+
+async def validate_client_portal_access(launch_token: str, connection_id: int) -> bool:
+    """forwardAuth gate: confirm the launch cookie maps to a live launch session
+    that owns *connection_id*. Returns True only when the short-lived session is
+    valid for exactly this connection.
+    """
+    token = (launch_token or "").strip()
+    if not token:
+        return False
+
+    launch_session = await get_client_portal_launch_session(token)
+    if launch_session is None:
+        return False
+
+    try:
+        return int(launch_session.get("connection_id")) == int(connection_id)
+    except (TypeError, ValueError):
+        return False
+
+
 async def create_client_portal_launch_url(
     *,
     connection_id: int,
@@ -181,12 +249,7 @@ async def create_client_portal_launch_url(
     config: dict[str, Any] | None,
     force_new: bool = False,
 ) -> str:
-    access_base_url = _normalized_access_base_url()
-    if not access_base_url:
-        raise HTTPException(
-            status_code=500,
-            detail="CLIENT_PORTAL_ACCESS_BASE_URL is required for on-demand private Client Portal launch",
-        )
+    access_base_url = _launch_base_url()
 
     ttl_seconds = get_client_portal_launch_cookie_ttl_seconds()
     mapping_key = _connection_launch_session_key(connection_id, user_id)
