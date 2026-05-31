@@ -40,6 +40,16 @@ _HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 
+# Cross-Origin-Opener-Policy on the IBKR SSO pages severs the popup's
+# window.opener (the browsing context group is switched when a cross-origin
+# document declares COOP), which breaks the postMessage bridge the popup uses to
+# notify the opener that Dispatcher completed. Strip these so window.opener
+# survives the Login -> Authenticator -> Dispatcher navigation chain.
+_STRIPPED_RESPONSE_HEADERS = {
+    "cross-origin-opener-policy",
+    "cross-origin-embedder-policy",
+}
+
 
 def _ensure_access_request(request: Request) -> None:
     if not is_client_portal_access_request(request):
@@ -57,7 +67,12 @@ def _copy_response_headers(
     excluded = {header.lower() for header in (excluded_headers or set())}
     for key, value in upstream_headers.multi_items():
         lower = key.lower()
-        if lower in _HOP_BY_HOP_HEADERS or lower == "content-length" or lower in excluded:
+        if (
+            lower in _HOP_BY_HOP_HEADERS
+            or lower == "content-length"
+            or lower in _STRIPPED_RESPONSE_HEADERS
+            or lower in excluded
+        ):
             continue
         if lower == "location":
             value = _rewrite_location_header(value, request=request, upstream_base_url=upstream_base_url)
@@ -100,11 +115,15 @@ def _log_dispatcher_upstream_headers(
         ]
 
     logger.warning(
-        "Dispatcher upstream headers: status=%s login_shell=%s content_type=%s location=%s set_cookie_count=%s set_cookie_attrs=%s",
+        "Dispatcher upstream headers: status=%s login_shell=%s content_type=%s location=%s "
+        "coop=%s coep=%s x_frame_options=%s set_cookie_count=%s set_cookie_attrs=%s",
         status_code,
         login_shell,
         str(upstream_headers.get("content-type", "")),
         str(upstream_headers.get("location", "")),
+        str(upstream_headers.get("cross-origin-opener-policy", "")),
+        str(upstream_headers.get("cross-origin-embedder-policy", "")),
+        str(upstream_headers.get("x-frame-options", "")),
         len(set_cookie_headers),
         [_describe_set_cookie(cookie) for cookie in set_cookie_headers],
     )
