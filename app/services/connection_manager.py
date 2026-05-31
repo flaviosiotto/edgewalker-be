@@ -122,6 +122,13 @@ CLIENT_PORTAL_TRAEFIK_NETWORK = os.getenv(
 CLIENT_PORTAL_TRAEFIK_ENTRYPOINT = os.getenv("CLIENT_PORTAL_TRAEFIK_ENTRYPOINT", "websecure").strip()
 CLIENT_PORTAL_TRAEFIK_CERTRESOLVER = os.getenv("CLIENT_PORTAL_TRAEFIK_CERTRESOLVER", "letsencrypt").strip()
 CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY = os.getenv("CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY", "1000").strip()
+# Traefik cannot DEFINE a serversTransport from Docker provider labels, only
+# reference one. The cpgw shim serves HTTPS with a self-signed cert, so the
+# upstream needs insecureSkipVerify. Define this transport once in the Traefik
+# file provider (dynamic config) and reference it here with the @file namespace.
+CLIENT_PORTAL_TRAEFIK_SERVERSTRANSPORT = os.getenv(
+    "CLIENT_PORTAL_TRAEFIK_SERVERSTRANSPORT", "ibkr-client-portal-transport@file"
+).strip()
 # forwardAuth gate: Traefik calls this backend URL before forwarding the browser
 # to the container; the backend validates the short-lived launch cookie and that
 # the requesting user owns the connection. {connection_id} is substituted.
@@ -737,10 +744,11 @@ class ConnectionManager:
             f"traefik.http.routers.{router}.service": service,
             f"traefik.http.services.{service}.loadbalancer.server.port": str(CLIENT_PORTAL_GATEWAY_PORT),
             # The shim only serves HTTPS (self-signed) on the gateway port, so the
-            # upstream scheme must be https with certificate verification skipped.
+            # upstream scheme must be https and verification skipped. The transport
+            # itself is defined in the Traefik file provider (see devops repo) and
+            # referenced here; Docker-label providers cannot define transports.
             f"traefik.http.services.{service}.loadbalancer.server.scheme": "https",
-            f"traefik.http.services.{service}.loadbalancer.serverstransport": "cpgwinsecure@docker",
-            "traefik.http.serverstransports.cpgwinsecure.insecureskipverify": "true",
+            f"traefik.http.services.{service}.loadbalancer.serverstransport": CLIENT_PORTAL_TRAEFIK_SERVERSTRANSPORT,
         }
 
         if CLIENT_PORTAL_TRAEFIK_CERTRESOLVER:
