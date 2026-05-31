@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from http.cookies import CookieError, SimpleCookie
 import json
+import logging
 import os
 import secrets
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ from app.services.client_portal_service import (
     resolve_client_portal_verify_ssl,
 )
 
+
+logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
@@ -406,6 +409,17 @@ async def proxy_http_request(
 
     body = await request.body()
     session_cookies = await _get_client_portal_launch_cookies(launch_token)
+
+    if path in ("/sso/Dispatcher", "/sso/Authenticator"):
+        browser_cookie_names = sorted(request.cookies.keys())
+        logger.warning(
+            "Client Portal proxy %s request cookies: method=%s browser_cookie_names=%s "
+            "injected_session_cookie_names=%s (browser cookies are stripped, Redis snapshot is forwarded)",
+            path,
+            request.method,
+            browser_cookie_names,
+            sorted(session_cookies.keys()),
+        )
 
     async with httpx.AsyncClient(verify=verify_ssl, follow_redirects=False, timeout=120.0) as client:
         response = await client.request(
