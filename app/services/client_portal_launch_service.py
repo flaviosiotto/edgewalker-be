@@ -422,7 +422,22 @@ async def proxy_http_request(
         for name, value in request.cookies.items()
         if name != launch_cookie_name
     }
-    forwarded_cookies = {**session_cookies, **browser_cookies}
+
+    # IBKR rotates per-request session identifiers (x-sess-uuid, JSESSIONID) during
+    # the SSO flow. The browser always carries the authoritative current value (it is
+    # sent automatically even though HttpOnly). The Redis snapshot, however, can hold a
+    # STALE identifier from a prior attempt and inject a SECOND, competing session
+    # context — which corrupts the gateway's post-Dispatcher `sso/validate?gw=1` and
+    # produces a perpetual 401. Never source session identifiers from the snapshot:
+    # let the browser be the sole source, and keep the snapshot only as a fallback for
+    # non-session cookies (e.g. URL_PARAM, web) that the browser may not carry.
+    snapshot_session_keys = {"x-sess-uuid", "jsessionid"}
+    snapshot_cookies = {
+        name: value
+        for name, value in session_cookies.items()
+        if name.lower() not in snapshot_session_keys
+    }
+    forwarded_cookies = {**snapshot_cookies, **browser_cookies}
 
     if path in ("/sso/Dispatcher", "/sso/Authenticator"):
         logger.warning(
@@ -431,7 +446,7 @@ async def proxy_http_request(
             path,
             request.method,
             sorted(browser_cookies.keys()),
-            sorted(session_cookies.keys()),
+            sorted(snapshot_cookies.keys()),
             sorted(forwarded_cookies.keys()),
         )
 
