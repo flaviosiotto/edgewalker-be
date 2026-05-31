@@ -87,6 +87,10 @@ CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS = max(
     0.5,
     float(os.getenv("CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS", "2")),
 )
+# Local shim health endpoint used for the readiness probe. Probing the gateway
+# root ("/") would open an upstream IBKR session before the browser login and
+# corrupt the gateway's shared CookieManager (breaks sso/validate?gw=1).
+CLIENT_PORTAL_SHIM_HEALTH_PATH = "/__cpgw_shim_health"
 CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS = max(
     0,
     int(os.getenv("CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS", os.getenv("CLIENT_PORTAL_LAUNCH_TTL_SECONDS", "900"))),
@@ -855,7 +859,12 @@ class ConnectionManager:
                     timeout=5.0,
                     follow_redirects=False,
                 ) as client:
-                    response = await client.get("/")
+                    # Probe the shim's local health endpoint (TCP-only check of the
+                    # Java gateway). A direct GET "/" would make the gateway redirect
+                    # into /sso/Login and open an upstream IBKR session BEFORE the
+                    # browser login, polluting the gateway's shared CookieManager with
+                    # a second session lineage and breaking /v1/api/sso/validate?gw=1.
+                    response = await client.get(CLIENT_PORTAL_SHIM_HEALTH_PATH)
                 if response.status_code < 500:
                     return
                 last_error = f"HTTP {response.status_code}"
