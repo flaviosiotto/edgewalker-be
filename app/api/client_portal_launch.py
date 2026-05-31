@@ -57,7 +57,7 @@ def _copy_response_headers(
     excluded = {header.lower() for header in (excluded_headers or set())}
     for key, value in upstream_headers.multi_items():
         lower = key.lower()
-        if lower in _HOP_BY_HOP_HEADERS or lower in {"content-length", "set-cookie"} or lower in excluded:
+        if lower in _HOP_BY_HOP_HEADERS or lower == "content-length" or lower in excluded:
             continue
         if lower == "location":
             value = _rewrite_location_header(value, request=request, upstream_base_url=upstream_base_url)
