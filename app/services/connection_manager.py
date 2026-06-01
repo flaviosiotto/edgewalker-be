@@ -128,6 +128,13 @@ CLIENT_PORTAL_TRAEFIK_NETWORK = os.getenv(
 ).strip()
 CLIENT_PORTAL_TRAEFIK_ENTRYPOINT = os.getenv("CLIENT_PORTAL_TRAEFIK_ENTRYPOINT", "websecure").strip()
 CLIENT_PORTAL_TRAEFIK_CERTRESOLVER = os.getenv("CLIENT_PORTAL_TRAEFIK_CERTRESOLVER", "letsencrypt").strip()
+# Whether the per-connection cpgw router terminates TLS. Defaults to true for
+# production (the public access host serves HTTPS). Set to "false" for local
+# development where Traefik only exposes a plain-HTTP entrypoint (e.g. :8081),
+# so the cpgw router is published without TLS instead of failing the handshake.
+CLIENT_PORTAL_TRAEFIK_TLS = (
+    os.getenv("CLIENT_PORTAL_TRAEFIK_TLS", "true").strip().lower() != "false"
+)
 CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY = os.getenv("CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY", "1000").strip()
 # Traefik cannot DEFINE a serversTransport from Docker provider labels, only
 # reference one. The cpgw shim serves HTTPS with a self-signed cert, so the
@@ -179,6 +186,10 @@ BROKER_ACCOUNT_SYNC_COUNT = max(1, int(os.getenv("BROKER_ACCOUNT_SYNC_COUNT", "5
 CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS = max(
     0,
     int(os.getenv("CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS", "30")),
+)
+CLIENT_PORTAL_PRE_DISPATCHER_LOG_PROBE_INTERVAL_SECONDS = max(
+    1.0,
+    float(os.getenv("CLIENT_PORTAL_PRE_DISPATCHER_LOG_PROBE_INTERVAL_SECONDS", "3")),
 )
 CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE = (
     "Autorizzazione 2FA ricevuta. Attendo che IBKR apra la brokerage session."
@@ -572,6 +583,7 @@ class ConnectionManager:
             f"{BROKER_ACCOUNT_SYNC_GROUP}-{socket.gethostname()}-{os.getpid()}"
         )
         self._client_portal_dispatcher_received_at: dict[int, datetime] = {}
+        self._client_portal_pre_dispatcher_log_probe_at: dict[int, datetime] = {}
         try:
             self._docker = docker.from_env()
         except Exception as e:
@@ -730,6 +742,50 @@ class ConnectionManager:
 
     def _clear_client_portal_dispatcher_grace(self, connection_id: int) -> None:
         self._client_portal_dispatcher_received_at.pop(connection_id, None)
+        self._client_portal_pre_dispatcher_log_probe_at.pop(connection_id, None)
+
+    def _client_portal_container_reports_authenticated(self, connection_id: int) -> bool:
+        now = datetime.now(timezone.utc)
+        last_probe_at = self._client_portal_pre_dispatcher_log_probe_at.get(connection_id)
+        if (
+            last_probe_at is not None
+            and (now - last_probe_at).total_seconds() < CLIENT_PORTAL_PRE_DISPATCHER_LOG_PROBE_INTERVAL_SECONDS
+        ):
+            return False
+        self._client_portal_pre_dispatcher_log_probe_at[connection_id] = now
+
+        container = self._get_client_portal_container(connection_id)
+        if not container or container.status != "running":
+            return False
+
+        try:
+            result = container.exec_run(
+                [
+                    "sh",
+                    "-c",
+                    "grep -RaiE 'GET /v1/api/sso/validate[?]gw=1,200|GET /v1/api/iserver/auth/status,200' "
+                    "/opt/clientportal/logs/gw*.log 2>/dev/null | tail -1",
+                ],
+                stdout=True,
+                stderr=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed checking Client Portal auth logs for connection %s: %s",
+                connection_id,
+                exc,
+            )
+            return False
+
+        output = result.output.decode("utf-8", errors="ignore").strip()
+        if result.exit_code == 0 and output:
+            logger.info(
+                "Detected Client Portal authenticated session from container logs for connection %s: %s",
+                connection_id,
+                output[-300:],
+            )
+            return True
+        return False
 
     def _client_portal_container_name(self, connection_id: int) -> str:
         return f"{CLIENT_PORTAL_GATEWAY_PREFIX}{connection_id}"
@@ -783,10 +839,11 @@ class ConnectionManager:
 
         middlewares = [f"{strip_middleware}@docker"]
 
-        if CLIENT_PORTAL_TRAEFIK_CERTRESOLVER:
-            labels[f"traefik.http.routers.{router}.tls.certresolver"] = CLIENT_PORTAL_TRAEFIK_CERTRESOLVER
-        else:
-            labels[f"traefik.http.routers.{router}.tls"] = "true"
+        if CLIENT_PORTAL_TRAEFIK_TLS:
+            if CLIENT_PORTAL_TRAEFIK_CERTRESOLVER:
+                labels[f"traefik.http.routers.{router}.tls.certresolver"] = CLIENT_PORTAL_TRAEFIK_CERTRESOLVER
+            else:
+                labels[f"traefik.http.routers.{router}.tls"] = "true"
 
         if CLIENT_PORTAL_TRAEFIK_NETWORK:
             labels["traefik.docker.network"] = CLIENT_PORTAL_TRAEFIK_NETWORK
@@ -843,13 +900,6 @@ class ConnectionManager:
                 labels=labels,
                 network=DOCKER_NETWORK,
                 user=user,
-                # The gateway routes its upstream IBKR traffic through an in-container
-                # egress affinity proxy reached via the api-mode vhost ``api.egress.local``
-                # (the hostname must contain "api" so the gateway stays in api-mode). Inject
-                # the mapping here so it works even when the container runs as a non-root UID
-                # and cannot edit /etc/hosts itself; the entrypoint falls back to direct mode
-                # if this is absent.
-                extra_hosts={"api.egress.local": "127.0.0.1"},
                 detach=True,
                 restart_policy={"Name": "unless-stopped"},
             )
@@ -1166,6 +1216,7 @@ class ConnectionManager:
             "service_ready": True,
             "gateway_session_ready": True,
             "connected": False,
+            "login_authenticated": True,
             "session_authenticated": False,
             "authenticated": False,
             "established": False,
@@ -1428,6 +1479,7 @@ class ConnectionManager:
         return {
             "service_ready": True,
             "authenticated": False,
+                "login_authenticated": False,
             "ready_to_connect": False,
             "launch_url": launch_url,
             "message": message,
@@ -1492,7 +1544,6 @@ class ConnectionManager:
             conn = session.get(Connection, connection_id)
             if conn is None:
                 raise ValueError("Connection not found")
-            broker_type = conn.broker_type
             config = dict(conn.config or {})
             status_value = conn.status
             status_message = conn.status_message
@@ -1515,7 +1566,7 @@ class ConnectionManager:
                     exc,
                 )
 
-        container = self._get_container(connection_id, broker_type)
+        container = self._get_client_portal_container(connection_id)
         gateway_started = bool(container and container.status == "running")
         dispatcher_received_at = _parse_client_portal_dispatcher_received_at(config)
 
@@ -1542,30 +1593,45 @@ class ConnectionManager:
             status_value == ConnectionStatus.AWAITING_AUTH.value
             and dispatcher_received_at is None
         ):
-            payload = {
-                "service_ready": True,
-                "gateway_session_ready": False,
-                "connected": False,
-                "session_authenticated": False,
-                "authenticated": False,
-                "established": False,
-                "competing": False,
-                "bridge_ready": False,
-                "ready_to_connect": False,
-                "gateway_started": gateway_started,
-                "connection_status": status_value,
-                "launch_url": launch_url,
-                "message": status_message or "Sessione Client Portal non autenticata. Completa il login nel popup.",
-            }
-            logger.info(
-                "Client Portal auth-status pre-dispatcher for connection %s: gateway_started=%s connection_status=%s launch_url=%s message=%s",
-                connection_id,
-                gateway_started,
-                status_value,
-                bool(launch_url),
-                payload["message"],
-            )
-            return payload
+            if self._client_portal_container_reports_authenticated(connection_id):
+                dispatcher_received_at = datetime.now(timezone.utc)
+                config = _with_client_portal_dispatcher_received_at(config, dispatcher_received_at)
+                self._client_portal_dispatcher_received_at[connection_id] = dispatcher_received_at
+                status_message = CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE
+                with get_session_context() as session:
+                    conn = session.get(Connection, connection_id)
+                    if conn is not None:
+                        conn.status = ConnectionStatus.AWAITING_AUTH.value
+                        conn.status_message = status_message
+                        conn.updated_at = dispatcher_received_at
+                        conn.config = _with_client_portal_dispatcher_received_at(conn.config, dispatcher_received_at)
+                        session.commit()
+            else:
+                payload = {
+                    "service_ready": True,
+                    "gateway_session_ready": False,
+                    "connected": False,
+                    "login_authenticated": False,
+                    "session_authenticated": False,
+                    "authenticated": False,
+                    "established": False,
+                    "competing": False,
+                    "bridge_ready": False,
+                    "ready_to_connect": False,
+                    "gateway_started": gateway_started,
+                    "connection_status": status_value,
+                    "launch_url": launch_url,
+                    "message": status_message or "Sessione Client Portal non autenticata. Completa il login nel popup.",
+                }
+                logger.info(
+                    "Client Portal auth-status pre-dispatcher for connection %s: gateway_started=%s connection_status=%s launch_url=%s message=%s",
+                    connection_id,
+                    gateway_started,
+                    status_value,
+                    bool(launch_url),
+                    payload["message"],
+                )
+                return payload
 
         auth = await get_client_portal_auth_status(config)
         if auth.get("authenticated") or auth.get("session_authenticated") or auth.get("bridge_ready") or auth.get("ready_to_connect"):
@@ -1575,6 +1641,7 @@ class ConnectionManager:
             "service_ready": auth["service_ready"],
             "gateway_session_ready": auth.get("gateway_session_ready", False),
             "connected": auth.get("connected", False),
+            "login_authenticated": auth.get("login_authenticated", False),
             "session_authenticated": auth.get("session_authenticated", False),
             "authenticated": auth["authenticated"],
             "established": auth.get("established", False),

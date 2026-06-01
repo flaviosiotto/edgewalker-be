@@ -15,6 +15,7 @@ from app.services.client_portal_launch_service import (
     is_client_portal_access_request,
     is_client_portal_path_routing_enabled,
     client_portal_path_prefix,
+    client_portal_routing_base_url,
     proxy_http_request,
     resolve_client_portal_proxy_target,
     validate_client_portal_access,
@@ -268,7 +269,21 @@ async def start_client_portal_launch(launch_token: str, request: Request):
         # index.html -> vnc.html). The IBKR SSO login happens entirely inside the
         # in-container Chrome (same machine as the gateway), so the backend no
         # longer redirects the user to /sso/Login.
-        redirect_url = f"{prefix}/?_cb={cache_bust}"
+        #
+        # Use an ABSOLUTE redirect URL (scheme + routing host) instead of a bare
+        # path. uvicorn runs with --root-path /api, and if the popup ever lands
+        # on an /api-prefixed launch URL a relative Location could inherit the
+        # /api prefix and miss the Traefik cpgw router (which matches
+        # PathPrefix(/ib-access/<id>), not /api/ib-access/<id>). Anchoring the
+        # redirect to the routing base URL guarantees the browser navigates to
+        # the exact host+path the cpgw router serves.
+        routing_base_url = client_portal_routing_base_url()
+        path_with_cache_bust = f"{prefix}/?_cb={cache_bust}"
+        redirect_url = (
+            f"{routing_base_url}{path_with_cache_bust}"
+            if routing_base_url
+            else path_with_cache_bust
+        )
         cookie_path = prefix
     else:
         _ensure_access_request(request)
@@ -308,7 +323,46 @@ async def client_portal_access_check(connection_id: int, request: Request):
     return Response(status_code=HTTPStatus.OK)
 
 
+async def _novnc_redirect_for_request(request: Request) -> RedirectResponse | None:
+    """In noVNC (path-routing) mode the host browser must talk ONLY to the
+    Traefik cpgw router (``/ib-access/<id>/``); the in-container Chrome is what
+    talks to the gateway. If a request still reaches the backend reverse-proxy
+    (e.g. a stale ``/api/ib-access/<id>/`` tab from the pre-noVNC design), the
+    gateway answers with an absolute 302 to its ``proxyRemoteHost``
+    (``https://api.ibkr.com/...``) which the reverse-proxy would faithfully
+    forward, leaking api.ibkr.com to the host browser (Error 404). Instead,
+    bounce the browser to the correct noVNC URL so it can never leak.
+    """
+    if not is_client_portal_path_routing_enabled():
+        return None
+
+    launch_token = request.cookies.get(get_client_portal_launch_cookie_name(), "")
+    launch_session = await get_client_portal_launch_session(launch_token) if launch_token else None
+    if launch_session is None:
+        return None
+
+    try:
+        connection_id = int(launch_session.get("connection_id"))
+    except (TypeError, ValueError):
+        return None
+
+    prefix = client_portal_path_prefix(connection_id)
+    routing_base_url = client_portal_routing_base_url()
+    cache_bust = secrets.token_urlsafe(8)
+    path_with_cache_bust = f"{prefix}/?_cb={cache_bust}"
+    redirect_url = (
+        f"{routing_base_url}{path_with_cache_bust}" if routing_base_url else path_with_cache_bust
+    )
+    response = RedirectResponse(url=redirect_url, status_code=HTTPStatus.TEMPORARY_REDIRECT)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 async def _proxy_client_portal_access(request: Request):
+    novnc_redirect = await _novnc_redirect_for_request(request)
+    if novnc_redirect is not None:
+        return novnc_redirect
+
     launch_token, upstream_base_url, verify_ssl = await resolve_client_portal_proxy_target(request)
     upstream_response = await proxy_http_request(
         request,

@@ -31,6 +31,7 @@ _CLIENT_PORTAL_CONFIG_KEYS = frozenset(
 _CLIENT_PORTAL_SESSION_POST_FALLBACK_STATUS_CODES = frozenset({404, 405})
 _CLIENT_PORTAL_ACCOUNTS_PROBE_INTERVAL_SECONDS = 5.0
 _CLIENT_PORTAL_SESSION_INIT_INTERVAL_SECONDS = 5.0
+_CLIENT_PORTAL_BROKERAGE_COMPETE = True
 
 _client_portal_accounts_probe_state: dict[str, dict[str, Any]] = {}
 _client_portal_session_init_attempted_at: dict[str, float] = {}
@@ -309,6 +310,7 @@ async def _initialize_client_portal_brokerage_session(
         "attempted": False,
         "supported": True,
         "initialized": False,
+        "payload": None,
         "message": None,
     }
 
@@ -318,10 +320,24 @@ async def _initialize_client_portal_brokerage_session(
     result["attempted"] = True
 
     try:
+        for path in ("/v1/api/ssodh/init", "/v1/api/ssodh/st"):
+            client.cookies.clear()
+            try:
+                response = await client.get(path)
+                if response.status_code == 401:
+                    return result
+                if response.status_code in _CLIENT_PORTAL_SESSION_POST_FALLBACK_STATUS_CODES:
+                    continue
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {400, 404, 405}:
+                    continue
+                raise
+
         client.cookies.clear()
         response = await client.post(
             "/v1/api/iserver/auth/ssodh/init",
-            json={"publish": True, "compete": False},
+            json={"publish": True, "compete": _CLIENT_PORTAL_BROKERAGE_COMPETE},
         )
         if response.status_code in _CLIENT_PORTAL_SESSION_POST_FALLBACK_STATUS_CODES:
             result["supported"] = False
@@ -336,12 +352,23 @@ async def _initialize_client_portal_brokerage_session(
             return result
 
         response.raise_for_status()
-        result["initialized"] = True
         if response.content:
             try:
-                result["message"] = _extract_message(response.json())
+                payload = response.json()
+                result["payload"] = payload
+                flags = _extract_status_flags(payload)
+                unwrapped = _unwrap_client_portal_payload(payload)
+                passed = isinstance(unwrapped, dict) and unwrapped.get("passed") is True
+                waiting = isinstance(unwrapped, dict) and unwrapped.get("wait") is True
+                result["initialized"] = bool(flags["authenticated"] or passed)
+                result["message"] = _extract_message(payload)
+                if waiting and not result["message"]:
+                    result["message"] = "IBKR sta completando l'inizializzazione della brokerage session."
             except ValueError:
                 result["message"] = None
+                result["initialized"] = True
+        else:
+            result["initialized"] = True
     except Exception as exc:
         logger.warning("Client Portal ssodh/init failed for %s: %s", base_url, exc)
         result["message"] = str(exc)
@@ -431,8 +458,12 @@ def _extract_bridge_ready(payload: Any) -> bool:
     if isinstance(payload, list):
         return len(payload) > 0
     if isinstance(payload, dict):
+        if payload.get("error") or payload.get("statusCode") or payload.get("fail"):
+            return False
         accounts = payload.get("accounts")
-        return isinstance(accounts, list) and len(accounts) > 0
+        if isinstance(accounts, list):
+            return True
+        return True
     return False
 
 
@@ -452,6 +483,7 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
         "service_ready": False,
         "gateway_session_ready": False,
         "connected": False,
+        "login_authenticated": False,
         "session_authenticated": False,
         "authenticated": False,
         "established": False,
@@ -537,7 +569,22 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
             if dispatcher_marker_present and not session_authenticated and not competing:
                 init_result = await _initialize_client_portal_brokerage_session(client, base_url=base_url)
                 if init_result.get("initialized"):
+                    init_payload = init_result.get("payload")
+                    init_flags = _extract_status_flags(init_payload)
+                    init_unwrapped = _unwrap_client_portal_payload(init_payload)
+                    init_passed = isinstance(init_unwrapped, dict) and init_unwrapped.get("passed") is True
                     result["gateway_session_ready"] = True
+                    if init_flags["authenticated"] or init_passed:
+                        session_authenticated = True
+                        result["session_authenticated"] = True
+                        result["authenticated"] = True
+                    if init_flags["connected"]:
+                        result["connected"] = True
+                    if init_flags["established"]:
+                        result["established"] = True
+                    if init_flags["competing"]:
+                        competing = True
+                        result["competing"] = True
                     if not result["message"]:
                         result["message"] = "Autorizzazione 2FA ricevuta. Inizializzo la brokerage session IBKR."
                 elif init_result.get("message") and not result["message"]:
@@ -595,6 +642,12 @@ async def get_client_portal_auth_status(config: dict[str, Any] | None = None) ->
                     elif bridge_exc.response.status_code != 401:
                         raise
 
+            result["login_authenticated"] = bool(
+                result["gateway_session_ready"]
+                or result["session_authenticated"]
+                or result["authenticated"]
+                or result["established"]
+            )
             result["ready_to_connect"] = bool(result["gateway_session_ready"] and result["bridge_ready"])
 
             if not session_authenticated and not result["message"]:

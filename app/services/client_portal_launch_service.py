@@ -212,6 +212,11 @@ def is_client_portal_path_routing_enabled() -> bool:
     return bool(settings.CLIENT_PORTAL_PATH_ROUTING_ENABLED)
 
 
+def client_portal_routing_base_url() -> str | None:
+    """Public accessor for the normalized routing base URL (scheme + host)."""
+    return _normalized_routing_base_url()
+
+
 def _client_portal_path_prefix_base() -> str:
     base = (settings.CLIENT_PORTAL_PATH_PREFIX_BASE or "/ib-access").strip().rstrip("/")
     if not base:
