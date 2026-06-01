@@ -263,7 +263,12 @@ async def start_client_portal_launch(launch_token: str, request: Request):
         # nonce forces the browser to request a never-seen URL so it cannot serve
         # the stale SPA from cache and instead hits the forwardAuth gate + cpgw.
         cache_bust = secrets.token_urlsafe(8)
-        redirect_url = f"{prefix}{_CLIENT_PORTAL_LOGIN_PATH}&_cb={cache_bust}"
+        # noVNC model: the user's browser only needs to load the noVNC web UI at
+        # the prefix root (Traefik strips the prefix -> websockify serves
+        # index.html -> vnc.html). The IBKR SSO login happens entirely inside the
+        # in-container Chrome (same machine as the gateway), so the backend no
+        # longer redirects the user to /sso/Login.
+        redirect_url = f"{prefix}/?_cb={cache_bust}"
         cookie_path = prefix
     else:
         _ensure_access_request(request)
