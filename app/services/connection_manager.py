@@ -843,6 +843,13 @@ class ConnectionManager:
                 labels=labels,
                 network=DOCKER_NETWORK,
                 user=user,
+                # The gateway routes its upstream IBKR traffic through an in-container
+                # egress affinity proxy reached via the api-mode vhost ``api.egress.local``
+                # (the hostname must contain "api" so the gateway stays in api-mode). Inject
+                # the mapping here so it works even when the container runs as a non-root UID
+                # and cannot edit /etc/hosts itself; the entrypoint falls back to direct mode
+                # if this is absent.
+                extra_hosts={"api.egress.local": "127.0.0.1"},
                 detach=True,
                 restart_policy={"Name": "unless-stopped"},
             )
