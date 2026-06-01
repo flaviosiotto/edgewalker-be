@@ -79,6 +79,11 @@ CLIENT_PORTAL_GATEWAY_IMAGE = os.getenv(
 ).strip()
 CLIENT_PORTAL_GATEWAY_PREFIX = os.getenv("CLIENT_PORTAL_GATEWAY_PREFIX", "cpgw-").strip() or "cpgw-"
 CLIENT_PORTAL_GATEWAY_PORT = max(1, int(os.getenv("CLIENT_PORTAL_GATEWAY_PORT", "5000")))
+# Public (Traefik-routed) noVNC web port. The user drives an in-container browser
+# over noVNC at https://<host>/ib-access/{id}/; that browser logs in to the
+# gateway on localhost, satisfying IBKR's "same machine" constraint. The gateway
+# API port (CLIENT_PORTAL_GATEWAY_PORT, HTTPS) stays internal for the backend.
+CLIENT_PORTAL_NOVNC_PORT = max(1, int(os.getenv("CLIENT_PORTAL_NOVNC_PORT", "6080")))
 CLIENT_PORTAL_GATEWAY_STARTUP_TIMEOUT_SECONDS = max(
     5,
     int(os.getenv("CLIENT_PORTAL_GATEWAY_STARTUP_TIMEOUT_SECONDS", "90")),
@@ -87,10 +92,12 @@ CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS = max(
     0.5,
     float(os.getenv("CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS", "2")),
 )
-# Local shim health endpoint used for the readiness probe. Probing the gateway
-# root ("/") would open an upstream IBKR session before the browser login and
-# corrupt the gateway's shared CookieManager (breaks sso/validate?gw=1).
-CLIENT_PORTAL_SHIM_HEALTH_PATH = "/__cpgw_shim_health"
+# Gateway readiness path used by the backend probe. The in-container browser
+# performs the real SSO login, but the backend still waits for the Java gateway's
+# HTTPS listener to come up before handing the launch URL to the user. "/sso/Login"
+# is served locally by the gateway without contacting IBKR (no upstream session is
+# opened), so probing it is safe and does not pollute the gateway CookieManager.
+CLIENT_PORTAL_GATEWAY_READY_PATH = "/sso/Login"
 CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS = max(
     0,
     int(os.getenv("CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS", os.getenv("CLIENT_PORTAL_LAUNCH_TTL_SECONDS", "900"))),
@@ -740,9 +747,15 @@ class ConnectionManager:
 
     def _client_portal_traefik_labels(self, connection_id: int, prefix: str) -> dict[str, str]:
         """Build Traefik Docker-provider labels that route the public host's
-        ``<prefix>`` straight to this container's HTTPS shim port. A forwardAuth
+        ``<prefix>`` to this container's noVNC web port (plain HTTP). A
+        stripPrefix middleware removes ``<prefix>`` so noVNC's static assets and
+        its ``/websockify`` WebSocket resolve at the container root. A forwardAuth
         middleware (when configured) gates the browser behind the backend's
         short-lived launch session before Traefik forwards the request.
+
+        The gateway's HTTPS API port stays internal (no public router): the
+        backend reaches it at ``https://<container>:<gateway-port>`` and the
+        in-container browser reaches it on localhost.
         """
         if not CLIENT_PORTAL_ROUTING_HOST:
             raise RuntimeError(
@@ -751,6 +764,7 @@ class ConnectionManager:
 
         router = f"cpgw-{connection_id}"
         service = f"cpgw-{connection_id}"
+        strip_middleware = f"cpgw-strip-{connection_id}"
         rule = f"Host(`{CLIENT_PORTAL_ROUTING_HOST}`) && PathPrefix(`{prefix}`)"
         labels: dict[str, str] = {
             "traefik.enable": "true",
@@ -758,14 +772,16 @@ class ConnectionManager:
             f"traefik.http.routers.{router}.entrypoints": CLIENT_PORTAL_TRAEFIK_ENTRYPOINT,
             f"traefik.http.routers.{router}.priority": CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY,
             f"traefik.http.routers.{router}.service": service,
-            f"traefik.http.services.{service}.loadbalancer.server.port": str(CLIENT_PORTAL_GATEWAY_PORT),
-            # The shim only serves HTTPS (self-signed) on the gateway port, so the
-            # upstream scheme must be https and verification skipped. The transport
-            # itself is defined in the Traefik file provider (see devops repo) and
-            # referenced here; Docker-label providers cannot define transports.
-            f"traefik.http.services.{service}.loadbalancer.server.scheme": "https",
-            f"traefik.http.services.{service}.loadbalancer.serverstransport": CLIENT_PORTAL_TRAEFIK_SERVERSTRANSPORT,
+            # noVNC/websockify serves plain HTTP on the noVNC port (WebSocket
+            # upgrades are forwarded transparently by Traefik on the same router).
+            f"traefik.http.services.{service}.loadbalancer.server.port": str(CLIENT_PORTAL_NOVNC_PORT),
+            # Strip the per-connection prefix so noVNC assets + /websockify resolve
+            # at the container root (the runtime-generated index.html points the
+            # WebSocket at <prefix>/websockify so it routes back through this router).
+            f"traefik.http.middlewares.{strip_middleware}.stripprefix.prefixes": prefix,
         }
+
+        middlewares = [f"{strip_middleware}@docker"]
 
         if CLIENT_PORTAL_TRAEFIK_CERTRESOLVER:
             labels[f"traefik.http.routers.{router}.tls.certresolver"] = CLIENT_PORTAL_TRAEFIK_CERTRESOLVER
@@ -780,7 +796,11 @@ class ConnectionManager:
             auth_url = CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE.format(connection_id=connection_id)
             labels[f"traefik.http.middlewares.{middleware}.forwardauth.address"] = auth_url
             labels[f"traefik.http.middlewares.{middleware}.forwardauth.trustForwardHeader"] = "true"
-            labels[f"traefik.http.routers.{router}.middlewares"] = f"{middleware}@docker"
+            # forwardAuth runs BEFORE stripPrefix so the gate sees the full
+            # /ib-access/{id} path the launch cookie was scoped to.
+            middlewares.insert(0, f"{middleware}@docker")
+
+        labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(middlewares)
 
         return labels
 
@@ -966,12 +986,11 @@ class ConnectionManager:
                     timeout=5.0,
                     follow_redirects=False,
                 ) as client:
-                    # Probe the shim's local health endpoint (TCP-only check of the
-                    # Java gateway). A direct GET "/" would make the gateway redirect
-                    # into /sso/Login and open an upstream IBKR session BEFORE the
-                    # browser login, polluting the gateway's shared CookieManager with
-                    # a second session lineage and breaking /v1/api/sso/validate?gw=1.
-                    response = await client.get(CLIENT_PORTAL_SHIM_HEALTH_PATH)
+                    # Probe the gateway's local /sso/Login page (TCP + HTTP check
+                    # of the Java gateway listener). This page is served locally
+                    # without contacting IBKR, so it does not open an upstream
+                    # session. The real login happens in the in-container browser.
+                    response = await client.get(CLIENT_PORTAL_GATEWAY_READY_PATH)
                 if response.status_code < 500:
                     return
                 last_error = f"HTTP {response.status_code}"
