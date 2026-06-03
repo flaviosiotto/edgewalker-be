@@ -86,14 +86,14 @@ async def get_connection_endpoint(
 ):
     """Get a single connection with its accounts.
 
-    If the connection is marked as *connected* it is probed against
+    If the connection is marked as *connected* or *degraded* it is probed against
     the broker to verify its real status before returning.
     """
     conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
-    if conn.status == "connected":
+    if conn.status in {"connected", "degraded"}:
         manager = get_connection_manager()
         await manager.check_connection_status(connection_id)
         session.refresh(conn)

@@ -561,6 +561,22 @@ def _update_connection_status(
     session.commit()
 
 
+def _gateway_status_is_degraded(status: dict[str, Any]) -> bool:
+    gateway_state = str(status.get("status") or "").lower()
+    return gateway_state == "degraded" or bool(
+        status.get("critical_error")
+        or status.get("broker_critical_error")
+    )
+
+
+def _gateway_degraded_message(status: dict[str, Any]) -> str:
+    for key in ("critical_error", "broker_critical_error", "error", "message"):
+        value = status.get(key)
+        if value:
+            return f"Gateway degraded: {value}"
+    return "Gateway is running but the broker connection is degraded"
+
+
 # ── Public async API (called by route handlers) ─────────────────────
 
 class ConnectionManager:
@@ -1830,6 +1846,8 @@ class ConnectionManager:
         if is_client_portal_transport(config) and stored_status == ConnectionStatus.AWAITING_AUTH.value:
             return stored_status
 
+        actual_message: str | None = None
+
         # Check if the container exists and is running
         container = self._get_container(connection_id, broker_type)
         if not container or container.status != "running":
@@ -1838,9 +1856,12 @@ class ConnectionManager:
             # Ask the gateway if it's still connected to the broker
             try:
                 client = self.get_gateway_client(connection_id, broker_type)
-                is_alive = await client.is_connected()
-                if is_alive:
+                gateway_status = await client.get_status()
+                if gateway_status.get("connected"):
                     actual = ConnectionStatus.CONNECTED
+                elif _gateway_status_is_degraded(gateway_status):
+                    actual = ConnectionStatus.DEGRADED
+                    actual_message = _gateway_degraded_message(gateway_status)
                 elif stored_status == ConnectionStatus.CONNECTING.value:
                     # Preserve an in-flight connect attempt while the gateway
                     # container is still alive; the explicit connect() flow
@@ -1856,10 +1877,15 @@ class ConnectionManager:
                 )
 
         status_changed = actual.value != stored_status
-
-        if status_changed:
+        message_changed = False
+        if actual == ConnectionStatus.DEGRADED:
             with get_session_context() as session:
-                _update_connection_status(session, connection_id, actual)
+                conn = session.get(Connection, connection_id)
+                message_changed = conn is not None and conn.status_message != actual_message
+
+        if status_changed or message_changed:
+            with get_session_context() as session:
+                _update_connection_status(session, connection_id, actual, actual_message)
             logger.info(
                 "Connection %s status changed: %s → %s",
                 connection_id, stored_status, actual.value,
