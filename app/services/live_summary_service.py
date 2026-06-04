@@ -32,6 +32,8 @@ def compute_live_performance_summary(session: Session, sl: StrategyLive) -> Live
     realized_fills = [fill for fill in fills if fill.realized_pnl is not None]
 
     realized_pnl = sum((fill.realized_pnl or 0.0) for fill in realized_fills)
+    commission = sum((fill.commission or 0.0) for fill in realized_fills)
+    net_pnl = realized_pnl - commission
     unrealized_pnl = 0.0
     total_trades = len(realized_fills)
     wins = sum(1 for fill in realized_fills if (fill.realized_pnl or 0.0) > 0)
@@ -47,7 +49,7 @@ def compute_live_performance_summary(session: Session, sl: StrategyLive) -> Live
     last_activity_at = max(ts for ts in last_activity_candidates if ts is not None)
 
     return LivePerformanceSummary(
-        total_pnl=realized_pnl + unrealized_pnl,
+        total_pnl=net_pnl + unrealized_pnl,
         total_trades=total_trades,
         win_rate=win_rate,
         position_side=position_side if position_side in {"long", "short", "flat"} else "flat",
