@@ -245,6 +245,21 @@ class GatewayClient:
             payload["account"] = account
         return await self._post("/orders/reread", json=payload)
 
+    async def reread_fills(
+        self,
+        since: str | None = None,
+        *,
+        account: str | None = None,
+        persist_checkpoint: bool = True,
+    ) -> dict:
+        """Trigger a gateway-side fill reread, optionally scoped to one broker account."""
+        payload: dict[str, Any] = {"persist_checkpoint": persist_checkpoint}
+        if since:
+            payload["since"] = since
+        if account:
+            payload["account"] = account
+        return await self._post("/fills/reread", json=payload)
+
     async def list_positions(self, account: str | None = None) -> list[dict]:
         """List current positions from the gateway (for reconciliation)."""
         params = {"account": account} if account else None

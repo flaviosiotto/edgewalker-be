@@ -194,6 +194,21 @@ def purge_account_orders(session: Session, account_id: int) -> int:
     return len(order_ids)
 
 
+def purge_account_fills(session: Session, account_id: int) -> int:
+    """Delete persisted fills for one broker account."""
+    fill_ids = list(session.exec(
+        select(LiveFill.id).where(LiveFill.account_id == account_id)
+    ).all())
+    if not fill_ids:
+        return 0
+
+    session.exec(
+        delete(LiveFill).where(LiveFill.account_id == account_id)
+    )
+    session.commit()
+    return len(fill_ids)
+
+
 # ═════════════════════════════════════════════════════════════════════
 # FILLS
 # ═════════════════════════════════════════════════════════════════════

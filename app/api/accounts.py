@@ -27,6 +27,7 @@ from app.services.live_trading_service import (
     list_account_fills,
     list_account_orders,
     list_account_positions,
+    purge_account_fills,
     purge_account_orders,
 )
 from app.utils.auth_utils import get_current_active_or_consultative_user
@@ -43,9 +44,13 @@ class AccountOrdersResetResponse(BaseModel):
     account_id: int
     connection_id: int
     deleted_count: int
+    deleted_fill_count: int = 0
     orders_since: datetime
     published_count: int = 0
     latest_event_at: datetime | None = None
+    fills_since: datetime | None = None
+    fills_published_count: int = 0
+    latest_fill_event_at: datetime | None = None
     message: str | None = None
 
 
@@ -137,36 +142,52 @@ async def reset_account_orders_endpoint(
 
     lookback_hours = payload.lookback_hours or resolve_order_history_lookback_hours(connection.config)
     orders_since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    fills_since = orders_since
+    deleted_fill_count = purge_account_fills(session, account.id)
     deleted_count = purge_account_orders(session, account.id)
 
     try:
         client = manager.get_gateway_client(connection.id, connection.broker_type)
-        result = await client.reread_orders(
+        order_result = await client.reread_orders(
             since=orders_since.isoformat(),
+            account=account.account_id,
+            persist_checkpoint=False,
+        )
+        fill_result = await client.reread_fills(
+            since=fills_since.isoformat(),
             account=account.account_id,
             persist_checkpoint=False,
         )
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to reload account orders from broker: {exc}",
+            detail=f"Failed to reload account data from broker: {exc}",
         ) from exc
 
-    latest_event_at_raw = result.get("latest_event_at")
+    latest_event_at_raw = order_result.get("latest_event_at")
     latest_event_at = None
     if isinstance(latest_event_at_raw, str):
         latest_event_at = datetime.fromisoformat(latest_event_at_raw)
 
+    latest_fill_event_at_raw = fill_result.get("latest_event_at")
+    latest_fill_event_at = None
+    if isinstance(latest_fill_event_at_raw, str):
+        latest_fill_event_at = datetime.fromisoformat(latest_fill_event_at_raw)
+
     return AccountOrdersResetResponse(
-        success=bool(result.get("success", True)),
+        success=bool(order_result.get("success", True)) and bool(fill_result.get("success", True)),
         account_id=account.id,
         connection_id=connection.id,
         deleted_count=deleted_count,
+        deleted_fill_count=deleted_fill_count,
         orders_since=orders_since,
-        published_count=int(result.get("published_count") or 0),
+        published_count=int(order_result.get("published_count") or 0),
         latest_event_at=latest_event_at,
+        fills_since=fills_since,
+        fills_published_count=int(fill_result.get("published_count") or 0),
+        latest_fill_event_at=latest_fill_event_at,
         message=(
-            f"Deleted {deleted_count} persisted orders and triggered a broker reread for account {account.account_id}"
+            f"Deleted {deleted_count} orders and {deleted_fill_count} fills, then triggered broker reread for account {account.account_id}"
         ),
     )
 
