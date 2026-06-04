@@ -19,6 +19,7 @@ from app.schemas.live_trading import (
     LiveFillRead,
     LiveOrderRead,
     LivePositionRead,
+    LiveTradeRead,
 )
 from app.services.connection_service import get_account, list_accounts, list_all_accounts
 from app.services.connection_service import get_connection
@@ -27,8 +28,10 @@ from app.services.live_trading_service import (
     list_account_fills,
     list_account_orders,
     list_account_positions,
+    list_account_trades,
     purge_account_fills,
     purge_account_orders,
+    purge_account_trades,
 )
 from app.utils.auth_utils import get_current_active_or_consultative_user
 
@@ -145,6 +148,7 @@ async def reset_account_orders_endpoint(
     fills_since = orders_since
     deleted_fill_count = purge_account_fills(session, account.id)
     deleted_count = purge_account_orders(session, account.id)
+    purge_account_trades(session, account.id)
 
     try:
         client = manager.get_gateway_client(connection.id, connection.broker_type)
@@ -211,6 +215,27 @@ def list_account_fills_endpoint(
         limit=limit,
     )
     return [LiveFillRead.model_validate(fill) for fill in fills]
+
+
+@router.get("/{account_id}/trades", response_model=list[LiveTradeRead])
+def list_account_trades_endpoint(
+    account_id: int,
+    symbol: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    trades = list_account_trades(
+        session,
+        account.id,
+        symbol=symbol,
+        limit=limit,
+    )
+    return [LiveTradeRead.model_validate(trade) for trade in trades]
 
 
 @router.get("/{account_id}/positions", response_model=list[LivePositionRead])

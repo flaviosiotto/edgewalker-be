@@ -23,7 +23,7 @@ engine = create_engine(
     pool_pre_ping=True
 )
 
-_MIGRATION_MANAGED_TABLES = {"orders", "fills", "account_positions"}
+_MIGRATION_MANAGED_TABLES = {"orders", "fills", "account_positions", "trades"}
 
 
 def create_db_and_tables():
@@ -33,7 +33,7 @@ def create_db_and_tables():
     from app.models.password_reset_token import PasswordResetToken  # noqa: F401
     from app.models.strategy import Strategy, BacktestResult, BacktestTrade  # noqa: F401
     from app.models.connection import Connection, Account  # noqa: F401
-    from app.models.live_trading import LiveOrder, LiveFill, LivePosition  # noqa: F401
+    from app.models.live_trading import LiveOrder, LiveFill, LivePosition, LiveTrade  # noqa: F401
     from app.models.marketdata import SymbolCache, SymbolSyncLog  # noqa: F401
 
     bootstrap_tables = [

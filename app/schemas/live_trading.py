@@ -121,6 +121,32 @@ class LiveFillRead(BaseModel):
         from_attributes = True
 
 
+class LiveTradeRead(BaseModel):
+    """Response schema for a materialized FIFO trade (closed lot)."""
+    id: int
+    strategy_live_id: int | None = None
+    account_id: int
+    symbol: str
+    direction: str
+    quantity: float
+    entry_price: float | None = None
+    exit_price: float
+    multiplier: float = 1.0
+    realized_pnl: float | None = None
+    commission: float | None = None
+    net_pnl: float | None = None
+    trusted: bool = True
+    entry_fill_id: int | None = None
+    exit_fill_id: int | None = None
+    entry_time: datetime | None = None
+    exit_time: datetime
+    created_at: datetime
+    extra: dict[str, Any] | None = None
+
+    class Config:
+        from_attributes = True
+
+
 # ── Position Schemas ─────────────────────────────────────────────────
 
 

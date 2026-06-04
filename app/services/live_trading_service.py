@@ -20,6 +20,7 @@ from app.models.live_trading import (
     LiveFill,
     LiveOrder,
     LivePosition,
+    LiveTrade,
     OrderStatus,
     PositionStatus,
 )
@@ -209,6 +210,21 @@ def purge_account_fills(session: Session, account_id: int) -> int:
     return len(fill_ids)
 
 
+def purge_account_trades(session: Session, account_id: int) -> int:
+    """Delete materialized round-trip trades for one broker account."""
+    trade_ids = list(session.exec(
+        select(LiveTrade.id).where(LiveTrade.account_id == account_id)
+    ).all())
+    if not trade_ids:
+        return 0
+
+    session.exec(
+        delete(LiveTrade).where(LiveTrade.account_id == account_id)
+    )
+    session.commit()
+    return len(trade_ids)
+
+
 # ═════════════════════════════════════════════════════════════════════
 # FILLS
 # ═════════════════════════════════════════════════════════════════════
@@ -258,6 +274,23 @@ def list_account_fills(
         stmt = stmt.where(LiveFill.symbol == symbol.upper())
     return list(session.exec(stmt).all())
 
+def list_account_trades(
+    session: Session,
+    account_id: int,
+    *,
+    symbol: str | None = None,
+    limit: int = 200,
+) -> list[LiveTrade]:
+    """List materialized FIFO trades (closed lots) for a broker account."""
+    stmt = (
+        select(LiveTrade)
+        .where(LiveTrade.account_id == account_id)
+        .order_by(LiveTrade.exit_time.desc(), LiveTrade.id.desc())  # type: ignore[union-attr]
+        .limit(limit)
+    )
+    if symbol:
+        stmt = stmt.where(LiveTrade.symbol == symbol.upper())
+    return list(session.exec(stmt).all())
 
 # ═════════════════════════════════════════════════════════════════════
 # POSITIONS
@@ -511,16 +544,16 @@ def get_live_dashboard_overview(
     )
     live_sessions = list(session.exec(base_session_stmt.order_by(StrategyLive.started_at.desc(), StrategyLive.id.desc())).all())
 
-    # Dashboard PnL/trade metrics are account-scoped and must not depend on
-    # strategy attribution being present in projection rows.
-    fills_stmt = (
-        select(LiveFill)
-        .where(LiveFill.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
-        .where(LiveFill.fill_time >= range_start)
-        .where(LiveFill.fill_time < range_end)
-        .order_by(LiveFill.fill_time.asc())  # type: ignore[union-attr]
+    # Dashboard PnL/trade metrics are account-scoped and read directly from the
+    # materialized trades projection (no per-request recomputation from fills).
+    trades_stmt = (
+        select(LiveTrade)
+        .where(LiveTrade.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
+        .where(LiveTrade.exit_time >= range_start)
+        .where(LiveTrade.exit_time < range_end)
+        .order_by(LiveTrade.exit_time.asc())  # type: ignore[union-attr]
     )
-    fills = list(session.exec(fills_stmt).all())
+    trades = list(session.exec(trades_stmt).all())
 
     open_positions_stmt = (
         select(LivePosition)
@@ -577,10 +610,10 @@ def get_live_dashboard_overview(
         if session_activity and (item["last_activity_at"] is None or session_activity > item["last_activity_at"]):
             item["last_activity_at"] = session_activity
 
-    for fill in fills:
-        if fill.account_id is None or fill.account_id not in account_breakdown:
+    for trade in trades:
+        if trade.account_id is None or trade.account_id not in account_breakdown:
             continue
-        bucket_date = fill.fill_time.astimezone(timezone.utc).date()
+        bucket_date = trade.exit_time.astimezone(timezone.utc).date()
         bucket = daily_buckets.setdefault(bucket_date, {
             "realized_pnl": 0.0,
             "commission": 0.0,
@@ -590,29 +623,29 @@ def get_live_dashboard_overview(
             "losing_trades": 0,
         })
 
-        realized_pnl = float(fill.realized_pnl or 0.0)
-        commission = float(fill.commission or 0.0)
+        realized_pnl = float(trade.realized_pnl or 0.0)
+        commission = float(trade.commission or 0.0)
         bucket["realized_pnl"] += realized_pnl
         bucket["commission"] += commission
         bucket["net_pnl"] += realized_pnl - commission
-        if fill.realized_pnl is not None:
+        if trade.realized_pnl is not None:
             bucket["trade_count"] += 1
             if realized_pnl > 0:
                 bucket["winning_trades"] += 1
             elif realized_pnl < 0:
                 bucket["losing_trades"] += 1
 
-        item = account_breakdown[fill.account_id]
+        item = account_breakdown[trade.account_id]
         item["realized_pnl"] += realized_pnl
         item["net_pnl"] += realized_pnl - commission
-        if fill.realized_pnl is not None:
+        if trade.realized_pnl is not None:
             item["total_trades"] += 1
             if realized_pnl > 0:
                 item["winning_trades"] += 1
             elif realized_pnl < 0:
                 item["losing_trades"] += 1
-        if item["last_activity_at"] is None or fill.fill_time > item["last_activity_at"]:
-            item["last_activity_at"] = fill.fill_time
+        if item["last_activity_at"] is None or trade.exit_time > item["last_activity_at"]:
+            item["last_activity_at"] = trade.exit_time
 
     for position in open_positions:
         if position.account_id is None or position.account_id not in account_breakdown:

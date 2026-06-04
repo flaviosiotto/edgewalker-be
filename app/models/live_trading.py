@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Column, ForeignKey, Integer, String, DateTime, Float, Text
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, DateTime, Float, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
@@ -323,3 +323,53 @@ class LivePosition(SQLModel, table=True):
     @property
     def closed_at(self) -> datetime | None:
         return None
+
+
+class LiveTrade(SQLModel, table=True):
+    """Materialized FIFO close match (a closed lot) with realized PnL.
+
+    Each row is one FIFO match (an opening lot closed by a reducing fill),
+    account-scoped and rebuilt deterministically by the order-aggregator.
+    Read-only from the backend's perspective.
+    """
+    __tablename__ = "trades"
+    __allow_unmapped__ = True
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    strategy_live_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("strategy_live.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    account_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("accounts.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+    )
+    symbol: str = Field(sa_column=Column(String(32), nullable=False, index=True))
+    direction: str = Field(sa_column=Column(String(10), nullable=False))  # long / short
+    quantity: float = Field(sa_column=Column(Float, nullable=False))
+    entry_price: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    exit_price: float = Field(sa_column=Column(Float, nullable=False))
+    multiplier: float = Field(default=1.0, sa_column=Column(Float, nullable=False))
+    realized_pnl: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    commission: Optional[float] = Field(default=0.0, sa_column=Column(Float, nullable=True))
+    net_pnl: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    trusted: bool = Field(default=True, sa_column=Column(Boolean, nullable=False))
+    entry_fill_id: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True, index=True))
+    exit_fill_id: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True, index=True))
+    entry_time: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True, index=True))
+    exit_time: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False, index=True))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    extra: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
