@@ -559,6 +559,7 @@ def get_live_dashboard_overview(
         select(LivePosition)
         .where(LivePosition.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
         .where(LivePosition.status == PositionStatus.OPEN.value)
+        .where(LivePosition.quantity != 0)
         .order_by(LivePosition.updated_at.desc())  # type: ignore[union-attr]
     )
     open_positions = list(session.exec(open_positions_stmt).all())
