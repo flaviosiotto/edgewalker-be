@@ -496,11 +496,10 @@ def get_live_dashboard_overview(
     )
     live_sessions = list(session.exec(base_session_stmt.order_by(StrategyLive.started_at.desc(), StrategyLive.id.desc())).all())
 
+    # Dashboard PnL/trade metrics are account-scoped and must not depend on
+    # strategy attribution being present in projection rows.
     fills_stmt = (
         select(LiveFill)
-        .join(StrategyLive, LiveFill.strategy_live_id == StrategyLive.id)
-        .join(Strategy, StrategyLive.strategy_id == Strategy.id)
-        .where(Strategy.user_id == user_id)
         .where(LiveFill.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
         .where(LiveFill.fill_time >= range_start)
         .where(LiveFill.fill_time < range_end)
@@ -510,9 +509,6 @@ def get_live_dashboard_overview(
 
     open_positions_stmt = (
         select(LivePosition)
-        .join(StrategyLive, LivePosition.strategy_live_id == StrategyLive.id)
-        .join(Strategy, StrategyLive.strategy_id == Strategy.id)
-        .where(Strategy.user_id == user_id)
         .where(LivePosition.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
         .where(LivePosition.status == PositionStatus.OPEN.value)
         .order_by(LivePosition.updated_at.desc())  # type: ignore[union-attr]
@@ -608,6 +604,7 @@ def get_live_dashboard_overview(
             continue
         item = account_breakdown[position.account_id]
         item["open_positions"] += 1
+        item["unrealized_pnl"] += float(position.unrealized_pnl or 0.0)
         if item["last_activity_at"] is None or position.updated_at > item["last_activity_at"]:
             item["last_activity_at"] = position.updated_at
 
