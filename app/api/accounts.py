@@ -23,7 +23,7 @@ from app.schemas.live_trading import (
 )
 from app.services.connection_service import get_account, list_accounts, list_all_accounts
 from app.services.connection_service import get_connection
-from app.services.connection_manager import get_connection_manager, resolve_order_history_lookback_hours
+from app.services.connection_manager import get_connection_manager, resolve_order_history_lookback_days
 from app.services.live_trading_service import (
     list_account_fills,
     list_account_orders,
@@ -39,7 +39,8 @@ router = APIRouter(prefix="/accounts", tags=["Accounts"])
 
 
 class AccountOrdersResetRequest(BaseModel):
-    lookback_hours: int | None = Field(default=None, ge=1, le=24 * 90)
+    lookback_days: int | None = Field(default=None, ge=1, le=90)
+    lookback_hours: int | None = Field(default=None, ge=1, le=24 * 90, deprecated=True)
 
 
 class AccountOrdersResetResponse(BaseModel):
@@ -143,8 +144,13 @@ async def reset_account_orders_endpoint(
             detail="Connection must be connected to reset account orders",
         )
 
-    lookback_hours = payload.lookback_hours or resolve_order_history_lookback_hours(connection.config)
-    orders_since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    lookback_days = payload.lookback_days
+    if lookback_days is None and payload.lookback_hours is not None:
+        lookback_days = max((payload.lookback_hours + 23) // 24, 1)
+    if lookback_days is None:
+        lookback_days = resolve_order_history_lookback_days(connection.config)
+
+    orders_since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     fills_since = orders_since
     deleted_fill_count = purge_account_fills(session, account.id)
     deleted_count = purge_account_orders(session, account.id)
@@ -191,7 +197,7 @@ async def reset_account_orders_endpoint(
         fills_published_count=int(fill_result.get("published_count") or 0),
         latest_fill_event_at=latest_fill_event_at,
         message=(
-            f"Deleted {deleted_count} orders and {deleted_fill_count} fills, then triggered broker reread for account {account.account_id}"
+            f"Deleted {deleted_count} orders and {deleted_fill_count} fills, then triggered broker reread for account {account.account_id} from the last {lookback_days}d"
         ),
     )
 

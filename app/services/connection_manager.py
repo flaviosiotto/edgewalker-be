@@ -342,27 +342,35 @@ def _binance_env(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def resolve_order_history_lookback_hours(
+def resolve_order_history_lookback_days(
     config: dict[str, Any] | None,
     *,
-    default_hours: int = 24,
+    default_days: int = 1,
 ) -> int:
-    raw_value = (config or {}).get("order_history_lookback_hours")
-    if raw_value in (None, ""):
-        return default_hours
+    config = config or {}
+    raw_days = config.get("order_history_lookback_days")
+    if raw_days not in (None, ""):
+        try:
+            return max(int(raw_days), 1)
+        except (TypeError, ValueError):
+            return default_days
+
+    raw_hours = config.get("order_history_lookback_hours")
+    if raw_hours in (None, ""):
+        return default_days
 
     try:
-        parsed = int(raw_value)
+        parsed_hours = int(raw_hours)
     except (TypeError, ValueError):
-        return default_hours
+        return default_days
 
-    return max(parsed, 1)
+    return max((max(parsed_hours, 1) + 23) // 24, 1)
 
 
 def _broker_sync_env(config: dict[str, Any]) -> dict[str, str]:
-    lookback_hours = resolve_order_history_lookback_hours(config)
+    lookback_days = resolve_order_history_lookback_days(config)
     return {
-        "BROKER_SYNC_HISTORY_LOOKBACK_S": str(lookback_hours * 3600),
+        "BROKER_SYNC_HISTORY_LOOKBACK_S": str(lookback_days * 86400),
     }
 
 

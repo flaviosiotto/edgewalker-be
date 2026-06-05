@@ -43,7 +43,7 @@ from app.services.connection_service import (
 )
 from app.services.client_portal_service import is_client_portal_transport
 from app.services.connection_manager import get_connection_manager
-from app.services.connection_manager import resolve_order_history_lookback_hours
+from app.services.connection_manager import resolve_order_history_lookback_days
 from app.utils.auth_utils import get_current_active_user
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,8 @@ class ClientPortalFlowSignalResponse(BaseModel):
 
 
 class OrdersRereadRequest(BaseModel):
-    lookback_hours: int | None = Field(default=None, ge=1, le=24 * 90)
+    lookback_days: int | None = Field(default=None, ge=1, le=90)
+    lookback_hours: int | None = Field(default=None, ge=1, le=24 * 90, deprecated=True)
 
 
 class OrdersRereadResponse(BaseModel):
@@ -331,8 +332,13 @@ async def reread_orders_endpoint(
             detail="Connection must be connected to reread orders",
         )
 
-    lookback_hours = payload.lookback_hours or resolve_order_history_lookback_hours(conn.config)
-    orders_since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    lookback_days = payload.lookback_days
+    if lookback_days is None and payload.lookback_hours is not None:
+        lookback_days = max((payload.lookback_hours + 23) // 24, 1)
+    if lookback_days is None:
+        lookback_days = resolve_order_history_lookback_days(conn.config)
+
+    orders_since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
     try:
         client = manager.get_gateway_client(connection_id, conn.broker_type)
@@ -360,7 +366,7 @@ async def reread_orders_endpoint(
         published_count=int(result.get("published_count") or 0),
         latest_event_at=latest_event_at,
         message=(
-            f"Triggered order reread from the last {lookback_hours}h"
+            f"Triggered order reread from the last {lookback_days}d"
             if result.get("success", True)
             else "Gateway did not accept the order reread request"
         ),

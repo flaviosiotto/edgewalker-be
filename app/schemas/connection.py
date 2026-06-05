@@ -21,6 +21,8 @@ class ConnectionConfig(BaseModel):
     port: int | None = None
     client_id: int | None = None
     client_portal_enabled: bool | None = None
+    order_history_lookback_days: int | None = None
+    order_history_lookback_hours: int | None = None
     # Generic
     api_key: str | None = None
     api_secret: str | None = None
