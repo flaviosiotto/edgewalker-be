@@ -38,6 +38,7 @@ FETCH_TIMEOUT = 300.0  # Historical fetches can be slow
 GATEWAY_PREFIXES: dict[str, str] = {
     "ibkr": "gw-",
     "binance": "gw-",
+    "ctrader": "gw-",
 }
 
 

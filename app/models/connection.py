@@ -20,7 +20,8 @@ class BrokerType(str, Enum):
     """Supported broker/exchange types."""
     IBKR = "ibkr"
     YAHOO = "yahoo"
-    BINANCE = "binance"  # future
+    BINANCE = "binance"
+    CTRADER = "ctrader"
 
 
 class ConnectionStatus(str, Enum):

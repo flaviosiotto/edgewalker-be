@@ -345,6 +345,24 @@ def _binance_env(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _ctrader_env(config: dict[str, Any]) -> dict[str, str]:
+    """Build env vars for a gateway cTrader Open API container."""
+    environment = str(config.get("environment", "demo") or "demo").strip().lower()
+    if environment not in {"demo", "live"}:
+        raise ValueError("cTrader environment must be 'demo' or 'live'")
+
+    return {
+        "CTRADER_CLIENT_ID": str(config.get("client_id", "")),
+        "CTRADER_CLIENT_SECRET": str(config.get("client_secret", "")),
+        "CTRADER_ACCESS_TOKEN": str(config.get("access_token", "")),
+        "CTRADER_ACCOUNT_ID": str(config.get("account_id", "")),
+        "CTRADER_ENVIRONMENT": environment,
+        "CTRADER_HOST": str(config.get("host", "")),
+        "CTRADER_PORT": str(config.get("port", 5035)),
+        "CTRADER_VOLUME_SCALE": str(config.get("volume_scale", 100)),
+    }
+
+
 def resolve_order_history_lookback_days(
     config: dict[str, Any] | None,
     *,
@@ -393,6 +411,7 @@ class GatewaySpec:
 _DEFAULT_GATEWAY_IMAGE = os.getenv("GATEWAY_IMAGE", "edgewalker-devops-gateway:latest")
 _IBKR_GATEWAY_IMAGE = os.getenv("IBKR_GATEWAY_IMAGE", _DEFAULT_GATEWAY_IMAGE)
 _BINANCE_GATEWAY_IMAGE = os.getenv("BINANCE_GATEWAY_IMAGE", _DEFAULT_GATEWAY_IMAGE)
+_CTRADER_GATEWAY_IMAGE = os.getenv("CTRADER_GATEWAY_IMAGE", _DEFAULT_GATEWAY_IMAGE)
 
 GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
     "ibkr": GatewaySpec(
@@ -408,6 +427,13 @@ GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
         prefix="gw-",
         label="gateway",
         env_mapper=_binance_env,
+        app_dir="gateway/app",
+    ),
+    "ctrader": GatewaySpec(
+        image=_CTRADER_GATEWAY_IMAGE,
+        prefix="gw-",
+        label="gateway",
+        env_mapper=_ctrader_env,
         app_dir="gateway/app",
     ),
 }

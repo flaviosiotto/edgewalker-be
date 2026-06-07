@@ -19,13 +19,19 @@ class ConnectionConfig(BaseModel):
     transport: str | None = None
     host: str | None = None
     port: int | None = None
-    client_id: int | None = None
+    client_id: int | str | None = None
     client_portal_enabled: bool | None = None
     order_history_lookback_days: int | None = None
     order_history_lookback_hours: int | None = None
     # Generic
     api_key: str | None = None
     api_secret: str | None = None
+    # cTrader Open API
+    client_secret: str | None = None
+    access_token: str | None = None
+    account_id: str | None = None
+    environment: str | None = None
+    volume_scale: float | None = None
 
     class Config:
         extra = "allow"
