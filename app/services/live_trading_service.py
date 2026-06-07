@@ -626,9 +626,10 @@ def get_live_dashboard_overview(
 
         realized_pnl = float(trade.realized_pnl or 0.0)
         commission = float(trade.commission or 0.0)
+        net_pnl = float(trade.net_pnl) if trade.net_pnl is not None else 0.0
         bucket["realized_pnl"] += realized_pnl
         bucket["commission"] += commission
-        bucket["net_pnl"] += realized_pnl - commission
+        bucket["net_pnl"] += net_pnl
         if trade.realized_pnl is not None:
             bucket["trade_count"] += 1
             if realized_pnl > 0:
@@ -638,7 +639,7 @@ def get_live_dashboard_overview(
 
         item = account_breakdown[trade.account_id]
         item["realized_pnl"] += realized_pnl
-        item["net_pnl"] += realized_pnl - commission
+        item["net_pnl"] += net_pnl
         if trade.realized_pnl is not None:
             item["total_trades"] += 1
             if realized_pnl > 0:
