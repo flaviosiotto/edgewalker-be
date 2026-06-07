@@ -334,11 +334,14 @@ def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
 
 def _binance_env(config: dict[str, Any]) -> dict[str, str]:
     """Build env vars for a gateway Binance container."""
+    market_type = str(config.get("market_type", "futures") or "futures").strip().lower()
+    if market_type not in {"spot", "futures"}:
+        raise ValueError("Binance market_type must be 'spot' or 'futures'")
     return {
         "BINANCE_API_KEY": str(config.get("api_key", "")),
         "BINANCE_API_SECRET": str(config.get("api_secret", "")),
         "BINANCE_TESTNET": str(config.get("testnet", False)).lower(),
-        "BINANCE_MARKET_TYPE": str(config.get("market_type", "futures")),
+        "BINANCE_MARKET_TYPE": market_type,
     }
 
 
