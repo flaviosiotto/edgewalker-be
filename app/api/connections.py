@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlmodel import Session
@@ -26,6 +27,8 @@ from app.schemas.connection import (
     ConnectionListResponse,
     ConnectionRead,
     ConnectionUpdate,
+    CTraderOAuthTokenRequest,
+    CTraderOAuthTokenResponse,
 )
 from app.schemas.marketdata import (
     AvailableSymbolsResponse,
@@ -50,8 +53,64 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/connections", tags=["Connections & Accounts"])
 
+_CTRADER_TOKEN_URL = "https://openapi.ctrader.com/apps/token"
+
 
 # ─── CONNECTIONS ───
+
+
+@router.post("/ctrader/oauth/token", response_model=CTraderOAuthTokenResponse)
+async def exchange_ctrader_oauth_token(
+    payload: CTraderOAuthTokenRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Exchange a cTrader Open API authorisation code for access tokens."""
+    _ = current_user
+    params = {
+        "grant_type": "authorization_code",
+        "code": payload.code.strip(),
+        "redirect_uri": payload.redirect_uri.strip(),
+        "client_id": payload.client_id.strip(),
+        "client_secret": payload.client_secret,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                _CTRADER_TOKEN_URL,
+                params=params,
+                headers={"Accept": "application/json"},
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="cTrader ha rifiutato lo scambio del codice OAuth",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Impossibile contattare cTrader per lo scambio OAuth",
+        ) from exc
+
+    data = response.json()
+    error_code = data.get("errorCode")
+    if error_code:
+        detail = data.get("description") or error_code
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(detail))
+
+    access_token = data.get("accessToken")
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Risposta cTrader senza access token",
+        )
+
+    return CTraderOAuthTokenResponse(
+        access_token=str(access_token),
+        refresh_token=data.get("refreshToken"),
+        token_type=data.get("tokenType"),
+        expires_in=data.get("expiresIn"),
+    )
 
 
 @router.get("/", response_model=ConnectionListResponse)

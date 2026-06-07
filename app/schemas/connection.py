@@ -29,6 +29,7 @@ class ConnectionConfig(BaseModel):
     # cTrader Open API
     client_secret: str | None = None
     access_token: str | None = None
+    refresh_token: str | None = None
     account_id: str | None = None
     environment: str | None = None
     volume_scale: float | None = None
@@ -96,6 +97,22 @@ class ConnectionListResponse(BaseModel):
     """Response for listing connections."""
     connections: list[ConnectionRead]
     count: int
+
+
+class CTraderOAuthTokenRequest(BaseModel):
+    """Exchange a cTrader OAuth authorisation code for tokens."""
+    client_id: str = Field(..., min_length=1)
+    client_secret: str = Field(..., min_length=1)
+    code: str = Field(..., min_length=1)
+    redirect_uri: str = Field(..., min_length=1)
+
+
+class CTraderOAuthTokenResponse(BaseModel):
+    """cTrader OAuth token response normalised for the frontend."""
+    access_token: str
+    refresh_token: str | None = None
+    token_type: str | None = None
+    expires_in: int | None = None
 
 
 # =============================================================================
