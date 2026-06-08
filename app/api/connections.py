@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
+from app.core.config import settings
 from app.db.database import get_session
 from app.models.user import User
 from app.schemas.connection import (
@@ -27,6 +28,7 @@ from app.schemas.connection import (
     ConnectionListResponse,
     ConnectionRead,
     ConnectionUpdate,
+    CTraderOAuthConfigResponse,
     CTraderOAuthTokenRequest,
     CTraderOAuthTokenResponse,
 )
@@ -59,6 +61,20 @@ _CTRADER_TOKEN_URL = "https://openapi.ctrader.com/apps/token"
 # ─── CONNECTIONS ───
 
 
+@router.get("/ctrader/oauth/config", response_model=CTraderOAuthConfigResponse)
+async def get_ctrader_oauth_config(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return the public cTrader OAuth app configuration."""
+    _ = current_user
+    client_id = settings.CTRADER_OAUTH_CLIENT_ID.strip()
+    client_secret = settings.CTRADER_OAUTH_CLIENT_SECRET.strip()
+    return CTraderOAuthConfigResponse(
+        configured=bool(client_id and client_secret),
+        client_id=client_id or None,
+    )
+
+
 @router.post("/ctrader/oauth/token", response_model=CTraderOAuthTokenResponse)
 async def exchange_ctrader_oauth_token(
     payload: CTraderOAuthTokenRequest,
@@ -66,12 +82,20 @@ async def exchange_ctrader_oauth_token(
 ):
     """Exchange a cTrader Open API authorisation code for access tokens."""
     _ = current_user
+    client_id = settings.CTRADER_OAUTH_CLIENT_ID.strip()
+    client_secret = settings.CTRADER_OAUTH_CLIENT_SECRET.strip()
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Applicazione OAuth cTrader non configurata sul backend",
+        )
+
     params = {
         "grant_type": "authorization_code",
         "code": payload.code.strip(),
         "redirect_uri": payload.redirect_uri.strip(),
-        "client_id": payload.client_id.strip(),
-        "client_secret": payload.client_secret,
+        "client_id": client_id,
+        "client_secret": client_secret,
     }
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:

@@ -350,10 +350,12 @@ def _ctrader_env(config: dict[str, Any]) -> dict[str, str]:
     environment = str(config.get("environment", "demo") or "demo").strip().lower()
     if environment not in {"demo", "live"}:
         raise ValueError("cTrader environment must be 'demo' or 'live'")
+    client_id = str(config.get("client_id") or os.getenv("CTRADER_OAUTH_CLIENT_ID", ""))
+    client_secret = str(config.get("client_secret") or os.getenv("CTRADER_OAUTH_CLIENT_SECRET", ""))
 
     return {
-        "CTRADER_CLIENT_ID": str(config.get("client_id", "")),
-        "CTRADER_CLIENT_SECRET": str(config.get("client_secret", "")),
+        "CTRADER_CLIENT_ID": client_id,
+        "CTRADER_CLIENT_SECRET": client_secret,
         "CTRADER_ACCESS_TOKEN": str(config.get("access_token", "")),
         "CTRADER_ACCOUNT_ID": str(config.get("account_id", "")),
         "CTRADER_ENVIRONMENT": environment,

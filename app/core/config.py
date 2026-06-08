@@ -50,6 +50,8 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
     LIVE_RECONCILIATION_ENABLED: bool = False
+    CTRADER_OAUTH_CLIENT_ID: str = ""
+    CTRADER_OAUTH_CLIENT_SECRET: str = ""
     
     # Sync settings
     SYNC_POLL_INTERVAL_SECONDS: int = 60  # How often to check if sources need sync

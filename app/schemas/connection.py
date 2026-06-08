@@ -27,7 +27,6 @@ class ConnectionConfig(BaseModel):
     api_key: str | None = None
     api_secret: str | None = None
     # cTrader Open API
-    client_secret: str | None = None
     access_token: str | None = None
     refresh_token: str | None = None
     account_id: str | None = None
@@ -99,10 +98,14 @@ class ConnectionListResponse(BaseModel):
     count: int
 
 
+class CTraderOAuthConfigResponse(BaseModel):
+    """Public cTrader OAuth app configuration for logged-in users."""
+    configured: bool
+    client_id: str | None = None
+
+
 class CTraderOAuthTokenRequest(BaseModel):
     """Exchange a cTrader OAuth authorisation code for tokens."""
-    client_id: str = Field(..., min_length=1)
-    client_secret: str = Field(..., min_length=1)
     code: str = Field(..., min_length=1)
     redirect_uri: str = Field(..., min_length=1)
 
