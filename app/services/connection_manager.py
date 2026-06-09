@@ -956,7 +956,7 @@ class ConnectionManager:
                 network=DOCKER_NETWORK,
                 user=user,
                 detach=True,
-                restart_policy={"Name": "unless-stopped"},
+                restart_policy={"Name": "no"},
             )
             logger.info("Spawned Client Portal container %s", container_name)
         except APIError as e:
@@ -1422,7 +1422,7 @@ class ConnectionManager:
                 network=DOCKER_NETWORK,
                 user=user,
                 detach=True,
-                restart_policy={"Name": "unless-stopped"},
+                restart_policy={"Name": "no"},
             )
             logger.info("Spawned %s gateway container %s", broker_type, container_name)
         except APIError as e:
@@ -1891,6 +1891,10 @@ class ConnectionManager:
         container = self._get_container(connection_id, broker_type)
         if not container or container.status != "running":
             actual = ConnectionStatus.DISCONNECTED
+            if is_client_portal_transport(config):
+                actual_message = "Gateway container terminated; Client Portal runtime stopped"
+                self._destroy_gateway(connection_id, broker_type)
+                self._destroy_client_portal_gateway(connection_id)
         else:
             # Ask the gateway if it's still connected to the broker
             try:

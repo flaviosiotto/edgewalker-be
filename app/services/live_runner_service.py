@@ -438,7 +438,7 @@ class LiveRunnerService:
                 network=DOCKER_NETWORK,
                 detach=True,
                 auto_remove=False,
-                restart_policy={"Name": "unless-stopped"},
+                restart_policy={"Name": "no"},
                 extra_hosts={"host.docker.internal": "host-gateway"},
             )
 
