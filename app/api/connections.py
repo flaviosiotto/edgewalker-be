@@ -46,7 +46,7 @@ from app.services.connection_service import (
     list_connections,
     update_connection,
 )
-from app.services.client_portal_service import is_client_portal_transport
+from app.services.client_portal_service import is_client_portal_transport, is_tws_interactive_transport
 from app.services.connection_manager import get_connection_manager
 from app.services.connection_manager import resolve_order_history_lookback_days
 from app.utils.auth_utils import get_current_active_user
@@ -312,6 +312,26 @@ async def connect_endpoint(
             launch_url=auth.get("launch_url"),
         )
 
+    if conn.broker_type == "ibkr" and is_tws_interactive_transport(conn.config or {}):
+        auth = await manager.begin_tws_auth(
+            connection_id,
+            user_id=current_user.id,
+        )
+        if auth["ready_to_connect"]:
+            result = await manager.complete_tws_connect(connection_id)
+            return ConnectDisconnectResponse(
+                success=result.success,
+                message=result.message,
+                accounts_discovered=len(result.accounts) if result.accounts else 0,
+            )
+
+        return ConnectDisconnectResponse(
+            success=auth["service_ready"],
+            message=auth["message"],
+            auth_required=auth["service_ready"],
+            launch_url=auth.get("launch_url"),
+        )
+
     result = await manager.connect(connection_id)
 
     return ConnectDisconnectResponse(
@@ -369,6 +389,44 @@ async def complete_client_portal_connect_endpoint(
 
     manager = get_connection_manager()
     result = await manager.complete_client_portal_connect(connection_id)
+    return ConnectDisconnectResponse(
+        success=result.success,
+        message=result.message,
+        accounts_discovered=len(result.accounts) if result.accounts else 0,
+    )
+
+
+@router.get("/{connection_id}/tws/auth-status", response_model=ClientPortalAuthStatusResponse)
+async def tws_auth_status_endpoint(
+    connection_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    conn = get_connection(session, connection_id, current_user.id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.broker_type != "ibkr" or not is_tws_interactive_transport(conn.config or {}):
+        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR TWS interactive mode")
+
+    manager = get_connection_manager()
+    payload = await manager.tws_auth_status(connection_id, user_id=current_user.id)
+    return ClientPortalAuthStatusResponse(**payload)
+
+
+@router.post("/{connection_id}/tws/connect", response_model=ConnectDisconnectResponse)
+async def complete_tws_connect_endpoint(
+    connection_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    conn = get_connection(session, connection_id, current_user.id)
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.broker_type != "ibkr" or not is_tws_interactive_transport(conn.config or {}):
+        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR TWS interactive mode")
+
+    manager = get_connection_manager()
+    result = await manager.complete_tws_connect(connection_id)
     return ConnectDisconnectResponse(
         success=result.success,
         message=result.message,

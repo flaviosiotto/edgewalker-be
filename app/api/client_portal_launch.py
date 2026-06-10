@@ -16,6 +16,7 @@ from app.services.client_portal_launch_service import (
     is_client_portal_path_routing_enabled,
     client_portal_path_prefix,
     client_portal_routing_base_url,
+    normalize_launch_path_prefix,
     proxy_http_request,
     resolve_client_portal_proxy_target,
     validate_client_portal_access,
@@ -257,7 +258,7 @@ async def start_client_portal_launch(launch_token: str, request: Request):
         except (TypeError, ValueError):
             raise HTTPException(status_code=404, detail="Launch session not found or expired")
 
-        prefix = client_portal_path_prefix(connection_id)
+        prefix = normalize_launch_path_prefix(launch_session.get("path_prefix")) or client_portal_path_prefix(connection_id)
         # Cache-busting nonce: during the period the Traefik router was broken,
         # browsers heuristically cached the SPA shell for /ib-access/* URLs (nginx
         # served index.html with etag/last-modified and no Cache-Control). A fresh
@@ -346,7 +347,7 @@ async def _novnc_redirect_for_request(request: Request) -> RedirectResponse | No
     except (TypeError, ValueError):
         return None
 
-    prefix = client_portal_path_prefix(connection_id)
+    prefix = normalize_launch_path_prefix(launch_session.get("path_prefix")) or client_portal_path_prefix(connection_id)
     routing_base_url = client_portal_routing_base_url()
     cache_bust = secrets.token_urlsafe(8)
     path_with_cache_bust = f"{prefix}/?_cb={cache_bust}"

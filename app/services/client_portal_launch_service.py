@@ -33,6 +33,7 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
 CLIENT_PORTAL_LAUNCH_COOKIE_NAME = "edgewalker_client_portal_launch"
 CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY = "_client_portal_runtime_session_id"
+TWS_RUNTIME_SESSION_ID_KEY = "_tws_runtime_session_id"
 
 _HOP_BY_HOP_HEADERS = {
     "connection",
@@ -89,7 +90,7 @@ def _runtime_session_id_from_config(config: dict[str, Any] | None) -> str:
     if not isinstance(config, dict):
         return ""
 
-    value = config.get(CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY)
+    value = config.get(CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY) or config.get(TWS_RUNTIME_SESSION_ID_KEY)
     if not isinstance(value, str):
         return ""
 
@@ -228,6 +229,15 @@ def client_portal_path_prefix(connection_id: int) -> str:
     return f"{_client_portal_path_prefix_base()}/{int(connection_id)}"
 
 
+def normalize_launch_path_prefix(value: str | None) -> str | None:
+    if value is None:
+        return None
+    prefix = str(value).strip().rstrip("/")
+    if not prefix:
+        return None
+    return prefix if prefix.startswith("/") else f"/{prefix}"
+
+
 async def validate_client_portal_access(launch_token: str, connection_id: int) -> bool:
     """forwardAuth gate: confirm the launch cookie maps to a live launch session
     that owns *connection_id*. Returns True only when the short-lived session is
@@ -253,12 +263,14 @@ async def create_client_portal_launch_url(
     user_id: int,
     config: dict[str, Any] | None,
     force_new: bool = False,
+    path_prefix: str | None = None,
 ) -> str:
     access_base_url = _launch_base_url()
 
     ttl_seconds = get_client_portal_launch_cookie_ttl_seconds()
     mapping_key = _connection_launch_session_key(connection_id, user_id)
     runtime_session_id = _runtime_session_id_from_config(config)
+    normalized_path_prefix = normalize_launch_path_prefix(path_prefix)
 
     redis = _create_async_redis_client()
     try:
@@ -279,6 +291,7 @@ async def create_client_portal_launch_url(
                 user_id=user_id,
                 runtime_session_id=runtime_session_id,
             )
+            and normalize_launch_path_prefix(existing_session.get("path_prefix")) == normalized_path_prefix
         ):
             await _refresh_launch_session_ttl(redis, existing_token, existing_session)
             return f"{access_base_url}/client-portal/launch/{existing_token}"
@@ -290,6 +303,8 @@ async def create_client_portal_launch_url(
             "created_at": datetime.now(timezone.utc).isoformat(),
             "runtime_session_id": runtime_session_id,
         }
+        if normalized_path_prefix:
+            payload["path_prefix"] = normalized_path_prefix
 
         await redis.setex(_launch_session_key(token), ttl_seconds, json.dumps(payload))
         await redis.setex(mapping_key, ttl_seconds, token)

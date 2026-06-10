@@ -190,6 +190,24 @@ def is_client_portal_transport(config: dict[str, Any] | None = None) -> bool:
     return transport == "client_portal" or enabled
 
 
+def is_tws_transport(config: dict[str, Any] | None = None) -> bool:
+    config = config or {}
+    if is_client_portal_transport(config):
+        return False
+    transport = str(config.get("transport", "legacy")).strip().lower()
+    return transport in {"legacy", "tws", "ib_gateway", "ib-gateway"}
+
+
+def is_tws_interactive_transport(config: dict[str, Any] | None = None) -> bool:
+    config = config or {}
+    transport = str(config.get("transport", "legacy")).strip().lower()
+    default_interactive = transport in {"tws", "ib_gateway", "ib-gateway"}
+    return is_tws_transport(config) and _as_bool(
+        config.get("tws_interactive"),
+        default=default_interactive,
+    )
+
+
 def _unwrap_client_portal_payload(payload: Any) -> Any:
     current = payload
     for _ in range(3):

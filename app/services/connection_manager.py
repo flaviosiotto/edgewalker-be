@@ -37,6 +37,7 @@ from app.services.broker_connectors.base import ConnectorResult, DiscoveredAccou
 from app.services.client_portal_service import (
     get_client_portal_auth_status,
     is_client_portal_transport,
+    is_tws_interactive_transport,
     logout_client_portal_session,
     resolve_client_portal_base_url,
     resolve_client_portal_verify_ssl,
@@ -166,9 +167,30 @@ CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS = max(
     float(os.getenv("CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS", "0.5")),
 )
 
+# ── IB Gateway / TWS interactive runtime ───────────────────────────
+# This runtime is the vendor IB Gateway UI/API process exposed through noVNC.
+# The Edgewalker broker gateway remains a separate gw-{id} container that
+# connects to this per-connection twsgw-{id} API endpoint.
+TWS_GATEWAY_IMAGE = os.getenv(
+    "TWS_GATEWAY_IMAGE",
+    "edgewalker-devops-ib-gateway-tws:latest",
+).strip()
+TWS_GATEWAY_PREFIX = os.getenv("TWS_GATEWAY_PREFIX", "twsgw-").strip() or "twsgw-"
+TWS_GATEWAY_API_PORT = max(1, int(os.getenv("TWS_GATEWAY_API_PORT", "4002")))
+TWS_GATEWAY_LIVE_API_PORT = max(1, int(os.getenv("TWS_GATEWAY_LIVE_API_PORT", "4001")))
+TWS_GATEWAY_PAPER_API_PORT = max(1, int(os.getenv("TWS_GATEWAY_PAPER_API_PORT", str(TWS_GATEWAY_API_PORT))))
+TWS_NOVNC_PORT = max(1, int(os.getenv("TWS_NOVNC_PORT", "6080")))
+TWS_READY_POLL_INTERVAL_SECONDS = max(0.5, float(os.getenv("TWS_READY_POLL_INTERVAL_SECONDS", "2")))
+TWS_READY_TIMEOUT_SECONDS = max(5.0, float(os.getenv("TWS_READY_TIMEOUT_SECONDS", "90")))
+TWS_PATH_PREFIX_BASE = os.getenv("TWS_PATH_PREFIX_BASE", CLIENT_PORTAL_PATH_PREFIX_BASE).strip().rstrip("/") or CLIENT_PORTAL_PATH_PREFIX_BASE
+
 
 def _client_portal_path_prefix(connection_id: int) -> str:
     return f"{CLIENT_PORTAL_PATH_PREFIX_BASE}/{connection_id}"
+
+
+def _tws_path_prefix(connection_id: int) -> str:
+    return f"{TWS_PATH_PREFIX_BASE}/{connection_id}"
 
 
 # Shared Redis settings propagated to dynamically spawned gateway containers.
@@ -205,6 +227,10 @@ CLIENT_PORTAL_RUNTIME_BASE_URL_KEY = "_client_portal_runtime_base_url"
 CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY = "_client_portal_runtime_verify_ssl"
 CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY = "_client_portal_runtime_container_name"
 CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY = "_client_portal_runtime_session_id"
+TWS_RUNTIME_HOST_KEY = "_tws_runtime_host"
+TWS_RUNTIME_PORT_KEY = "_tws_runtime_port"
+TWS_RUNTIME_CONTAINER_NAME_KEY = "_tws_runtime_container_name"
+TWS_RUNTIME_SESSION_ID_KEY = "_tws_runtime_session_id"
 
 
 def _safe_float(value: Any) -> float | None:
@@ -265,6 +291,53 @@ def _has_client_portal_runtime_state(config: dict[str, Any] | None) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _with_tws_runtime_state(
+    config: dict[str, Any] | None,
+    *,
+    host: str,
+    port: int,
+    container_name: str,
+    runtime_session_id: str,
+) -> dict[str, Any]:
+    updated = dict(config or {})
+    updated[TWS_RUNTIME_HOST_KEY] = host.strip()
+    updated[TWS_RUNTIME_PORT_KEY] = int(port)
+    updated[TWS_RUNTIME_CONTAINER_NAME_KEY] = container_name
+    updated[TWS_RUNTIME_SESSION_ID_KEY] = runtime_session_id.strip()
+    return updated
+
+
+def _clear_tws_runtime_state(config: dict[str, Any] | None) -> dict[str, Any]:
+    updated = dict(config or {})
+    updated.pop(TWS_RUNTIME_HOST_KEY, None)
+    updated.pop(TWS_RUNTIME_PORT_KEY, None)
+    updated.pop(TWS_RUNTIME_CONTAINER_NAME_KEY, None)
+    updated.pop(TWS_RUNTIME_SESSION_ID_KEY, None)
+    return updated
+
+
+def _has_tws_runtime_state(config: dict[str, Any] | None) -> bool:
+    if not isinstance(config, dict):
+        return False
+    host = config.get(TWS_RUNTIME_HOST_KEY)
+    return isinstance(host, str) and bool(host.strip())
+
+
+def _tws_api_port_for_config(config: dict[str, Any] | None) -> int:
+    if isinstance(config, dict):
+        for key in ("tws_api_port", "api_port"):
+            value = config.get(key)
+            if value is None:
+                continue
+            try:
+                return max(1, int(value))
+            except (TypeError, ValueError):
+                continue
+        if str(config.get("trading_mode", "paper")).strip().lower() == "live":
+            return TWS_GATEWAY_LIVE_API_PORT
+    return TWS_GATEWAY_PAPER_API_PORT
+
+
 def _docker_runtime_requirements() -> str:
     return (
         "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST), "
@@ -320,10 +393,13 @@ def _with_client_portal_dispatcher_received_at(
 
 def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
     """Build env vars for a gateway IBKR container."""
-    transport = str(config.get("transport", "legacy"))
+    raw_transport = str(config.get("transport", "legacy"))
+    transport = "tws" if raw_transport.strip().lower() in {"tws", "ib_gateway", "ib-gateway"} else raw_transport
+    ibkr_host = str(config.get(TWS_RUNTIME_HOST_KEY) or config.get("host", "host.docker.internal"))
+    ibkr_port = str(config.get(TWS_RUNTIME_PORT_KEY) or config.get("port") or _tws_api_port_for_config(config))
     return {
-        "IBKR_HOST": str(config.get("host", "host.docker.internal")),
-        "IBKR_PORT": str(config.get("port", 4001)),
+        "IBKR_HOST": ibkr_host,
+        "IBKR_PORT": ibkr_port,
         "IBKR_CLIENT_ID": str(config.get("client_id", 100)),
         "IBKR_TRANSPORT": transport,
         "CLIENT_PORTAL_ENABLED": str(config.get("client_portal_enabled", transport == "client_portal")).lower(),
@@ -975,6 +1051,147 @@ class ConnectionManager:
             except Exception as e:
                 logger.warning("Error destroying Client Portal container: %s", e)
 
+    def _tws_container_name(self, connection_id: int) -> str:
+        return f"{TWS_GATEWAY_PREFIX}{connection_id}"
+
+    def _get_tws_container(self, connection_id: int):
+        if not self._docker:
+            return None
+        try:
+            return self._docker.containers.get(self._tws_container_name(connection_id))
+        except NotFound:
+            return None
+        except Exception as e:
+            logger.warning("Docker error checking TWS container: %s", e)
+            return None
+
+    def _tws_traefik_labels(self, connection_id: int, prefix: str) -> dict[str, str]:
+        if not CLIENT_PORTAL_ROUTING_HOST:
+            raise RuntimeError(
+                "CLIENT_PORTAL_ROUTING_HOST is required when TWS path routing is enabled"
+            )
+
+        router = f"twsgw-{connection_id}"
+        service = f"twsgw-{connection_id}"
+        strip_middleware = f"twsgw-strip-{connection_id}"
+        rule = f"Host(`{CLIENT_PORTAL_ROUTING_HOST}`) && PathPrefix(`{prefix}`)"
+        labels: dict[str, str] = {
+            "traefik.enable": "true",
+            f"traefik.http.routers.{router}.rule": rule,
+            f"traefik.http.routers.{router}.entrypoints": CLIENT_PORTAL_TRAEFIK_ENTRYPOINT,
+            f"traefik.http.routers.{router}.priority": CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY,
+            f"traefik.http.routers.{router}.service": service,
+            f"traefik.http.services.{service}.loadbalancer.server.port": str(TWS_NOVNC_PORT),
+            f"traefik.http.middlewares.{strip_middleware}.stripprefix.prefixes": prefix,
+        }
+        middlewares = [f"{strip_middleware}@docker"]
+
+        if CLIENT_PORTAL_TRAEFIK_TLS:
+            if CLIENT_PORTAL_TRAEFIK_CERTRESOLVER:
+                labels[f"traefik.http.routers.{router}.tls.certresolver"] = CLIENT_PORTAL_TRAEFIK_CERTRESOLVER
+            else:
+                labels[f"traefik.http.routers.{router}.tls"] = "true"
+
+        if CLIENT_PORTAL_TRAEFIK_NETWORK:
+            labels["traefik.docker.network"] = CLIENT_PORTAL_TRAEFIK_NETWORK
+
+        if CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE:
+            middleware = f"twsgw-auth-{connection_id}"
+            auth_url = CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE.format(connection_id=connection_id)
+            labels[f"traefik.http.middlewares.{middleware}.forwardauth.address"] = auth_url
+            labels[f"traefik.http.middlewares.{middleware}.forwardauth.trustForwardHeader"] = "true"
+            middlewares.insert(0, f"{middleware}@docker")
+
+        labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(middlewares)
+        return labels
+
+    def _spawn_tws_gateway(self, connection_id: int, config: dict[str, Any]) -> tuple[str, int, str]:
+        if not self._docker:
+            raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}")
+        if not TWS_GATEWAY_IMAGE:
+            raise RuntimeError("TWS_GATEWAY_IMAGE is not configured")
+
+        container_name = self._tws_container_name(connection_id)
+        existing = self._get_tws_container(connection_id)
+        api_port = _tws_api_port_for_config(config)
+        if existing:
+            if existing.status == "running":
+                return container_name, api_port, existing.id
+            existing.remove(force=True)
+
+        env = {
+            "TWS_API_PORT": str(api_port),
+            "IB_GATEWAY_API_PORT": str(api_port),
+            "TWS_NOVNC_PORT": str(TWS_NOVNC_PORT),
+            "TWS_TRADING_MODE": str(config.get("trading_mode") or config.get("environment") or "paper"),
+            "LOG_LEVEL": "INFO",
+        }
+
+        labels = {
+            "edgewalker.type": "ibkr-tws",
+            "edgewalker.connection_id": str(connection_id),
+        }
+
+        if CLIENT_PORTAL_PATH_ROUTING_ENABLED:
+            prefix = _tws_path_prefix(connection_id)
+            env["TWS_BASE_PATH"] = prefix
+            labels.update(self._tws_traefik_labels(connection_id, prefix))
+
+        try:
+            user = _spawn_container_user()
+            container = self._docker.containers.run(
+                image=TWS_GATEWAY_IMAGE,
+                name=container_name,
+                environment=env,
+                labels=labels,
+                network=DOCKER_NETWORK,
+                user=user,
+                detach=True,
+                restart_policy={"Name": "no"},
+            )
+            logger.info("Spawned TWS container %s", container_name)
+        except APIError as e:
+            logger.error("Failed to spawn TWS container: %s", e)
+            raise
+
+        return container_name, api_port, container.id
+
+    def _destroy_tws_gateway(self, connection_id: int) -> None:
+        container = self._get_tws_container(connection_id)
+        if container:
+            try:
+                container.stop(timeout=10)
+                container.remove(force=True)
+                logger.info("Destroyed TWS container %s", self._tws_container_name(connection_id))
+            except Exception as e:
+                logger.warning("Error destroying TWS container: %s", e)
+
+    async def _wait_for_tws_novnc(self, container_name: str) -> None:
+        deadline = asyncio.get_running_loop().time() + TWS_READY_TIMEOUT_SECONDS
+        last_error = ""
+        base_url = f"http://{container_name}:{TWS_NOVNC_PORT}"
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                async with httpx.AsyncClient(base_url=base_url, timeout=5.0, follow_redirects=False) as client:
+                    response = await client.get("/")
+                if response.status_code < 500:
+                    return
+                last_error = f"HTTP {response.status_code}"
+            except Exception as exc:
+                last_error = str(exc)
+            await asyncio.sleep(TWS_READY_POLL_INTERVAL_SECONDS)
+        raise RuntimeError(f"TWS noVNC runtime did not become ready in time: {last_error or 'timeout'}")
+
+    async def _tws_api_ready(self, host: str, port: int) -> bool:
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=3.0)
+            writer.close()
+            await writer.wait_closed()
+            _ = reader
+            return True
+        except Exception:
+            return False
+
     async def _expire_idle_client_portal_runtime(
         self,
         *,
@@ -1028,6 +1245,45 @@ class ConnectionManager:
             )
             session.commit()
 
+    async def _expire_idle_tws_runtime(
+        self,
+        *,
+        connection_id: int,
+        user_id: int,
+        config: dict[str, Any],
+        status_value: str,
+        age_seconds: float,
+    ) -> None:
+        _ = config
+        logger.info(
+            "Stopping idle TWS container for connection %s after %.0fs (status=%s)",
+            connection_id,
+            age_seconds,
+            status_value,
+        )
+
+        self._destroy_tws_gateway(connection_id)
+
+        try:
+            await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to clear stale TWS launch session for connection %s: %s",
+                connection_id,
+                exc,
+            )
+
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                return
+
+            conn.status = ConnectionStatus.DISCONNECTED.value
+            conn.status_message = "Sessione IB Gateway arrestata automaticamente per inattivita'. Riapri il login se vuoi riprovare."
+            conn.updated_at = datetime.now(timezone.utc)
+            conn.config = _clear_tws_runtime_state(conn.config)
+            session.commit()
+
     async def _cleanup_idle_client_portal_runtimes(self) -> None:
         if CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS <= 0:
             return
@@ -1041,7 +1297,11 @@ class ConnectionManager:
         for conn in connections:
             config = dict(conn.config or {})
             if not is_client_portal_transport(config) or not _has_client_portal_runtime_state(config):
-                continue
+                if not is_tws_interactive_transport(config) or not _has_tws_runtime_state(config):
+                    continue
+                runtime_type = "tws"
+            else:
+                runtime_type = "client_portal"
 
             if conn.status not in {
                 ConnectionStatus.AWAITING_AUTH.value,
@@ -1069,11 +1329,16 @@ class ConnectionManager:
                     "config": config,
                     "status_value": conn.status,
                     "age_seconds": age_seconds,
+                    "runtime_type": runtime_type,
                 }
             )
 
         for candidate in candidates:
-            await self._expire_idle_client_portal_runtime(**candidate)
+            runtime_type = candidate.pop("runtime_type", "client_portal")
+            if runtime_type == "tws":
+                await self._expire_idle_tws_runtime(**candidate)
+            else:
+                await self._expire_idle_client_portal_runtime(**candidate)
 
     async def _run_client_portal_runtime_cleanup(self) -> None:
         while self._running:
@@ -1171,6 +1436,50 @@ class ConnectionManager:
             last_error or "timeout",
         )
 
+    async def _wait_for_tws_router(self, connection_id: int) -> None:
+        if not CLIENT_PORTAL_TRAEFIK_API_URL or CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS <= 0:
+            return
+
+        router_name = f"twsgw-{connection_id}"
+        deadline = asyncio.get_running_loop().time() + CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS
+        last_error = ""
+
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                async with httpx.AsyncClient(
+                    base_url=CLIENT_PORTAL_TRAEFIK_API_URL,
+                    timeout=5.0,
+                    follow_redirects=False,
+                ) as client:
+                    response = await client.get("/api/rawdata")
+                if response.status_code < 500:
+                    routers = (response.json() or {}).get("routers", {})
+                    for name, router in routers.items():
+                        if name.split("@", 1)[0] != router_name:
+                            continue
+                        if str(router.get("status", "")).lower() in ("", "enabled"):
+                            logger.info(
+                                "Traefik router %s discovered for TWS connection %s",
+                                name,
+                                connection_id,
+                            )
+                            return
+                    last_error = "router not yet present"
+                else:
+                    last_error = f"HTTP {response.status_code}"
+            except Exception as exc:
+                last_error = str(exc)
+
+            await asyncio.sleep(CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS)
+
+        logger.warning(
+            "Traefik TWS router %s not confirmed within %.0fs for connection %s (%s); proceeding anyway",
+            router_name,
+            CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS,
+            connection_id,
+            last_error or "timeout",
+        )
+
 
     async def _ensure_client_portal_runtime(self, connection_id: int, config: dict[str, Any]) -> dict[str, Any]:
         existing = self._get_client_portal_container(connection_id)
@@ -1201,6 +1510,44 @@ class ConnectionManager:
             container_name=container_name,
             runtime_session_id=runtime_session_id,
             verify_ssl=False,
+        )
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is not None:
+                conn.config = updated_config
+                conn.updated_at = datetime.now(timezone.utc)
+                session.commit()
+        return updated_config
+
+    async def _ensure_tws_runtime(self, connection_id: int, config: dict[str, Any]) -> dict[str, Any]:
+        if not CLIENT_PORTAL_PATH_ROUTING_ENABLED:
+            raise RuntimeError("TWS interactive login requires CLIENT_PORTAL_PATH_ROUTING_ENABLED=true")
+
+        existing = self._get_tws_container(connection_id)
+        runtime_already_running = bool(existing and existing.status == "running")
+        container_name, api_port, runtime_session_id = self._spawn_tws_gateway(connection_id, config)
+        if not runtime_already_running:
+            try:
+                await self._wait_for_tws_novnc(container_name)
+            except Exception:
+                self._destroy_tws_gateway(connection_id)
+                raise
+        else:
+            logger.info(
+                "Reusing running TWS container %s for connection %s",
+                container_name,
+                connection_id,
+            )
+
+        if CLIENT_PORTAL_PATH_ROUTING_ENABLED:
+            await self._wait_for_tws_router(connection_id)
+
+        updated_config = _with_tws_runtime_state(
+            config,
+            host=container_name,
+            port=api_port,
+            container_name=container_name,
+            runtime_session_id=runtime_session_id,
         )
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
@@ -1724,6 +2071,141 @@ class ConnectionManager:
         )
         return payload
 
+    async def begin_tws_auth(self, connection_id: int, *, user_id: int) -> dict[str, Any]:
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                raise ValueError("Connection not found")
+            config = dict(conn.config or {})
+
+        try:
+            config = await self._ensure_tws_runtime(connection_id, config)
+        except Exception as exc:
+            message = f"IB Gateway non raggiungibile: {exc}"
+            logger.warning("TWS auth start failed for connection %s: %s", connection_id, exc)
+            with get_session_context() as session:
+                conn = session.get(Connection, connection_id)
+                if conn is not None:
+                    conn.status = ConnectionStatus.ERROR.value
+                    conn.status_message = message
+                    conn.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+            return {
+                "service_ready": False,
+                "authenticated": False,
+                "ready_to_connect": False,
+                "launch_url": None,
+                "message": message,
+            }
+
+        message = "Autenticazione IB Gateway richiesta nel popup."
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is not None:
+                conn.status = ConnectionStatus.AWAITING_AUTH.value
+                conn.status_message = message
+                conn.updated_at = datetime.now(timezone.utc)
+                session.commit()
+
+        launch_url = await create_client_portal_launch_url(
+            connection_id=connection_id,
+            user_id=user_id,
+            config=config,
+            force_new=True,
+            path_prefix=_tws_path_prefix(connection_id),
+        )
+        ready = await self._tws_api_ready(
+            str(config.get(TWS_RUNTIME_HOST_KEY) or self._tws_container_name(connection_id)),
+            int(config.get(TWS_RUNTIME_PORT_KEY) or TWS_GATEWAY_API_PORT),
+        )
+        return {
+            "service_ready": True,
+            "gateway_session_ready": ready,
+            "connected": ready,
+            "session_authenticated": ready,
+            "authenticated": ready,
+            "established": ready,
+            "bridge_ready": ready,
+            "ready_to_connect": ready,
+            "gateway_started": True,
+            "connection_status": ConnectionStatus.AWAITING_AUTH.value,
+            "launch_url": launch_url,
+            "message": "IB Gateway API pronta." if ready else message,
+        }
+
+    async def tws_auth_status(self, connection_id: int, *, user_id: int | None = None) -> dict[str, Any]:
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                raise ValueError("Connection not found")
+            config = dict(conn.config or {})
+            status_value = conn.status
+            status_message = conn.status_message
+
+        config = await self._ensure_tws_runtime(connection_id, config)
+        launch_url = None
+        if user_id is not None and status_value == ConnectionStatus.AWAITING_AUTH.value:
+            launch_url = await create_client_portal_launch_url(
+                connection_id=connection_id,
+                user_id=user_id,
+                config=config,
+                path_prefix=_tws_path_prefix(connection_id),
+            )
+
+        container = self._get_tws_container(connection_id)
+        gateway_started = bool(container and container.status == "running")
+        ready = gateway_started and await self._tws_api_ready(
+            str(config.get(TWS_RUNTIME_HOST_KEY) or self._tws_container_name(connection_id)),
+            int(config.get(TWS_RUNTIME_PORT_KEY) or TWS_GATEWAY_API_PORT),
+        )
+        return {
+            "service_ready": gateway_started,
+            "gateway_session_ready": ready,
+            "connected": ready,
+            "session_authenticated": ready,
+            "authenticated": ready,
+            "established": ready,
+            "competing": False,
+            "bridge_ready": ready,
+            "ready_to_connect": ready,
+            "gateway_started": gateway_started,
+            "connection_status": status_value,
+            "launch_url": launch_url,
+            "message": "IB Gateway API pronta." if ready else (status_message or "Completa il login IB Gateway nel popup."),
+        }
+
+    async def complete_tws_connect(self, connection_id: int) -> ConnectorResult:
+        with get_session_context() as session:
+            conn = session.get(Connection, connection_id)
+            if conn is None:
+                return ConnectorResult(success=False, message="Connection not found")
+            config = dict(conn.config or {})
+            user_id = conn.user_id
+
+        try:
+            config = await self._ensure_tws_runtime(connection_id, config)
+        except Exception as exc:
+            return ConnectorResult(success=False, message=f"IB Gateway non raggiungibile: {exc}")
+
+        ready = await self._tws_api_ready(
+            str(config.get(TWS_RUNTIME_HOST_KEY) or self._tws_container_name(connection_id)),
+            int(config.get(TWS_RUNTIME_PORT_KEY) or TWS_GATEWAY_API_PORT),
+        )
+        if not ready:
+            with get_session_context() as session:
+                conn = session.get(Connection, connection_id)
+                if conn is not None:
+                    conn.status = ConnectionStatus.AWAITING_AUTH.value
+                    conn.status_message = "Completa il login IB Gateway nel popup."
+                    conn.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+            return ConnectorResult(success=False, message="IB Gateway API non ancora pronta")
+
+        result = await self.connect(connection_id)
+        if result.success:
+            await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
+        return result
+
     # ── Connect ──────────────────────────────────────────────────────
 
     async def connect(self, connection_id: int) -> ConnectorResult:
@@ -1857,6 +2339,9 @@ class ConnectionManager:
                     pass
                 self._destroy_client_portal_gateway(connection_id)
 
+        if is_tws_interactive_transport(config) and _has_tws_runtime_state(config):
+            self._destroy_tws_gateway(connection_id)
+
         # Destroy the container
         self._destroy_gateway(connection_id, broker_type)
 
@@ -1864,7 +2349,7 @@ class ConnectionManager:
             _update_connection_status(session, connection_id, ConnectionStatus.DISCONNECTED, "Disconnected")
             conn = session.get(Connection, connection_id)
             if conn is not None:
-                conn.config = _clear_client_portal_runtime_state(conn.config)
+                conn.config = _clear_tws_runtime_state(_clear_client_portal_runtime_state(conn.config))
                 conn.updated_at = datetime.now(timezone.utc)
                 session.commit()
 
@@ -1882,7 +2367,10 @@ class ConnectionManager:
             broker_type = conn.broker_type
             config = dict(conn.config or {})
 
-        if is_client_portal_transport(config) and stored_status == ConnectionStatus.AWAITING_AUTH.value:
+        if (
+            (is_client_portal_transport(config) or is_tws_interactive_transport(config))
+            and stored_status == ConnectionStatus.AWAITING_AUTH.value
+        ):
             return stored_status
 
         actual_message: str | None = None
@@ -1895,6 +2383,10 @@ class ConnectionManager:
                 actual_message = "Gateway container terminated; Client Portal runtime stopped"
                 self._destroy_gateway(connection_id, broker_type)
                 self._destroy_client_portal_gateway(connection_id)
+            if is_tws_interactive_transport(config):
+                actual_message = "Gateway container terminated; IB Gateway runtime stopped"
+                self._destroy_gateway(connection_id, broker_type)
+                self._destroy_tws_gateway(connection_id)
         else:
             # Ask the gateway if it's still connected to the broker
             try:
