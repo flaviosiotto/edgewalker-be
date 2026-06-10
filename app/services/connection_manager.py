@@ -408,6 +408,26 @@ def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _is_loopback_host(value: Any) -> bool:
+    host = str(value or "").strip().lower()
+    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def _ibkr_legacy_loopback_error(config: dict[str, Any]) -> str | None:
+    transport = str(config.get("transport", "legacy")).strip().lower()
+    if transport in {"client_portal", "tws", "ib_gateway", "ib-gateway"}:
+        return None
+    if config.get(TWS_RUNTIME_HOST_KEY):
+        return None
+    if not _is_loopback_host(config.get("host")):
+        return None
+    return (
+        "La connessione IBKR e' configurata come legacy/direct API con host 127.0.0.1. "
+        "In Docker questo indirizzo punta al container gateway, non a IB Gateway. "
+        "Usa il trasporto 'IB Gateway / TWS API containerizzato' oppure imposta un host raggiungibile dal container."
+    )
+
+
 def _binance_env(config: dict[str, Any]) -> dict[str, str]:
     """Build env vars for a gateway Binance container."""
     market_type = str(config.get("market_type", "futures") or "futures").strip().lower()
@@ -2226,6 +2246,15 @@ class ConnectionManager:
 
             broker_type = conn.broker_type
             config = dict(conn.config or {})
+
+            if broker_type == "ibkr":
+                legacy_loopback_error = _ibkr_legacy_loopback_error(config)
+                if legacy_loopback_error:
+                    conn.status = ConnectionStatus.ERROR.value
+                    conn.status_message = legacy_loopback_error
+                    conn.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+                    return ConnectorResult(success=False, message=legacy_loopback_error)
 
             if get_gateway_spec(broker_type) is None:
                 return ConnectorResult(
