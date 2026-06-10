@@ -1307,11 +1307,42 @@ class ConnectionManager:
             except Exception as e:
                 logger.warning("Error destroying TWS container: %s", e)
 
+    def _tws_logs_tail(self, container_name: str, *, tail: int = 80) -> str:
+        if not self._docker:
+            return ""
+        try:
+            container = self._docker.containers.get(container_name)
+            raw = container.logs(tail=tail, stdout=True, stderr=True)
+        except Exception as exc:
+            logger.warning("Unable to read TWS container logs for %s: %s", container_name, exc)
+            return ""
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        return " | ".join(lines[-10:])[:1600]
+
     async def _wait_for_tws_novnc(self, container_name: str) -> None:
         deadline = asyncio.get_running_loop().time() + TWS_READY_TIMEOUT_SECONDS
         last_error = ""
         base_url = f"http://{container_name}:{TWS_NOVNC_PORT}"
         while asyncio.get_running_loop().time() < deadline:
+            if self._docker:
+                try:
+                    container = self._docker.containers.get(container_name)
+                    container.reload()
+                    if container.status in {"exited", "dead"}:
+                        logs = self._tws_logs_tail(container_name)
+                        detail = f"container {container.status}"
+                        if logs:
+                            detail = f"{detail}; logs: {logs}"
+                        raise RuntimeError(detail)
+                except NotFound:
+                    raise RuntimeError(f"container {container_name} not found")
+                except RuntimeError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Unable to inspect TWS container %s while waiting for noVNC: %s", container_name, exc)
             try:
                 async with httpx.AsyncClient(base_url=base_url, timeout=5.0, follow_redirects=False) as client:
                     response = await client.get("/")
@@ -1320,8 +1351,20 @@ class ConnectionManager:
                 last_error = f"HTTP {response.status_code}"
             except Exception as exc:
                 last_error = str(exc)
+                if "Name or service not known" in last_error and CLIENT_PORTAL_PATH_ROUTING_ENABLED:
+                    logger.warning(
+                        "TWS noVNC container %s is running but not resolvable from backend Docker DNS (%s); "
+                        "continuing with Traefik-routed popup readiness",
+                        container_name,
+                        last_error,
+                    )
+                    return
             await asyncio.sleep(TWS_READY_POLL_INTERVAL_SECONDS)
-        raise RuntimeError(f"TWS noVNC runtime did not become ready in time: {last_error or 'timeout'}")
+        logs = self._tws_logs_tail(container_name)
+        detail = f"TWS noVNC runtime did not become ready in time: {last_error or 'timeout'}"
+        if logs:
+            detail = f"{detail}; logs: {logs}"
+        raise RuntimeError(detail)
 
     def _tws_api_target(self, connection_id: int, config: dict[str, Any]) -> tuple[str, int, int]:
         host = str(config.get(TWS_RUNTIME_HOST_KEY) or self._tws_container_name(connection_id))
