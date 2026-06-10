@@ -169,8 +169,9 @@ CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS = max(
 
 # ── IB Gateway / TWS interactive runtime ───────────────────────────
 # This runtime is the vendor IB Gateway UI/API process exposed through noVNC.
-# The Edgewalker broker gateway remains a separate gw-{id} container that
-# connects to this per-connection twsgw-{id} API endpoint.
+# IB Gateway only completes API handshakes for localhost clients in this image,
+# so twsgw-{id} exposes a local TCP proxy on API port + offset. The Edgewalker
+# broker gateway remains a separate gw-{id} container and connects to the proxy.
 TWS_GATEWAY_IMAGE = os.getenv(
     "TWS_GATEWAY_IMAGE",
     "edgewalker-devops-ib-gateway-tws:latest",
@@ -179,6 +180,7 @@ TWS_GATEWAY_PREFIX = os.getenv("TWS_GATEWAY_PREFIX", "twsgw-").strip() or "twsgw
 TWS_GATEWAY_API_PORT = max(1, int(os.getenv("TWS_GATEWAY_API_PORT", "4002")))
 TWS_GATEWAY_LIVE_API_PORT = max(1, int(os.getenv("TWS_GATEWAY_LIVE_API_PORT", "4001")))
 TWS_GATEWAY_PAPER_API_PORT = max(1, int(os.getenv("TWS_GATEWAY_PAPER_API_PORT", str(TWS_GATEWAY_API_PORT))))
+TWS_GATEWAY_API_PROXY_OFFSET = max(1, int(os.getenv("TWS_GATEWAY_API_PROXY_OFFSET", "100")))
 TWS_NOVNC_PORT = max(1, int(os.getenv("TWS_NOVNC_PORT", "6080")))
 TWS_READY_POLL_INTERVAL_SECONDS = max(0.5, float(os.getenv("TWS_READY_POLL_INTERVAL_SECONDS", "2")))
 TWS_READY_TIMEOUT_SECONDS = max(5.0, float(os.getenv("TWS_READY_TIMEOUT_SECONDS", "90")))
@@ -401,6 +403,19 @@ def _tws_api_port_for_config(config: dict[str, Any] | None) -> int:
         if str(config.get("trading_mode", "paper")).strip().lower() == "live":
             return TWS_GATEWAY_LIVE_API_PORT
     return TWS_GATEWAY_PAPER_API_PORT
+
+
+def _tws_api_proxy_port_for_config(config: dict[str, Any] | None) -> int:
+    if isinstance(config, dict):
+        for key in ("tws_api_proxy_port", "api_proxy_port"):
+            value = config.get(key)
+            if value is None:
+                continue
+            try:
+                return max(1, int(value))
+            except (TypeError, ValueError):
+                continue
+    return _tws_api_port_for_config(config) + TWS_GATEWAY_API_PROXY_OFFSET
 
 
 def _docker_runtime_requirements() -> str:
@@ -1200,9 +1215,21 @@ class ConnectionManager:
         container_name = self._tws_container_name(connection_id)
         existing = self._get_tws_container(connection_id)
         api_port = _tws_api_port_for_config(config)
+        api_proxy_port = _tws_api_proxy_port_for_config(config)
         if existing:
             if existing.status == "running":
-                return container_name, api_port, existing.id
+                try:
+                    stored_port = int(config.get(TWS_RUNTIME_PORT_KEY) or 0)
+                except (TypeError, ValueError):
+                    stored_port = 0
+                if stored_port == api_proxy_port:
+                    return container_name, api_proxy_port, existing.id
+                logger.info(
+                    "Restarting TWS container %s because runtime API port changed from %s to proxy port %s",
+                    container_name,
+                    stored_port or "unset",
+                    api_proxy_port,
+                )
             existing.remove(force=True)
 
         self._tws_api_probe_cache.pop(connection_id, None)
@@ -1210,6 +1237,7 @@ class ConnectionManager:
         env = {
             "TWS_API_PORT": str(api_port),
             "IB_GATEWAY_API_PORT": str(api_port),
+            "TWS_API_PROXY_PORT": str(api_proxy_port),
             "TWS_NOVNC_PORT": str(TWS_NOVNC_PORT),
             "TWS_TRADING_MODE": str(config.get("trading_mode") or config.get("environment") or "paper"),
             "LOG_LEVEL": "INFO",
@@ -1242,7 +1270,7 @@ class ConnectionManager:
             logger.error("Failed to spawn TWS container: %s", e)
             raise
 
-        return container_name, api_port, container.id
+        return container_name, api_proxy_port, container.id
 
     def _destroy_tws_gateway(self, connection_id: int) -> None:
         self._tws_api_probe_cache.pop(connection_id, None)
