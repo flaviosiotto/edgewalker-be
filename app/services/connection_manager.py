@@ -418,6 +418,17 @@ def _tws_api_proxy_port_for_config(config: dict[str, Any] | None) -> int:
     return _tws_api_port_for_config(config) + TWS_GATEWAY_API_PROXY_OFFSET
 
 
+def _first_non_empty_config_value(config: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = config.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 def _docker_runtime_requirements() -> str:
     return (
         "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST), "
@@ -1240,8 +1251,21 @@ class ConnectionManager:
             "TWS_API_PROXY_PORT": str(api_proxy_port),
             "TWS_NOVNC_PORT": str(TWS_NOVNC_PORT),
             "TWS_TRADING_MODE": str(config.get("trading_mode") or config.get("environment") or "paper"),
+            "TWS_READ_ONLY_API": str(config.get("read_only_api", False)).lower(),
+            "TWS_READ_ONLY_LOGIN": str(config.get("read_only_login", False)).lower(),
             "LOG_LEVEL": "INFO",
         }
+        username = _first_non_empty_config_value(config, "username", "tws_username", "ib_username", "ib_login_id")
+        password = _first_non_empty_config_value(config, "password", "tws_password", "ib_password", "ib_login_password")
+        second_factor_device = _first_non_empty_config_value(config, "second_factor_device", "tws_second_factor_device")
+        if username:
+            env["TWS_USERNAME"] = username
+        if password:
+            env["TWS_PASSWORD"] = password
+        if second_factor_device:
+            env["TWS_SECOND_FACTOR_DEVICE"] = second_factor_device
+        if "relogin_after_2fa_timeout" in config:
+            env["TWS_RELOGIN_AFTER_2FA_TIMEOUT"] = str(config.get("relogin_after_2fa_timeout", False)).lower()
 
         labels = {
             "edgewalker.type": "ibkr-tws",
