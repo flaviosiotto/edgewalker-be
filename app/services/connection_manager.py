@@ -1808,6 +1808,21 @@ class ConnectionManager:
                 logger.warning("Error destroying container: %s", e)
         _gateway_clients.pop(connection_id, None)
 
+    def _gateway_logs_tail(self, connection_id: int, broker_type: str, *, tail: int = 80) -> str:
+        container = self._get_container(connection_id, broker_type)
+        if container is None:
+            return ""
+        try:
+            raw = container.logs(tail=tail, stdout=True, stderr=True)
+        except Exception as exc:
+            logger.warning("Unable to read gateway logs for connection %s: %s", connection_id, exc)
+            return ""
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        return " | ".join(lines[-8:])[:1200]
+
     # ── Gateway client ───────────────────────────────────────────────
 
     def get_gateway_client(self, connection_id: int, broker_type: str) -> GatewayClient:
@@ -2295,16 +2310,20 @@ class ConnectionManager:
                 last_error = str(e)
 
         if not connected:
+            gateway_logs = self._gateway_logs_tail(connection_id, broker_type)
+            detail = last_error or "not connected yet"
+            if gateway_logs:
+                detail = f"{detail}; gateway logs: {gateway_logs}"
             # Teardown on failure
             self._destroy_gateway(connection_id, broker_type)
             with get_session_context() as session:
                 _update_connection_status(
                     session, connection_id, ConnectionStatus.ERROR,
-                    f"Gateway did not connect in time: {last_error}",
+                    f"Gateway did not connect in time: {detail}",
                 )
             return ConnectorResult(
                 success=False,
-                message=f"Gateway did not connect: {last_error}",
+                message=f"Gateway did not connect: {detail}",
             )
 
         # 3. Fetch discovered accounts
@@ -2407,6 +2426,12 @@ class ConnectionManager:
         # Check if the container exists and is running
         container = self._get_container(connection_id, broker_type)
         if not container or container.status != "running":
+            if is_tws_interactive_transport(config) and _has_tws_runtime_state(config):
+                tws_container = self._get_tws_container(connection_id)
+                if tws_container is not None and tws_container.status == "running":
+                    if stored_status in {ConnectionStatus.AWAITING_AUTH.value, ConnectionStatus.ERROR.value}:
+                        return stored_status
+
             actual = ConnectionStatus.DISCONNECTED
             if is_client_portal_transport(config):
                 actual_message = "Gateway container terminated; Client Portal runtime stopped"
