@@ -28,7 +28,7 @@ from typing import Any
 
 import docker
 import redis.asyncio as aioredis
-from docker.errors import NotFound, APIError
+from docker.errors import NotFound, APIError, ContainerError
 from sqlmodel import Session, select
 
 from app.db.database import get_session_context
@@ -183,6 +183,71 @@ TWS_NOVNC_PORT = max(1, int(os.getenv("TWS_NOVNC_PORT", "6080")))
 TWS_READY_POLL_INTERVAL_SECONDS = max(0.5, float(os.getenv("TWS_READY_POLL_INTERVAL_SECONDS", "2")))
 TWS_READY_TIMEOUT_SECONDS = max(5.0, float(os.getenv("TWS_READY_TIMEOUT_SECONDS", "90")))
 TWS_PATH_PREFIX_BASE = os.getenv("TWS_PATH_PREFIX_BASE", CLIENT_PORTAL_PATH_PREFIX_BASE).strip().rstrip("/") or CLIENT_PORTAL_PATH_PREFIX_BASE
+TWS_API_PROBE_TIMEOUT_SECONDS = max(3.0, float(os.getenv("TWS_API_PROBE_TIMEOUT_SECONDS", "15")))
+TWS_API_PROBE_CACHE_SECONDS = max(0.0, float(os.getenv("TWS_API_PROBE_CACHE_SECONDS", "8")))
+
+
+_TWS_API_PROBE_SCRIPT = r"""
+import asyncio
+import json
+import os
+import sys
+
+from ib_async import IB
+
+
+def emit(payload, *, failed=False):
+    print(json.dumps(payload, separators=(",", ":")), file=sys.stderr if failed else sys.stdout, flush=True)
+
+
+async def main():
+    host = os.environ["IBKR_HOST"]
+    port = int(os.environ["IBKR_PORT"])
+    client_id = int(os.environ.get("IBKR_CLIENT_ID", "100"))
+    timeout = float(os.environ.get("IBKR_PROBE_TIMEOUT", "15"))
+    ib = IB()
+    try:
+        await asyncio.wait_for(
+            ib.connectAsync(host=host, port=port, clientId=client_id, readonly=True),
+            timeout=timeout,
+        )
+        accounts = list(ib.managedAccounts() or [])
+        emit({
+            "ready": True,
+            "host": host,
+            "port": port,
+            "client_id": client_id,
+            "server_version": ib.client.serverVersion(),
+            "accounts_count": len(accounts),
+        })
+        return 0
+    except asyncio.TimeoutError:
+        emit({
+            "ready": False,
+            "host": host,
+            "port": port,
+            "client_id": client_id,
+            "error_type": "TimeoutError",
+            "error": f"timeout after {timeout:.1f}s waiting for IB API handshake",
+        }, failed=True)
+        return 1
+    except Exception as exc:
+        emit({
+            "ready": False,
+            "host": host,
+            "port": port,
+            "client_id": client_id,
+            "error_type": type(exc).__name__,
+            "error": str(exc) or repr(exc),
+        }, failed=True)
+        return 1
+    finally:
+        if ib.isConnected():
+            ib.disconnect()
+
+
+raise SystemExit(asyncio.run(main()))
+"""
 
 
 def _client_portal_path_prefix(connection_id: int) -> str:
@@ -735,6 +800,7 @@ class ConnectionManager:
         )
         self._client_portal_dispatcher_received_at: dict[int, datetime] = {}
         self._client_portal_pre_dispatcher_log_probe_at: dict[int, datetime] = {}
+        self._tws_api_probe_cache: dict[int, tuple[float, dict[str, Any]]] = {}
         try:
             self._docker = docker.from_env()
         except Exception as e:
@@ -1139,6 +1205,8 @@ class ConnectionManager:
                 return container_name, api_port, existing.id
             existing.remove(force=True)
 
+        self._tws_api_probe_cache.pop(connection_id, None)
+
         env = {
             "TWS_API_PORT": str(api_port),
             "IB_GATEWAY_API_PORT": str(api_port),
@@ -1177,6 +1245,7 @@ class ConnectionManager:
         return container_name, api_port, container.id
 
     def _destroy_tws_gateway(self, connection_id: int) -> None:
+        self._tws_api_probe_cache.pop(connection_id, None)
         container = self._get_tws_container(connection_id)
         if container:
             try:
@@ -1202,7 +1271,16 @@ class ConnectionManager:
             await asyncio.sleep(TWS_READY_POLL_INTERVAL_SECONDS)
         raise RuntimeError(f"TWS noVNC runtime did not become ready in time: {last_error or 'timeout'}")
 
-    async def _tws_api_ready(self, host: str, port: int) -> bool:
+    def _tws_api_target(self, connection_id: int, config: dict[str, Any]) -> tuple[str, int, int]:
+        host = str(config.get(TWS_RUNTIME_HOST_KEY) or self._tws_container_name(connection_id))
+        port = int(config.get(TWS_RUNTIME_PORT_KEY) or TWS_GATEWAY_API_PORT)
+        try:
+            client_id = int(config.get("client_id") or 100)
+        except (TypeError, ValueError):
+            client_id = 100
+        return host, port, client_id
+
+    async def _tws_tcp_ready(self, host: str, port: int) -> bool:
         try:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=3.0)
             writer.close()
@@ -1211,6 +1289,124 @@ class ConnectionManager:
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _parse_tws_api_probe_output(raw: Any) -> dict[str, Any] | None:
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw or "")
+        for line in reversed(text.splitlines()):
+            candidate = line.strip()
+            if not candidate.startswith("{"):
+                continue
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    def _run_tws_api_probe_container(self, connection_id: int, host: str, port: int, client_id: int) -> dict[str, Any]:
+        if not self._docker:
+            return {
+                "ready": False,
+                "message": f"Docker non disponibile per il probe TWS API ({_docker_runtime_requirements()})",
+            }
+        spec = get_gateway_spec("ibkr")
+        if spec is None:
+            return {"ready": False, "message": "Gateway IBKR non registrato per il probe TWS API"}
+
+        environment = {
+            "IBKR_HOST": host,
+            "IBKR_PORT": str(port),
+            "IBKR_CLIENT_ID": str(client_id),
+            "IBKR_PROBE_TIMEOUT": str(TWS_API_PROBE_TIMEOUT_SECONDS),
+        }
+        labels = {
+            "edgewalker.type": "tws-api-probe",
+            "edgewalker.connection_id": str(connection_id),
+        }
+        try:
+            raw = self._docker.containers.run(
+                image=spec.image,
+                command=["python", "-c", _TWS_API_PROBE_SCRIPT],
+                environment=environment,
+                labels=labels,
+                network=DOCKER_NETWORK,
+                user=_spawn_container_user(),
+                detach=False,
+                remove=True,
+                stdout=True,
+                stderr=True,
+            )
+        except ContainerError as exc:
+            payload = self._parse_tws_api_probe_output(getattr(exc, "stderr", b""))
+            if payload is None:
+                payload = {
+                    "ready": False,
+                    "error_type": "ContainerError",
+                    "error": str(exc),
+                }
+        except Exception as exc:
+            payload = {
+                "ready": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc) or repr(exc),
+            }
+        else:
+            payload = self._parse_tws_api_probe_output(raw) or {
+                "ready": False,
+                "error_type": "ProbeOutputError",
+                "error": "probe did not return JSON output",
+            }
+
+        ready = bool(payload.get("ready"))
+        if ready:
+            server_version = payload.get("server_version") or "unknown"
+            accounts_count = payload.get("accounts_count")
+            account_text = f", accounts={accounts_count}" if accounts_count is not None else ""
+            payload["message"] = f"IB Gateway API pronta (server_version={server_version}{account_text})."
+        else:
+            error = payload.get("error") or payload.get("message") or "unknown error"
+            error_type = payload.get("error_type")
+            prefix = f"{error_type}: " if error_type else ""
+            payload["message"] = f"IB Gateway API non pronta: {prefix}{error}"
+        return payload
+
+    async def _probe_tws_api(
+        self,
+        connection_id: int,
+        config: dict[str, Any],
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        host, port, client_id = self._tws_api_target(connection_id, config)
+        now = asyncio.get_running_loop().time()
+        cached = self._tws_api_probe_cache.get(connection_id)
+        if not force and cached and now - cached[0] <= TWS_API_PROBE_CACHE_SECONDS:
+            return dict(cached[1])
+
+        if not await self._tws_tcp_ready(host, port):
+            payload = {
+                "ready": False,
+                "host": host,
+                "port": port,
+                "client_id": client_id,
+                "tcp_ready": False,
+                "message": "IB Gateway API socket non ancora raggiungibile. Completa il login nel popup.",
+            }
+            self._tws_api_probe_cache[connection_id] = (now, payload)
+            return dict(payload)
+
+        payload = await asyncio.to_thread(
+            self._run_tws_api_probe_container,
+            connection_id,
+            host,
+            port,
+            client_id,
+        )
+        payload["tcp_ready"] = True
+        self._tws_api_probe_cache[connection_id] = (asyncio.get_running_loop().time(), payload)
+        return dict(payload)
 
     async def _expire_idle_client_portal_runtime(
         self,
@@ -2149,10 +2345,7 @@ class ConnectionManager:
             force_new=True,
             path_prefix=_tws_path_prefix(connection_id),
         )
-        ready = await self._tws_api_ready(
-            str(config.get(TWS_RUNTIME_HOST_KEY) or self._tws_container_name(connection_id)),
-            int(config.get(TWS_RUNTIME_PORT_KEY) or TWS_GATEWAY_API_PORT),
-        )
+        ready = False
         return {
             "service_ready": True,
             "gateway_session_ready": ready,
@@ -2165,7 +2358,7 @@ class ConnectionManager:
             "gateway_started": True,
             "connection_status": ConnectionStatus.AWAITING_AUTH.value,
             "launch_url": launch_url,
-            "message": "IB Gateway API pronta." if ready else message,
+            "message": message,
         }
 
     async def tws_auth_status(self, connection_id: int, *, user_id: int | None = None) -> dict[str, Any]:
@@ -2189,10 +2382,11 @@ class ConnectionManager:
 
         container = self._get_tws_container(connection_id)
         gateway_started = bool(container and container.status == "running")
-        ready = gateway_started and await self._tws_api_ready(
-            str(config.get(TWS_RUNTIME_HOST_KEY) or self._tws_container_name(connection_id)),
-            int(config.get(TWS_RUNTIME_PORT_KEY) or TWS_GATEWAY_API_PORT),
-        )
+        probe = await self._probe_tws_api(connection_id, config) if gateway_started else {
+            "ready": False,
+            "message": status_message or "IB Gateway runtime non avviato.",
+        }
+        ready = gateway_started and bool(probe.get("ready"))
         return {
             "service_ready": gateway_started,
             "gateway_session_ready": ready,
@@ -2206,7 +2400,7 @@ class ConnectionManager:
             "gateway_started": gateway_started,
             "connection_status": status_value,
             "launch_url": launch_url,
-            "message": "IB Gateway API pronta." if ready else (status_message or "Completa il login IB Gateway nel popup."),
+            "message": probe.get("message") or status_message or "Completa il login IB Gateway nel popup.",
         }
 
     async def complete_tws_connect(self, connection_id: int) -> ConnectorResult:
@@ -2222,19 +2416,17 @@ class ConnectionManager:
         except Exception as exc:
             return ConnectorResult(success=False, message=f"IB Gateway non raggiungibile: {exc}")
 
-        ready = await self._tws_api_ready(
-            str(config.get(TWS_RUNTIME_HOST_KEY) or self._tws_container_name(connection_id)),
-            int(config.get(TWS_RUNTIME_PORT_KEY) or TWS_GATEWAY_API_PORT),
-        )
-        if not ready:
+        probe = await self._probe_tws_api(connection_id, config, force=True)
+        if not probe.get("ready"):
+            message = probe.get("message") or "IB Gateway API non ancora pronta"
             with get_session_context() as session:
                 conn = session.get(Connection, connection_id)
                 if conn is not None:
                     conn.status = ConnectionStatus.AWAITING_AUTH.value
-                    conn.status_message = "Completa il login IB Gateway nel popup."
+                    conn.status_message = message
                     conn.updated_at = datetime.now(timezone.utc)
                     session.commit()
-            return ConnectorResult(success=False, message="IB Gateway API non ancora pronta")
+            return ConnectorResult(success=False, message=message)
 
         result = await self.connect(connection_id)
         if result.success:
