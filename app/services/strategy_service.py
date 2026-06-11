@@ -353,8 +353,6 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             ),
         )
 
-    # Status stays as 'pending' — the container will set 'running' then
-    # 'completed'/'error' as it progresses.
     try:
         result = backtest_runner_service.start_backtest(
             backtest_id=backtest.id,
@@ -368,6 +366,13 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             "Started backtest runner for backtest %d: %s",
             backtest.id, result,
         )
+        backtest.status = BacktestStatus.RUNNING.value
+        backtest.started_at = datetime.now(timezone.utc)
+        backtest.completed_at = None
+        backtest.error_message = None
+        session.add(backtest)
+        session.commit()
+        session.refresh(backtest)
     except RuntimeError as e:
         backtest.status = BacktestStatus.ERROR.value
         backtest.completed_at = datetime.now(timezone.utc)

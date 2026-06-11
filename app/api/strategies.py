@@ -189,6 +189,20 @@ def stop_backtest_endpoint(
     return result
 
 
+@router.get("/{strategy_id}/backtests/{backtest_id}/status")
+def get_backtest_runtime_status_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Get runner container and replay-service progress for a backtest."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    return backtest_runner_service.get_backtest_status(backtest.id)
+
+
 @router.get("/{strategy_id}/backtests/{backtest_id}/logs")
 def get_backtest_logs_endpoint(
     strategy_id: int,
