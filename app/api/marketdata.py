@@ -33,22 +33,22 @@ def search_symbols_endpoint(
         None,
         description=(
             "Connection ID to scope the search. "
-            "For IBKR connections, performs a live search via the gateway. "
+            "For gateway-backed connections, performs a live search via the gateway. "
             "For Yahoo connections, searches that connection's cached symbols. "
             "If omitted, searches all cached symbols."
         ),
     ),
     asset_type: Optional[AssetType] = Query(
         None,
-        description="Filter by asset type: stock, futures, index, etf"
+        description="Filter by asset type: stock, forex, futures, index, etf"
     ),
     limit: int = Query(50, ge=1, le=500, description="Maximum number of results"),
 ):
     """
     Search for available symbols.
     
-    When ``connection_id`` points to an IBKR connection with a running
-    gateway container, the search is done **live** via ``reqMatchingSymbols``.
+    When ``connection_id`` points to a gateway-backed connection, the search is
+    done **live** via that broker's symbol search API.
     Otherwise, results come from the local symbol cache.
     
     **Examples:**
@@ -57,7 +57,7 @@ def search_symbols_endpoint(
     - ``/marketdata/symbols?query=NQ&connection_id=1`` – Live search NQ on IBKR connection 1
     """
     try:
-        # If connection_id is provided, check if it's an IBKR connection for live search
+        # If connection_id is provided, use live gateway search when available.
         if connection_id is not None:
             from app.models.connection import Connection
             from app.db.database import get_session_context
@@ -66,7 +66,7 @@ def search_symbols_endpoint(
             with get_session_context() as session:
                 conn = session.get(Connection, connection_id)
 
-            if conn and conn.broker_type in ("ibkr", "binance"):
+            if conn and conn.broker_type in ("ibkr", "binance", "ctrader"):
                 from app.services.symbol_sync_handler import search_gateway_symbols_by_id
 
                 results = search_gateway_symbols_by_id(

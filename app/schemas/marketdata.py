@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 class AssetType(str, Enum):
     """Type of asset/instrument."""
     STOCK = "stock"
+    FOREX = "forex"
     FUTURES = "futures"
     INDEX = "index"
     ETF = "etf"
