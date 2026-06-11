@@ -552,6 +552,20 @@ def _ctrader_env(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _ctrader_config_error(config: dict[str, Any]) -> str | None:
+    """Return a user-facing cTrader configuration error before spawning a gateway."""
+    environment = str(config.get("environment", "demo") or "demo").strip().lower()
+    if environment not in {"demo", "live"}:
+        return "cTrader environment must be 'demo' or 'live'"
+    client_id = str(config.get("client_id") or os.getenv("CTRADER_OAUTH_CLIENT_ID", "")).strip()
+    client_secret = str(config.get("client_secret") or os.getenv("CTRADER_OAUTH_CLIENT_SECRET", "")).strip()
+    if not client_id or not client_secret:
+        return "Applicazione OAuth cTrader non configurata sul backend"
+    if not str(config.get("access_token") or "").strip():
+        return "Access token cTrader mancante. Completa Autorizza e Scambia nella configurazione cTrader, poi salva la connessione."
+    return None
+
+
 def resolve_order_history_lookback_days(
     config: dict[str, Any] | None,
     *,
@@ -2557,6 +2571,15 @@ class ConnectionManager:
                     conn.updated_at = datetime.now(timezone.utc)
                     session.commit()
                     return ConnectorResult(success=False, message=legacy_loopback_error)
+
+            if broker_type == "ctrader":
+                ctrader_config_error = _ctrader_config_error(config)
+                if ctrader_config_error:
+                    conn.status = ConnectionStatus.ERROR.value
+                    conn.status_message = ctrader_config_error
+                    conn.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+                    return ConnectorResult(success=False, message=ctrader_config_error)
 
             if get_gateway_spec(broker_type) is None:
                 return ConnectorResult(
