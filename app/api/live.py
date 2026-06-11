@@ -365,11 +365,11 @@ async def _start_live_instance_internal(
 
     account, connection = validate_account_for_live(session, account_id, user_id)
     account_config = {
+        **(connection.config or {}),
         "account_id": account.account_id,
         "db_account_id": account.id,
         "connection_id": connection.id,
         "connection_name": connection.name,
-        **(connection.config or {}),
     }
     broker_type = connection.broker_type
 
