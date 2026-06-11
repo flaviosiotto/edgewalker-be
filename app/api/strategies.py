@@ -200,7 +200,16 @@ def get_backtest_runtime_status_endpoint(
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
-    return backtest_runner_service.get_backtest_status(backtest.id)
+    status_payload = backtest_runner_service.get_backtest_status(backtest.id)
+    service_status = status_payload.setdefault("service", {})
+    if isinstance(service_status, dict):
+        strategy = get_strategy(session, backtest.strategy_id, current_user.id)
+        service_status.setdefault("backtest_id", backtest.id)
+        service_status.setdefault("stream_id", f"backtest-{backtest.id}")
+        service_status.setdefault("bars_stream", f"bars:backtest-{backtest.id}")
+        if strategy.connection_id is not None:
+            service_status.setdefault("connection_id", str(strategy.connection_id))
+    return status_payload
 
 
 @router.get("/{strategy_id}/backtests/{backtest_id}/logs")

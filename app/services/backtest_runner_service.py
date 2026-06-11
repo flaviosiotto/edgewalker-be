@@ -26,7 +26,7 @@ RUNTIME_PATH = os.getenv("RUNTIME_PATH", "/home/flavio/playground/edgewalker-run
 SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
 JWT_KEY_DIR = os.getenv("JWT_KEY_DIR", "").strip()
 RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "").strip()
-BACKTEST_SERVICE_URL = os.getenv("BACKTEST_SERVICE_URL", "http://strategy-backtest:8080").strip()
+BACKTEST_SERVICE_URL = os.getenv("BACKTEST_SERVICE_URL", "http://strategy-backtest:8080").strip().rstrip("/")
 BACKTEST_BARS_PER_SECOND = os.getenv("BACKTEST_BARS_PER_SECOND", "0")
 CONTAINER_PREFIX = "edgewalker-backtest-runner-"
 
@@ -91,6 +91,14 @@ class BacktestRunnerService:
         timeframe: str,
     ) -> dict[str, Any]:
         """Start a strategy-runner container in backtest mode."""
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                client.get(f"{BACKTEST_SERVICE_URL}/health").raise_for_status()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}"
+            ) from exc
+
         container_name = self._container_name(backtest_id)
         existing = self._get_container(backtest_id)
         if existing:
@@ -205,7 +213,11 @@ class BacktestRunnerService:
                 resp = client.post(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/cancel")
                 service_result = resp.json() if resp.content else {"status": resp.status_code}
         except Exception as exc:
-            service_result = {"status": "service_cancel_failed", "error": str(exc)}
+            service_result = {
+                "status": "service_cancel_failed",
+                "service_url": BACKTEST_SERVICE_URL,
+                "error": str(exc),
+            }
 
         container = self._get_container(backtest_id)
         if not container:
@@ -242,7 +254,13 @@ class BacktestRunnerService:
                 resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/status")
                 service_status = resp.json()
         except Exception as exc:
-            service_status = {"status": "unavailable", "error": str(exc)}
+            service_status = {
+                "status": "unavailable",
+                "service_url": BACKTEST_SERVICE_URL,
+                "error": str(exc),
+            }
+
+        service_status.setdefault("service_url", BACKTEST_SERVICE_URL)
 
         return {"container": container_status, "service": service_status}
 
