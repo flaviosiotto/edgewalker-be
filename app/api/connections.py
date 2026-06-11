@@ -120,6 +120,12 @@ async def exchange_ctrader_oauth_token(
     error_code = data.get("errorCode")
     if error_code:
         detail = data.get("description") or error_code
+        if str(error_code).upper() == "ACCESS_DENIED":
+            detail = (
+                "cTrader ha rifiutato lo scambio OAuth. Genera un nuovo authorization code, "
+                "verifica che il redirect URI corrisponda a quello registrato nell'app cTrader, "
+                "e usa Scambia una sola volta prima che il codice scada."
+            )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(detail))
 
     access_token = data.get("accessToken")
