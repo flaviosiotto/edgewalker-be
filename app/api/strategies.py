@@ -159,9 +159,8 @@ def run_backtest_endpoint(
 ):
     """Start backtest execution.
 
-    Spawns a strategy-backtest Docker container that reads params from
-    the DB, verifies data coverage, runs the backtest with edgewalker,
-    and writes results directly to the database.
+    Spawns strategy-runner in backtest mode. The always-on strategy-backtest
+    service prepares/replays data, records simulated orders, and writes results.
     """
     return run_backtest(session, backtest_id, current_user.id)
 
@@ -173,7 +172,7 @@ def stop_backtest_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Stop a running backtest container."""
+    """Stop a running backtest runner and request replay cancellation."""
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
@@ -198,7 +197,7 @@ def get_backtest_logs_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Get container logs for a running or recently finished backtest."""
+    """Get runner container logs for a running or recently finished backtest."""
     from app.services.backtest_runner_service import backtest_runner_service
 
     _ = get_backtest(session, backtest_id, current_user.id)  # validate exists

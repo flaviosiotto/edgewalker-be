@@ -1,73 +1,81 @@
-"""
-Backtest Runner Service.
+"""Backtest runner orchestration.
 
-Manages Docker containers for backtest execution.
-Each backtest runs in its own short-lived container (1:1 mapping).
-
-The container:
-- Reads backtest parameters from the database
-- Verifies data coverage in the shared parquet datalake
-- Runs the backtest using the edgewalker library
-- Writes results (metrics + trades) directly to the database
-- Exits automatically on completion
+The backend no longer spawns ``strategy-backtest`` per run. That service is
+always on. For each backtest the backend spawns one ``strategy-runner``
+container in ``BACKTEST_MODE=true``; the runner consumes ``bars:backtest-{id}``
+and routes orders back to the always-on strategy-backtest service.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any
 
 import docker
-from docker.errors import NotFound, APIError
+import httpx
+from docker.errors import APIError, NotFound
 from docker.models.containers import Container
 
 logger = logging.getLogger(__name__)
 
-# Docker network for internal communication
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "edgewalker-devops_default")
+TRAEFIK_DOCKER_NETWORK = os.getenv("TRAEFIK_DOCKER_NETWORK", "").strip()
+EDGEWALKER_PATH = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
+RUNTIME_PATH = os.getenv("RUNTIME_PATH", "/home/flavio/playground/edgewalker-runtime")
+SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
+JWT_KEY_DIR = os.getenv("JWT_KEY_DIR", "").strip()
+RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "").strip()
+BACKTEST_SERVICE_URL = os.getenv("BACKTEST_SERVICE_URL", "http://strategy-backtest:8080").strip()
+BACKTEST_BARS_PER_SECOND = os.getenv("BACKTEST_BARS_PER_SECOND", "0")
+CONTAINER_PREFIX = "edgewalker-backtest-runner-"
 
-# Backtest runner image (built via docker-compose build strategy-backtest)
-BACKTEST_IMAGE = os.getenv("BACKTEST_IMAGE", "edgewalker-devops-strategy-backtest:latest")
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = os.getenv("REDIS_PORT", "6379")
+REDIS_URL = os.getenv("REDIS_URL", "")
+REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
-# Container naming convention
-CONTAINER_PREFIX = "edgewalker-backtest-"
+RUNNER_CORS_ALLOWED_ORIGINS = os.getenv(
+    "RUNNER_CORS_ALLOWED_ORIGINS",
+    os.getenv("BACKEND_CORS_ORIGINS", ""),
+)
+RUNNER_CORS_ALLOW_CREDENTIALS = os.getenv("RUNNER_CORS_ALLOW_CREDENTIALS", "true")
 
 
 def _docker_runtime_requirements() -> str:
-    edgewalker_path = os.getenv("EDGEWALKER_PATH", "/home/flavio/playground/edgewalker")
     return (
-        "backend must have Docker Engine access (for example via /var/run/docker.sock or DOCKER_HOST), "
-        f"the Docker network '{DOCKER_NETWORK}' must exist, and EDGEWALKER_PATH={edgewalker_path} "
-        "must be a valid absolute path on the Docker host"
+        "backend must have Docker Engine access and the Docker network "
+        f"'{DOCKER_NETWORK}' must exist; host paths EDGEWALKER_PATH={EDGEWALKER_PATH} "
+        f"and RUNTIME_PATH={RUNTIME_PATH} must be valid absolute paths on the Docker host"
     )
 
 
+def _required_runner_image() -> str:
+    if RUNNER_IMAGE:
+        return RUNNER_IMAGE
+    raise RuntimeError("Missing RUNNER_IMAGE for backend-spawned backtest runners")
+
+
 class BacktestRunnerService:
-    """Service for managing backtest runner containers.
+    """Spawn and manage strategy-runner containers for backtests."""
 
-    Provides start/stop/status operations.  Containers are one-shot:
-    they run the backtest, persist results to the DB, and exit.
-    """
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._client: docker.DockerClient | None = None
 
     @property
     def client(self) -> docker.DockerClient:
-        """Get or create Docker client."""
         if self._client is None:
             try:
                 self._client = docker.from_env()
-            except Exception as e:
-                raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}") from e
+            except Exception as exc:
+                raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}") from exc
         return self._client
 
     def _container_name(self, backtest_id: int) -> str:
-        """Generate container name for a backtest."""
         return f"{CONTAINER_PREFIX}{backtest_id}"
 
     def _get_container(self, backtest_id: int) -> Container | None:
-        """Get container for a backtest if it exists."""
         try:
             return self.client.containers.get(self._container_name(backtest_id))
         except NotFound:
@@ -76,76 +84,96 @@ class BacktestRunnerService:
     def start_backtest(
         self,
         backtest_id: int,
-        connection_id: int | None = None,
+        connection_id: int | str,
+        strategy_id: int,
+        strategy_config: dict[str, Any],
+        symbol: str,
+        timeframe: str,
     ) -> dict[str, Any]:
-        """Start a backtest runner container.
-
-        Args:
-            backtest_id: Database ID of the backtest.
-            connection_id: Connection ID for data scoping (from strategy).
-
-        Returns:
-            Dict with container info and status.
-        """
+        """Start a strategy-runner container in backtest mode."""
         container_name = self._container_name(backtest_id)
-
-        # Check if container already exists
         existing = self._get_container(backtest_id)
         if existing:
+            existing.reload()
             if existing.status == "running":
                 return {
                     "status": "already_running",
                     "container_id": existing.short_id,
                     "container_name": container_name,
+                    "stream_id": f"backtest-{backtest_id}",
                 }
-            else:
-                # Remove stopped/exited container from a previous run
-                existing.remove(force=True)
+            existing.remove(force=True)
 
-        # Environment variables
-        env = {
+        stream_id = f"backtest-{backtest_id}"
+        env: dict[str, str] = {
+            "BACKTEST_MODE": "true",
             "BACKTEST_ID": str(backtest_id),
-            "DATABASE_URL": os.getenv("DATABASE_URL", ""),
-            "DATA_DIR": "/opt/edgewalker/data",
+            "BACKTEST_STREAM_ID": stream_id,
+            "BACKTEST_SERVICE_URL": BACKTEST_SERVICE_URL,
+            "BACKTEST_BARS_PER_SECOND": BACKTEST_BARS_PER_SECOND,
+            "REAL_DATA_CONNECTION_ID": str(connection_id),
+            "CONNECTION_ID": str(connection_id),
+            "REDIS_HOST": REDIS_HOST,
+            "REDIS_PORT": REDIS_PORT,
+            "STRATEGY_ID": str(strategy_id),
+            "STRATEGY_CONFIG_JSON": json.dumps(strategy_config),
+            "SYMBOL": symbol,
+            "STREAMS": f"bars:{stream_id}",
+            "CONSUMER_GROUP": f"cg:backtest-runner:{backtest_id}",
+            "CONSUMER_ID": f"backtest-runner-{backtest_id}",
+            "EVAL_IN_PROGRESS": "false",
+            "DEBUG_RULES": os.getenv("DEBUG_RULES", "false"),
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
             "PYTHONPATH": "/app",
+            "RUNNER_INTERNAL_URL": f"http://{container_name}:8080",
+            "DATABASE_URL": os.getenv("DATABASE_URL", ""),
+            "ALGORITHM": os.getenv("ALGORITHM", "RS256"),
+            "JWT_ISSUER": os.getenv("JWT_ISSUER", "edgewalker-backend"),
+            "JWT_PUBLIC_KEY_PATH": os.getenv("JWT_PUBLIC_KEY_PATH", "/run/secrets/edgewalker-jwt/public.pem"),
+            "ACCESS_TOKEN_AUDIENCE": os.getenv("ACCESS_TOKEN_AUDIENCE", "edgewalker-ui"),
+            "AGENT_TOKEN_AUDIENCE": os.getenv("AGENT_TOKEN_AUDIENCE", "edgewalker-agent"),
+            "CORS_ALLOWED_ORIGINS": RUNNER_CORS_ALLOWED_ORIGINS,
+            "CORS_ALLOW_CREDENTIALS": RUNNER_CORS_ALLOW_CREDENTIALS,
+            "BROKER_SYNC_ENABLED": "false",
+            "LIVE_RECONCILIATION_ENABLED": "false",
+            "POSITION_SYNC_INTERVAL_SECONDS": "0",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"),
+            "OTEL_SERVICE_NAME": f"strategy-runner-backtest-{backtest_id}",
         }
+        if REDIS_URL:
+            env["REDIS_URL"] = REDIS_URL
+        if REDIS_USERNAME:
+            env["REDIS_USERNAME"] = REDIS_USERNAME
+        if REDIS_PASSWORD:
+            env["REDIS_PASSWORD"] = REDIS_PASSWORD
 
-        if connection_id:
-            env["CONNECTION_ID"] = str(connection_id)
-
-        # Labels for identification and management
         labels = {
-            "edgewalker.type": "strategy-backtest",
+            "edgewalker.type": "strategy-runner-backtest",
             "edgewalker.backtest_id": str(backtest_id),
+            "edgewalker.strategy_id": str(strategy_id),
+            "edgewalker.symbol": symbol,
+            "edgewalker.stream_id": stream_id,
         }
+        if TRAEFIK_DOCKER_NETWORK:
+            labels["traefik.docker.network"] = TRAEFIK_DOCKER_NETWORK
 
-        # Volume mounts — shared data + artifacts for reports
-        edgewalker_path = os.getenv(
-            "EDGEWALKER_PATH", "/home/flavio/playground/edgewalker"
-        )
         volumes = {
-            f"{edgewalker_path}/data": {
-                "bind": "/opt/edgewalker/data",
-                "mode": "rw",
-            },
-            f"{edgewalker_path}/artifacts": {
-                "bind": "/opt/edgewalker/artifacts",
-                "mode": "rw",
-            },
-            f"{edgewalker_path}/strategies": {
-                "bind": "/opt/edgewalker/strategies",
-                "mode": "ro",
-            },
-            f"{edgewalker_path}/configs": {
-                "bind": "/opt/edgewalker/configs",
-                "mode": "ro",
-            },
+            f"{EDGEWALKER_PATH}/strategies": {"bind": "/opt/edgewalker/strategies", "mode": "ro"},
+            f"{EDGEWALKER_PATH}/artifacts": {"bind": "/opt/edgewalker/artifacts", "mode": "ro"},
         }
+        if SPAWN_CODE_MOUNTS:
+            volumes.update({
+                f"{RUNTIME_PATH}/strategy-runner/app": {"bind": "/app/app", "mode": "ro"},
+                f"{EDGEWALKER_PATH}/edgewalker": {"bind": "/opt/edgewalker/edgewalker", "mode": "ro"},
+                f"{RUNTIME_PATH}/shared": {"bind": "/app/shared", "mode": "ro"},
+            })
+        if JWT_KEY_DIR:
+            volumes[JWT_KEY_DIR] = {"bind": "/run/secrets/edgewalker-jwt", "mode": "ro"}
 
+        image_name = _required_runner_image()
         try:
             container = self.client.containers.run(
-                image=BACKTEST_IMAGE,
+                image=image_name,
                 name=container_name,
                 environment=env,
                 labels=labels,
@@ -153,104 +181,90 @@ class BacktestRunnerService:
                 network=DOCKER_NETWORK,
                 detach=True,
                 auto_remove=False,
-                restart_policy={"Name": "no"},  # one-shot: don't restart
+                restart_policy={"Name": "no"},
                 extra_hosts={"host.docker.internal": "host-gateway"},
             )
-
-            logger.info(
-                "Started backtest runner: %s (%s) for backtest %d",
-                container_name,
-                container.short_id,
-                backtest_id,
-            )
-
+            if TRAEFIK_DOCKER_NETWORK and TRAEFIK_DOCKER_NETWORK != DOCKER_NETWORK:
+                self.client.networks.get(TRAEFIK_DOCKER_NETWORK).connect(container)
+            logger.info("Started backtest runner: %s (%s)", container_name, container.short_id)
             return {
                 "status": "started",
                 "container_id": container.short_id,
                 "container_name": container_name,
+                "stream_id": stream_id,
+                "image": image_name,
             }
+        except APIError as exc:
+            logger.error("Failed to start backtest runner %s: %s", container_name, exc)
+            raise RuntimeError(f"Failed to start backtest runner: {exc}") from exc
 
-        except APIError as e:
-            logger.error(
-                "Failed to start backtest container %s: %s", container_name, e
-            )
-            raise RuntimeError(f"Failed to start backtest runner: {e}")
+    def stop_backtest(self, backtest_id: int, remove: bool = True) -> dict[str, Any]:
+        service_result: dict[str, Any] = {}
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.post(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/cancel")
+                service_result = resp.json() if resp.content else {"status": resp.status_code}
+        except Exception as exc:
+            service_result = {"status": "service_cancel_failed", "error": str(exc)}
 
-    def stop_backtest(
-        self, backtest_id: int, remove: bool = True
-    ) -> dict[str, Any]:
-        """Stop and optionally remove a backtest runner container."""
         container = self._get_container(backtest_id)
-
         if not container:
-            return {"status": "not_found"}
-
+            return {"status": "not_found", "service": service_result}
         try:
             if container.status == "running":
                 container.stop(timeout=30)
-                logger.info("Stopped backtest runner: %s", container.name)
-
             if remove:
                 container.remove(force=True)
-                logger.info("Removed backtest runner: %s", container.name)
-                return {"status": "stopped_and_removed"}
-
-            return {"status": "stopped"}
-
-        except APIError as e:
-            logger.error("Failed to stop backtest container: %s", e)
-            raise RuntimeError(f"Failed to stop backtest runner: {e}")
+                return {"status": "stopped_and_removed", "service": service_result}
+            return {"status": "stopped", "service": service_result}
+        except APIError as exc:
+            raise RuntimeError(f"Failed to stop backtest runner: {exc}") from exc
 
     def get_backtest_status(self, backtest_id: int) -> dict[str, Any]:
-        """Get status of a backtest runner container."""
         container = self._get_container(backtest_id)
-
         if not container:
-            return {"status": "not_found", "running": False}
+            container_status: dict[str, Any] = {"status": "not_found", "running": False}
+        else:
+            container.reload()
+            health = container.attrs.get("State", {}).get("Health", {})
+            container_status = {
+                "status": container.status,
+                "running": container.status == "running",
+                "container_id": container.short_id,
+                "container_name": container.name,
+                "health_status": health.get("Status") if health else None,
+                "labels": container.labels,
+            }
 
-        container.reload()
-        return {
-            "status": container.status,
-            "running": container.status == "running",
-            "container_id": container.short_id,
-            "container_name": container.name,
-            "labels": container.labels,
-        }
+        service_status: dict[str, Any] = {}
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/status")
+                service_status = resp.json()
+        except Exception as exc:
+            service_status = {"status": "unavailable", "error": str(exc)}
 
-    def get_container_logs(
-        self, backtest_id: int, tail: int = 200
-    ) -> str:
-        """Get logs from a backtest runner container."""
+        return {"container": container_status, "service": service_status}
+
+    def get_container_logs(self, backtest_id: int, tail: int = 200) -> str:
         container = self._get_container(backtest_id)
-
         if not container:
-            raise ValueError(f"Container for backtest {backtest_id} not found")
-
+            raise ValueError(f"Runner container for backtest {backtest_id} not found")
         return container.logs(tail=tail, timestamps=True).decode("utf-8")
 
     def cleanup_finished(self) -> int:
-        """Remove finished (exited) backtest containers.
-
-        Returns the number of containers removed.
-        """
         containers = self.client.containers.list(
             all=True,
-            filters={
-                "label": "edgewalker.type=strategy-backtest",
-                "status": "exited",
-            },
+            filters={"label": "edgewalker.type=strategy-runner-backtest", "status": "exited"},
         )
         count = 0
         for container in containers:
             try:
                 container.remove(force=True)
                 count += 1
-            except Exception as e:
-                logger.warning(
-                    "Failed to remove container %s: %s", container.name, e
-                )
+            except Exception as exc:
+                logger.warning("Failed to remove container %s: %s", container.name, exc)
         return count
 
 
-# Global service instance
 backtest_runner_service = BacktestRunnerService()

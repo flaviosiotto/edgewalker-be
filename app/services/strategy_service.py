@@ -324,11 +324,11 @@ def get_backtest(session: Session, backtest_id: int, user_id: int | None = None)
 
 
 def run_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> BacktestResult:
-    """Start backtest execution by spawning a strategy-backtest container.
+    """Start backtest execution by spawning strategy-runner in backtest mode.
 
-    The container reads params from the DB, verifies data coverage in the
-    shared parquet datalake, runs the backtest with edgewalker, and writes
-    results (metrics + trades) directly to the database.
+    ``strategy-backtest`` is an always-on service. It prepares historical data,
+    publishes ``bars:backtest-{id}``, receives simulated orders from the runner,
+    and writes final results. The backend only starts the runner container.
     """
     from app.services.backtest_runner_service import backtest_runner_service
 
@@ -359,15 +359,19 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
         result = backtest_runner_service.start_backtest(
             backtest_id=backtest.id,
             connection_id=connection_id,
+            strategy_id=backtest.strategy_id,
+            strategy_config=backtest.config or strategy.definition,
+            symbol=backtest.symbol,
+            timeframe=backtest.timeframe or "5m",
         )
         logger.info(
-            "Started backtest container for backtest %d: %s",
+            "Started backtest runner for backtest %d: %s",
             backtest.id, result,
         )
     except RuntimeError as e:
         backtest.status = BacktestStatus.ERROR.value
         backtest.completed_at = datetime.now(timezone.utc)
-        backtest.error_message = f"Failed to start backtest container: {e}"
+        backtest.error_message = f"Failed to start backtest runner: {e}"
         session.add(backtest)
         session.commit()
         session.refresh(backtest)
