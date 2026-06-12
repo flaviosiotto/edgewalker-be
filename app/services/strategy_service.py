@@ -32,6 +32,7 @@ from app.services.n8n_auth import (
     issue_n8n_api_access_token,
     issue_n8n_webhook_auth_token,
 )
+from app.utils.auth_utils import create_user_delegated_token
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -354,6 +355,35 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
         )
 
     try:
+        live_chat = get_or_create_live_chat(session, backtest.strategy_id, user_id)
+        runner_auth_token = create_user_delegated_token(
+            session,
+            user_id=strategy.user_id,
+            audience=settings.RUNNER_TOKEN_AUDIENCE,
+            purpose="runner_backend",
+            extra_claims={"strategy_id": backtest.strategy_id, "backtest_id": backtest.id},
+            no_expiry=True,
+        )
+        manager_webhook_url: str | None = None
+        manager_webhook_auth_token: str | None = None
+        manager_agent_id = resolve_strategy_manager_agent_id(session, backtest.strategy_id, user_id=user_id)
+        if manager_agent_id:
+            manager_agent = session.get(Agent, manager_agent_id)
+            if manager_agent:
+                manager_webhook_url = manager_agent.n8n_webhook
+                manager_webhook_auth_token = create_user_delegated_token(
+                    session,
+                    user_id=strategy.user_id,
+                    audience=settings.N8N_TOKEN_AUDIENCE,
+                    purpose="n8n_runner_webhook",
+                    extra_claims={
+                        "agent_id": manager_agent.id_agent,
+                        "chat_id": live_chat.id,
+                        "strategy_id": backtest.strategy_id,
+                        "backtest_id": backtest.id,
+                    },
+                )
+
         result = backtest_runner_service.start_backtest(
             backtest_id=backtest.id,
             connection_id=connection_id,
@@ -361,6 +391,10 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             strategy_config=backtest.config or strategy.definition,
             symbol=backtest.symbol,
             timeframe=backtest.timeframe or "5m",
+            manager_webhook_url=manager_webhook_url,
+            backend_auth_token=runner_auth_token,
+            manager_webhook_auth_token=manager_webhook_auth_token,
+            manager_chat_session_id=_chat_session_id(live_chat),
         )
         logger.info(
             "Started backtest runner for backtest %d: %s",

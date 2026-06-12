@@ -36,6 +36,9 @@ REDIS_URL = os.getenv("REDIS_URL", "")
 REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
+N8N_INTERNAL_URL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
+N8N_PATH_PREFIX = os.getenv("N8N_PATH_PREFIX", "/n8n")
+
 RUNNER_CORS_ALLOWED_ORIGINS = os.getenv(
     "RUNNER_CORS_ALLOWED_ORIGINS",
     os.getenv("BACKEND_CORS_ORIGINS", ""),
@@ -55,6 +58,29 @@ def _required_runner_image() -> str:
     if RUNNER_IMAGE:
         return RUNNER_IMAGE
     raise RuntimeError("Missing RUNNER_IMAGE for backend-spawned backtest runners")
+
+
+def _rewrite_webhook_for_docker(url: str) -> str:
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(url)
+    path = parsed.path or ""
+    if not path.startswith(N8N_PATH_PREFIX):
+        return url
+
+    new_path = path[len(N8N_PATH_PREFIX):]
+    if not new_path.startswith("/"):
+        new_path = "/" + new_path
+
+    internal = urlparse(N8N_INTERNAL_URL)
+    return urlunparse((
+        internal.scheme,
+        internal.netloc,
+        new_path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment,
+    ))
 
 
 class BacktestRunnerService:
@@ -89,6 +115,11 @@ class BacktestRunnerService:
         strategy_config: dict[str, Any],
         symbol: str,
         timeframe: str,
+        *,
+        manager_webhook_url: str | None = None,
+        backend_auth_token: str | None = None,
+        manager_webhook_auth_token: str | None = None,
+        manager_chat_session_id: str | None = None,
     ) -> dict[str, Any]:
         """Start a strategy-runner container in backtest mode."""
         try:
@@ -134,6 +165,7 @@ class BacktestRunnerService:
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
             "PYTHONPATH": "/app",
             "RUNNER_INTERNAL_URL": f"http://{container_name}:8080",
+            "BACKEND_URL": os.getenv("BACKEND_URL", "http://backend:8000"),
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
             "ALGORITHM": os.getenv("ALGORITHM", "RS256"),
             "JWT_ISSUER": os.getenv("JWT_ISSUER", "edgewalker-backend"),
@@ -154,6 +186,14 @@ class BacktestRunnerService:
             env["REDIS_USERNAME"] = REDIS_USERNAME
         if REDIS_PASSWORD:
             env["REDIS_PASSWORD"] = REDIS_PASSWORD
+        if backend_auth_token:
+            env["BACKEND_AUTH_TOKEN"] = backend_auth_token
+        if manager_webhook_url:
+            env["MANAGER_WEBHOOK_URL"] = _rewrite_webhook_for_docker(manager_webhook_url)
+        if manager_webhook_auth_token:
+            env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
+        if manager_chat_session_id:
+            env["MANAGER_CHAT_SESSION_ID"] = manager_chat_session_id
 
         labels = {
             "edgewalker.type": "strategy-runner-backtest",
