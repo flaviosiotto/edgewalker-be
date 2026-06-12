@@ -102,7 +102,7 @@ class BacktestCreate(BaseModel):
     agent_id: Optional[int] = None
     
     # Data source parameters (for fetch)
-    source: Literal["ibkr", "yahoo", "binance"] = "ibkr"
+    source: Optional[Literal["ibkr", "yahoo", "binance", "ctrader"]] = None
     timeframe: str = "5m"  # e.g., "1m", "5m", "15m", "1h", "1d"
     asset: Literal["stock", "future", "futures", "forex"] = "stock"
     rth: bool = True  # True = Regular Trading Hours only

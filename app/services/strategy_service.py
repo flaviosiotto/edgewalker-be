@@ -265,6 +265,16 @@ def create_backtest(
     so the backtest retains the exact configuration used at creation time.
     """
     strategy = get_strategy(session, strategy_id, user_id)
+    allowed_sources = {"ibkr", "yahoo", "binance", "ctrader"}
+    source = str(payload.source or "").strip().lower()
+    connection_source = ""
+    if strategy.connection_id is not None:
+        connection = _get_owned_connection(session, strategy.connection_id, strategy.user_id)
+        connection_source = str(connection.broker_type or "").strip().lower()
+    if not source or (source == "ibkr" and connection_source not in {"", "ibkr"}):
+        source = connection_source
+    if source not in allowed_sources:
+        source = "ibkr"
     
     # Validate agent_id if provided
     if payload.agent_id is not None:
@@ -278,7 +288,7 @@ def create_backtest(
         start_date=payload.start_date,
         end_date=payload.end_date,
         # Data source parameters
-        source=payload.source,
+        source=source,
         timeframe=payload.timeframe,
         asset=payload.asset,
         rth=payload.rth,
@@ -361,7 +371,11 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             user_id=strategy.user_id,
             audience=settings.RUNNER_TOKEN_AUDIENCE,
             purpose="runner_backend",
-            extra_claims={"strategy_id": backtest.strategy_id, "backtest_id": backtest.id},
+            extra_claims={
+                "strategy_id": backtest.strategy_id,
+                "backtest_id": backtest.id,
+                "scopes": ["runner:read"],
+            },
             no_expiry=True,
         )
         manager_webhook_url: str | None = None
