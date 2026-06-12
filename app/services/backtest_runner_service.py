@@ -120,6 +120,7 @@ class BacktestRunnerService:
         backend_auth_token: str | None = None,
         manager_webhook_auth_token: str | None = None,
         manager_chat_session_id: str | None = None,
+        owner_user_id: int | str | None = None,
     ) -> dict[str, Any]:
         """Start a strategy-runner container in backtest mode."""
         try:
@@ -155,6 +156,7 @@ class BacktestRunnerService:
             "REDIS_HOST": REDIS_HOST,
             "REDIS_PORT": REDIS_PORT,
             "STRATEGY_ID": str(strategy_id),
+            "OWNER_USER_ID": str(owner_user_id or ""),
             "STRATEGY_CONFIG_JSON": json.dumps(strategy_config),
             "SYMBOL": symbol,
             "STREAMS": f"bars:{stream_id}",
@@ -301,8 +303,105 @@ class BacktestRunnerService:
             }
 
         service_status.setdefault("service_url", BACKTEST_SERVICE_URL)
+        stream_status = self._get_stream_diagnostics(backtest_id)
+        runner_status = self._get_runner_diagnostics(container) if container and container.status == "running" else {
+            "status": "not_running",
+        }
 
-        return {"container": container_status, "service": service_status}
+        return {
+            "container": container_status,
+            "service": service_status,
+            "stream": stream_status,
+            "runner": runner_status,
+        }
+
+    def _create_redis_client(self):
+        import redis as sync_redis
+
+        if REDIS_URL:
+            return sync_redis.from_url(REDIS_URL, decode_responses=True)
+
+        kwargs: dict[str, Any] = {
+            "host": REDIS_HOST,
+            "port": int(REDIS_PORT),
+            "decode_responses": True,
+        }
+        if REDIS_USERNAME:
+            kwargs["username"] = REDIS_USERNAME
+        if REDIS_PASSWORD:
+            kwargs["password"] = REDIS_PASSWORD
+        return sync_redis.Redis(**kwargs)
+
+    def _get_stream_diagnostics(self, backtest_id: int) -> dict[str, Any]:
+        stream_key = f"bars:backtest-{backtest_id}"
+        consumer_group = f"cg:backtest-runner:{backtest_id}"
+        try:
+            redis_client = self._create_redis_client()
+            try:
+                exists = bool(redis_client.exists(stream_key))
+                diagnostics: dict[str, Any] = {
+                    "stream_key": stream_key,
+                    "consumer_group": consumer_group,
+                    "exists": exists,
+                }
+                if exists:
+                    diagnostics["stream"] = redis_client.xinfo_stream(stream_key)
+                    groups = redis_client.xinfo_groups(stream_key)
+                    diagnostics["groups"] = groups
+                    diagnostics["runner_group"] = next(
+                        (group for group in groups if group.get("name") == consumer_group),
+                        None,
+                    )
+                    try:
+                        diagnostics["consumers"] = redis_client.xinfo_consumers(stream_key, consumer_group)
+                    except Exception as exc:
+                        diagnostics["consumers_error"] = str(exc)
+                return diagnostics
+            finally:
+                redis_client.close()
+        except Exception as exc:
+            return {
+                "stream_key": stream_key,
+                "consumer_group": consumer_group,
+                "status": "unavailable",
+                "error": str(exc),
+            }
+
+    @staticmethod
+    def _container_env(container: Container, key: str) -> str | None:
+        prefix = f"{key}="
+        for item in container.attrs.get("Config", {}).get("Env", []) or []:
+            if item.startswith(prefix):
+                return item[len(prefix):]
+        return None
+
+    def _get_runner_diagnostics(self, container: Container) -> dict[str, Any]:
+        base_url = f"http://{container.name}:8080"
+        token = self._container_env(container, "BACKEND_AUTH_TOKEN")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        diagnostics: dict[str, Any] = {"base_url": base_url, "auth": "set" if token else "missing"}
+
+        endpoints = {
+            "health": "/health",
+            "metrics": "/metrics",
+            "state": "/state",
+            "config": "/config",
+            "debug": "/debug",
+        }
+        try:
+            with httpx.Client(base_url=base_url, timeout=2.0, headers=headers) as client:
+                for name, path in endpoints.items():
+                    try:
+                        resp = client.get(path)
+                        content_type = resp.headers.get("content-type", "")
+                        diagnostics[name] = resp.json() if content_type.startswith("application/json") else resp.text
+                        diagnostics[f"{name}_status_code"] = resp.status_code
+                    except Exception as exc:
+                        diagnostics[name] = {"status": "unavailable", "error": str(exc)}
+        except Exception as exc:
+            diagnostics["status"] = "unavailable"
+            diagnostics["error"] = str(exc)
+        return diagnostics
 
     def get_container_logs(self, backtest_id: int, tail: int = 200) -> str:
         container = self._get_container(backtest_id)

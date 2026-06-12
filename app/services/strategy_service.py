@@ -395,6 +395,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             backend_auth_token=runner_auth_token,
             manager_webhook_auth_token=manager_webhook_auth_token,
             manager_chat_session_id=_chat_session_id(live_chat),
+            owner_user_id=strategy.user_id,
         )
         logger.info(
             "Started backtest runner for backtest %d: %s",
