@@ -28,6 +28,7 @@ JWT_KEY_DIR = os.getenv("JWT_KEY_DIR", "").strip()
 RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "").strip()
 BACKTEST_SERVICE_URL = os.getenv("BACKTEST_SERVICE_URL", "http://strategy-backtest:8080").strip().rstrip("/")
 BACKTEST_BARS_PER_SECOND = os.getenv("BACKTEST_BARS_PER_SECOND", "0")
+BACKTEST_DEBUG_HOLD_SECONDS = os.getenv("BACKTEST_DEBUG_HOLD_SECONDS", "300")
 CONTAINER_PREFIX = "edgewalker-backtest-runner-"
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
@@ -151,6 +152,7 @@ class BacktestRunnerService:
             "BACKTEST_STREAM_ID": stream_id,
             "BACKTEST_SERVICE_URL": BACKTEST_SERVICE_URL,
             "BACKTEST_BARS_PER_SECOND": BACKTEST_BARS_PER_SECOND,
+            "BACKTEST_DEBUG_HOLD_SECONDS": BACKTEST_DEBUG_HOLD_SECONDS,
             "REAL_DATA_CONNECTION_ID": str(connection_id),
             "CONNECTION_ID": str(connection_id),
             "REDIS_HOST": REDIS_HOST,
@@ -163,7 +165,7 @@ class BacktestRunnerService:
             "CONSUMER_GROUP": f"cg:backtest-runner:{backtest_id}",
             "CONSUMER_ID": f"backtest-runner-{backtest_id}",
             "EVAL_IN_PROGRESS": "false",
-            "DEBUG_RULES": os.getenv("DEBUG_RULES", "false"),
+            "DEBUG_RULES": os.getenv("BACKTEST_DEBUG_RULES", os.getenv("DEBUG_RULES", "true")),
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
             "PYTHONPATH": "/app",
             "RUNNER_INTERNAL_URL": f"http://{container_name}:8080",
