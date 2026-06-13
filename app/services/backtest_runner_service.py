@@ -27,7 +27,6 @@ SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
 JWT_KEY_DIR = os.getenv("JWT_KEY_DIR", "").strip()
 RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "").strip()
 BACKTEST_SERVICE_URL = os.getenv("BACKTEST_SERVICE_URL", "http://strategy-backtest:8080").strip().rstrip("/")
-BACKTEST_BARS_PER_SECOND = os.getenv("BACKTEST_BARS_PER_SECOND", "0")
 BACKTEST_DEBUG_HOLD_SECONDS = os.getenv("BACKTEST_DEBUG_HOLD_SECONDS", "300")
 CONTAINER_PREFIX = "edgewalker-backtest-runner-"
 
@@ -151,7 +150,6 @@ class BacktestRunnerService:
             "BACKTEST_ID": str(backtest_id),
             "BACKTEST_STREAM_ID": stream_id,
             "BACKTEST_SERVICE_URL": BACKTEST_SERVICE_URL,
-            "BACKTEST_BARS_PER_SECOND": BACKTEST_BARS_PER_SECOND,
             "BACKTEST_DEBUG_HOLD_SECONDS": BACKTEST_DEBUG_HOLD_SECONDS,
             "REAL_DATA_CONNECTION_ID": str(connection_id),
             "CONNECTION_ID": str(connection_id),
@@ -317,6 +315,22 @@ class BacktestRunnerService:
             "stream": stream_status,
             "runner": runner_status,
         }
+
+    def control_backtest_playback(self, backtest_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.post(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/control", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest playback control failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
 
     def _create_redis_client(self):
         import redis as sync_redis

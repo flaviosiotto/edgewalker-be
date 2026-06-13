@@ -214,6 +214,14 @@ class BacktestUpdate(BaseModel):
     layout_config: Optional[dict[str, Any]] = None
 
 
+class BacktestPlaybackControl(BaseModel):
+    """Runtime playback command for an active backtest replay."""
+    action: Literal["pause", "paused", "resume", "play", "playing", "speed", "set_speed", "step"]
+    speed_multiplier: Optional[float] = None
+    bars_per_second: Optional[float] = None
+    steps: Optional[int] = None
+
+
 # ─── LAYOUT CONFIG SCHEMAS ───
 
 

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -13,6 +13,7 @@ from app.schemas.strategy import (
     BacktestCreate,
     BacktestRead,
     BacktestUpdate,
+    BacktestPlaybackControl,
     TradeRead,
     RuleTriggerRequest,
     RuleTriggerResponse,
@@ -163,6 +164,27 @@ def run_backtest_endpoint(
     service prepares/replays data, records simulated orders, and writes results.
     """
     return run_backtest(session, backtest_id, current_user.id)
+
+
+@router.post("/{strategy_id}/backtests/{backtest_id}/control")
+def control_backtest_playback_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    payload: BacktestPlaybackControl,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Control runtime backtest playback: pause, resume, speed, or step."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    try:
+        return backtest_runner_service.control_backtest_playback(
+            backtest.id,
+            payload.model_dump(exclude_none=True),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
 @router.post("/{strategy_id}/backtests/{backtest_id}/stop")
