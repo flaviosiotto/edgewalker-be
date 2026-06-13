@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
-import uuid
-
 import logging
+import re
+import uuid
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 from fastapi import HTTPException, status
@@ -38,6 +38,47 @@ if TYPE_CHECKING:
     from sqlmodel import Session
 
 logger = logging.getLogger(__name__)
+
+_INDICATOR_OUTPUT_NAME_MAP = {
+    "upperband": "upper",
+    "middleband": "middle",
+    "lowerband": "lower",
+    "macdsignal": "signal",
+    "macdhist": "histogram",
+}
+
+_INDICATOR_FIELD_PATTERN = re.compile(
+    r"\b(?P<namespace>prev_indicators|indicators)\."
+    r"(?P<name>[A-Za-z0-9_-]+)\."
+    r"(?P<output>upperband|middleband|lowerband|macdsignal|macdhist)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_indicator_field_reference(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        output = match.group("output").lower()
+        mapped_output = _INDICATOR_OUTPUT_NAME_MAP.get(output)
+        if not mapped_output:
+            return match.group(0)
+        return f"{match.group('namespace')}.{match.group('name')}.{mapped_output}"
+
+    return _INDICATOR_FIELD_PATTERN.sub(replace, value)
+
+
+def _normalize_strategy_indicator_field_references(value: Any) -> Any:
+    if isinstance(value, str):
+        return _normalize_indicator_field_reference(value)
+    if isinstance(value, list):
+        items = cast(list[Any], value)
+        return [_normalize_strategy_indicator_field_references(item) for item in items]
+    if isinstance(value, dict):
+        mapping = cast(dict[str, Any], value)
+        return {
+            key: _normalize_strategy_indicator_field_references(item)
+            for key, item in mapping.items()
+        }
+    return value
 
 
 def _get_owned_agent(session: Session, agent_id: int, user_id: int | None = None) -> Agent:
@@ -158,7 +199,7 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
         user_id=user_id,
         name=name,
         description=payload.description,
-        definition=payload.definition,
+        definition=_normalize_strategy_indicator_field_references(payload.definition),
         manager_agent_id=payload.manager_agent_id,
         connection_id=payload.connection_id,
         created_at=now,
@@ -219,7 +260,7 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
         strategy.description = payload.description
 
     if payload.definition is not None:
-        strategy.definition = payload.definition
+        strategy.definition = _normalize_strategy_indicator_field_references(payload.definition)
 
     if payload.layout_config is not None:
         strategy.layout_config = payload.layout_config
@@ -280,6 +321,10 @@ def create_backtest(
     if payload.agent_id is not None:
         _get_owned_agent(session, payload.agent_id, strategy.user_id)
     
+    config_snapshot = _normalize_strategy_indicator_field_references(
+        payload.config if payload.config else strategy.definition
+    )
+
     backtest = BacktestResult(
         strategy_id=strategy_id,
         agent_id=payload.agent_id,
@@ -303,7 +348,7 @@ def create_backtest(
         # Additional config overrides
         parameters=payload.parameters,
         # Strategy configuration snapshot (explicit override or auto-capture)
-        config=payload.config if payload.config else strategy.definition,
+        config=config_snapshot,
         # UI layout config (timezone, extended hours, etc.)
         layout_config=payload.layout_config,
         status=BacktestStatus.PENDING.value,
@@ -398,11 +443,20 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
                     },
                 )
 
+        raw_strategy_config = backtest.config or strategy.definition
+        strategy_config = _normalize_strategy_indicator_field_references(raw_strategy_config)
+        if strategy_config != raw_strategy_config:
+            backtest.config = strategy_config
+            logger.info(
+                "Normalized legacy indicator output names in backtest %d config before runner start",
+                backtest.id,
+            )
+
         result = backtest_runner_service.start_backtest(
             backtest_id=backtest.id,
             connection_id=connection_id,
             strategy_id=backtest.strategy_id,
-            strategy_config=backtest.config or strategy.definition,
+            strategy_config=strategy_config,
             symbol=backtest.symbol,
             timeframe=backtest.timeframe or "5m",
             manager_webhook_url=manager_webhook_url,

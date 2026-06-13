@@ -140,7 +140,7 @@ def list_available_indicators(
     - **overlay**: Whether it should overlay on price chart (vs separate panel)
     - **inputs**: Required input data types (e.g., close, high/low/close)
     - **parameters**: Configurable parameters with types, defaults, and constraints
-    - **outputs**: List of output names (e.g., ['macd', 'signal', 'hist'] for MACD)
+    - **outputs**: List of output names (e.g., ['macd', 'signal', 'histogram'] for MACD)
     
     **Groups:**
     - Cycle Indicators

@@ -272,14 +272,18 @@ def _get_talib_indicator_info(func_name: str) -> dict[str, Any] | None:
         outputs = []
         output_types = {}
         for output_name, flags in output_flags.items():
-            outputs.append(output_name)
+            mapped_name = OUTPUT_NAME_MAP.get(output_name, output_name)
+            outputs.append(mapped_name)
             if flags:
-                output_types[output_name] = OUTPUT_TYPE_MAP.get(flags[0], "line")
+                output_types[mapped_name] = OUTPUT_TYPE_MAP.get(flags[0], "line")
             else:
-                output_types[output_name] = "line"
+                output_types[mapped_name] = "line"
         
         if not outputs:
-            outputs = info.get("output_names", ["value"])
+            outputs = [
+                OUTPUT_NAME_MAP.get(output_name, output_name)
+                for output_name in info.get("output_names", ["value"])
+            ]
         
         # Determine if this overlays on price
         group = info.get("group", "Other")
