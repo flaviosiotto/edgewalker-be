@@ -373,6 +373,54 @@ class BacktestRunnerService:
         except Exception as exc:
             raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
 
+    def list_backtest_orders(self, backtest_id: int, *, active_only: bool = False) -> dict[str, Any]:
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/orders")
+                if resp.status_code == 404:
+                    return {"orders": []}
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest orders fetch failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
+
+        if isinstance(data, dict):
+            raw_orders = data.get("orders") or []
+        elif isinstance(data, list):
+            raw_orders = data
+        else:
+            raw_orders = []
+        orders = list(raw_orders)
+        if active_only:
+            active_statuses = {"pending", "submitted", "partially_filled"}
+            orders = [order for order in orders if str(order.get("status") or "").lower() in active_statuses]
+        return {"orders": orders}
+
+    def get_backtest_position(self, backtest_id: int) -> dict[str, Any]:
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/positions")
+                if resp.status_code == 404:
+                    return {"side": "flat", "quantity": 0}
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest position fetch failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
+
     def _create_redis_client(self):
         import redis as sync_redis
 

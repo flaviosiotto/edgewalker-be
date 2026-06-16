@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -234,6 +234,41 @@ def get_backtest_runtime_status_endpoint(
         if strategy.connection_id is not None:
             service_status.setdefault("connection_id", str(strategy.connection_id))
     return status_payload
+
+
+@router.get("/{strategy_id}/backtests/{backtest_id}/runtime/orders")
+def get_backtest_runtime_orders_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    active_only: bool = Query(default=False),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List source-of-truth simulated orders recorded by strategy-backtest."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    try:
+        return backtest_runner_service.list_backtest_orders(backtest.id, active_only=active_only)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.get("/{strategy_id}/backtests/{backtest_id}/runtime/positions")
+def get_backtest_runtime_positions_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Get source-of-truth simulated position recorded by strategy-backtest."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    try:
+        return backtest_runner_service.get_backtest_position(backtest.id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
 @router.get("/{strategy_id}/backtests/{backtest_id}/logs")
