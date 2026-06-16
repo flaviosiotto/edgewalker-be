@@ -229,6 +229,7 @@ class BacktestRunnerService:
             "traefik.enable": "true",
             f"traefik.http.routers.backtest-runner-{backtest_id}.rule": f"PathPrefix(`{runner_prefix}`)",
             f"traefik.http.routers.backtest-runner-{backtest_id}.priority": "200",
+            f"traefik.http.routers.backtest-runner-{backtest_id}.service": f"backtest-runner-{backtest_id}",
             f"traefik.http.middlewares.backtest-runner-{backtest_id}-strip.stripprefix.prefixes": runner_prefix,
             f"traefik.http.middlewares.backtest-runner-{backtest_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
             f"traefik.http.middlewares.backtest-runner-{backtest_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",

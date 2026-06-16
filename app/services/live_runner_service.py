@@ -352,6 +352,7 @@ class LiveRunnerService:
             "traefik.enable": "true",
             f"traefik.http.routers.live-runner-{live_id}.rule": f"PathPrefix(`{live_runner_prefix}`)",
             f"traefik.http.routers.live-runner-{live_id}.priority": "200",
+            f"traefik.http.routers.live-runner-{live_id}.service": f"live-runner-{live_id}",
             f"traefik.http.middlewares.live-runner-{live_id}-strip.stripprefix.prefixes": live_runner_prefix,
             f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
             f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
@@ -362,6 +363,7 @@ class LiveRunnerService:
             f"traefik.http.services.live-runner-{live_id}.loadbalancer.server.port": "8080",
             f"traefik.http.routers.runner-{stream_id}.rule": f"PathPrefix(`{runner_prefix}`)",
             f"traefik.http.routers.runner-{stream_id}.priority": "200",
+            f"traefik.http.routers.runner-{stream_id}.service": f"runner-{stream_id}",
             f"traefik.http.middlewares.runner-{stream_id}-strip.stripprefix.prefixes": runner_prefix,
             f"traefik.http.middlewares.runner-{stream_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
             f"traefik.http.middlewares.runner-{stream_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
@@ -389,6 +391,7 @@ class LiveRunnerService:
             labels.update({
                 f"traefik.http.routers.runner-{strategy_id}.rule": f"PathPrefix(`{legacy_runner_prefix}`)",
                 f"traefik.http.routers.runner-{strategy_id}.priority": "200",
+                f"traefik.http.routers.runner-{strategy_id}.service": f"runner-{strategy_id}",
                 f"traefik.http.middlewares.runner-{strategy_id}-strip.stripprefix.prefixes": legacy_runner_prefix,
                 f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
                 f"traefik.http.middlewares.runner-{strategy_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
