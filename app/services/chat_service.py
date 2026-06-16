@@ -18,9 +18,10 @@ from app.schemas.chat import ChatHistoryMessageRead, ChatHistoryPage, ChatSendMe
 from app.services.live_runner_service import _rewrite_webhook_for_docker
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
+    build_n8n_backend_api_metadata,
+    build_n8n_runner_api_metadata,
     build_n8n_webhook_auth_headers,
     issue_n8n_api_access_token,
-    build_n8n_backend_api_metadata,
     issue_n8n_webhook_auth_token,
 )
 
@@ -95,6 +96,49 @@ def _chat_session_id(chat: Chat) -> str:
     )
 
 
+def _build_chat_api_auth_metadata(
+    session: Session,
+    *,
+    chat: Chat,
+    agent: Agent,
+    session_id: str,
+    purpose: str,
+) -> dict[str, Any]:
+    runner_api_metadata = build_n8n_runner_api_metadata(
+        session,
+        user_id=chat.user_id,
+        chat_id=chat.id,
+        strategy_id=chat.strategy_id,
+        extra_claims={
+            "agent_id": agent.id_agent,
+            "chat_id": chat.id,
+            "session_id": session_id,
+        },
+    )
+    if runner_api_metadata is not None:
+        return runner_api_metadata
+
+    api_auth_token, api_auth_expires_at = issue_n8n_api_access_token(
+        session,
+        user_id=chat.user_id,
+        purpose=purpose,
+        extra_claims={
+            "agent_id": agent.id_agent,
+            "chat_id": chat.id,
+            "session_id": session_id,
+        },
+    )
+    return build_n8n_api_auth_metadata(
+        user_id=chat.user_id,
+        purpose=purpose,
+        token=api_auth_token,
+        expires_at=api_auth_expires_at,
+        backend_api=build_n8n_backend_api_metadata(
+            session, user_id=chat.user_id, chat_id=chat.id, strategy_id=chat.strategy_id,
+        ),
+    )
+
+
 def _build_webhook_payload(
     chat: Chat,
     *,
@@ -135,6 +179,7 @@ def _build_webhook_payload(
             "account_id",
             "live_id",
             "strategy_id",
+            "stream_id",
         ):
             value = merged_api_auth_metadata.get(ctx_key)
             if value is None:
@@ -410,24 +455,12 @@ def send_chat_message(
             "session_id": session_id,
         },
     )
-    api_auth_token, api_auth_expires_at = issue_n8n_api_access_token(
+    api_auth_metadata = _build_chat_api_auth_metadata(
         session,
-        user_id=chat.user_id,
+        chat=chat,
+        agent=agent,
+        session_id=session_id,
         purpose="n8n_chat_api_access",
-        extra_claims={
-            "agent_id": agent.id_agent,
-            "chat_id": chat.id,
-            "session_id": session_id,
-        },
-    )
-    api_auth_metadata = build_n8n_api_auth_metadata(
-        user_id=chat.user_id,
-        purpose="n8n_chat_api_access",
-        token=api_auth_token,
-        expires_at=api_auth_expires_at,
-        backend_api=build_n8n_backend_api_metadata(
-            session, user_id=chat.user_id, chat_id=chat.id,
-        ),
     )
     webhook_payload = _build_webhook_payload(
         chat,
@@ -617,24 +650,12 @@ async def stream_chat_message(
             "session_id": session_id,
         },
     )
-    api_auth_token, api_auth_expires_at = issue_n8n_api_access_token(
+    api_auth_metadata = _build_chat_api_auth_metadata(
         session,
-        user_id=chat.user_id,
+        chat=chat,
+        agent=agent,
+        session_id=session_id,
         purpose="n8n_chat_api_access",
-        extra_claims={
-            "agent_id": agent.id_agent,
-            "chat_id": chat.id,
-            "session_id": session_id,
-        },
-    )
-    api_auth_metadata = build_n8n_api_auth_metadata(
-        user_id=chat.user_id,
-        purpose="n8n_chat_api_access",
-        token=api_auth_token,
-        expires_at=api_auth_expires_at,
-        backend_api=build_n8n_backend_api_metadata(
-            session, user_id=chat.user_id, chat_id=chat.id,
-        ),
     )
     webhook_payload = _build_webhook_payload(
         chat,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -136,6 +137,26 @@ def build_n8n_api_auth_metadata(
 
 
 _DEFAULT_N8N_CONSULTATIVE_SCOPES = ["accounts:read", "account_orders:read"]
+_DEFAULT_N8N_RUNNER_SCOPES = [
+    "runner:read",
+    "runner:orders:write",
+    "runner:alerts:write",
+    "runner:decision:write",
+]
+
+
+def _normalize_root_path(value: str | None) -> str:
+    raw = (value or "").strip().strip("/")
+    return f"/{raw}" if raw else ""
+
+
+def _public_runner_base_url(stream_id: str) -> str:
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    api_root_path = _normalize_root_path(os.getenv("API_ROOT_PATH", settings.API_ROOT_PATH))
+    runner_path = f"{api_root_path}/runners/{stream_id}" if api_root_path else f"/runners/{stream_id}"
+    if public_base_url:
+        return f"{public_base_url}{runner_path}"
+    return runner_path
 
 
 def _resolve_active_strategy_live(
@@ -166,6 +187,62 @@ def _resolve_active_strategy_live(
     return None
 
 
+def _resolve_runner_strategy_live(
+    session: Session,
+    *,
+    chat_id: int | None,
+    strategy_id: int | None,
+) -> StrategyLive | None:
+    if chat_id is not None:
+        return session.exec(
+            select(StrategyLive)
+            .where(StrategyLive.chat_id == chat_id)
+            .where(StrategyLive.status != LiveStatus.STOPPED.value)
+            .order_by(StrategyLive.id.desc())
+        ).first()
+    return _resolve_active_strategy_live(
+        session, chat_id=None, strategy_id=strategy_id
+    )
+
+
+def _build_backend_api_metadata_for_live(
+    session: Session,
+    *,
+    user_id: int,
+    live: StrategyLive,
+) -> dict[str, Any]:
+    token = create_user_delegated_token(
+        session,
+        user_id=user_id,
+        audience=settings.AGENT_TOKEN_AUDIENCE,
+        purpose="agent_backend_consult",
+        no_expiry=True,
+        extra_claims={
+            "strategy_id": live.strategy_id,
+            "live_id": live.id,
+            "connection_id": live.connection_id,
+            "account_id": live.account_id,
+            "scopes": list(_DEFAULT_N8N_CONSULTATIVE_SCOPES),
+        },
+    )
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "audience": settings.AGENT_TOKEN_AUDIENCE,
+        "purpose": "agent_backend_consult",
+        "scopes": list(_DEFAULT_N8N_CONSULTATIVE_SCOPES),
+        "account_id": live.account_id,
+        "connection_id": live.connection_id,
+        "live_id": live.id,
+        "strategy_id": live.strategy_id,
+        "paths": {
+            "accounts": "/accounts",
+            "account": f"/accounts/{live.account_id}" if live.account_id else None,
+            "account_orders": f"/accounts/{live.account_id}/orders" if live.account_id else None,
+        },
+    }
+
+
 def build_n8n_backend_api_metadata(
     session: Session,
     *,
@@ -190,33 +267,65 @@ def build_n8n_backend_api_metadata(
     if sl is None:
         return None
 
+    return _build_backend_api_metadata_for_live(session, user_id=user_id, live=sl)
+
+
+def build_n8n_runner_api_metadata(
+    session: Session,
+    *,
+    user_id: int | None,
+    chat_id: int | None = None,
+    strategy_id: int | None = None,
+    extra_claims: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Issue runner callback metadata for an agent chat bound to a live session."""
+    if user_id is None:
+        return None
+
+    sl = _resolve_runner_strategy_live(
+        session, chat_id=chat_id, strategy_id=strategy_id
+    )
+    if sl is None:
+        return None
+
+    stream_id = f"strategy-{sl.id}"
+    expires_at = datetime.now(timezone.utc) + timedelta(days=365)
+    token_claims: dict[str, Any] = {
+        "strategy_id": sl.strategy_id,
+        "live_id": sl.id,
+        "stream_id": stream_id,
+        "connection_id": sl.connection_id,
+        "account_id": sl.account_id,
+        "scopes": list(_DEFAULT_N8N_RUNNER_SCOPES),
+    }
+    if extra_claims:
+        token_claims.update(
+            {key: value for key, value in extra_claims.items() if value is not None}
+        )
+
     token = create_user_delegated_token(
         session,
         user_id=user_id,
         audience=settings.AGENT_TOKEN_AUDIENCE,
-        purpose="agent_backend_consult",
+        purpose="agent_runner_callback",
         no_expiry=True,
-        extra_claims={
-            "strategy_id": sl.strategy_id,
-            "live_id": sl.id,
-            "connection_id": sl.connection_id,
-            "account_id": sl.account_id,
-            "scopes": list(_DEFAULT_N8N_CONSULTATIVE_SCOPES),
-        },
+        extra_claims=token_claims,
     )
     return {
+        "mode": "authorization_header",
+        "scheme": "Bearer",
+        "auth_mode": "runner_callback_token",
         "token": token,
         "token_type": "Bearer",
+        "expires_at": expires_at.isoformat(),
         "audience": settings.AGENT_TOKEN_AUDIENCE,
-        "purpose": "agent_backend_consult",
-        "scopes": list(_DEFAULT_N8N_CONSULTATIVE_SCOPES),
-        "account_id": sl.account_id,
-        "connection_id": sl.connection_id,
+        "purpose": "agent_runner_callback",
+        "scopes": list(_DEFAULT_N8N_RUNNER_SCOPES),
+        "runner_base_url": _public_runner_base_url(stream_id),
+        "stream_id": stream_id,
         "live_id": sl.id,
         "strategy_id": sl.strategy_id,
-        "paths": {
-            "accounts": "/accounts",
-            "account": f"/accounts/{sl.account_id}" if sl.account_id else None,
-            "account_orders": f"/accounts/{sl.account_id}/orders" if sl.account_id else None,
-        },
+        "connection_id": sl.connection_id,
+        "account_id": sl.account_id,
+        "backend_api": _build_backend_api_metadata_for_live(session, user_id=user_id, live=sl),
     }
