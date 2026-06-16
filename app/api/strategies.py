@@ -271,6 +271,40 @@ def get_backtest_runtime_positions_endpoint(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
+@router.get("/{strategy_id}/backtests/{backtest_id}/runtime/trades")
+def get_backtest_runtime_trades_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List source-of-truth closed trades computed from the runtime backtest ledger."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    try:
+        return backtest_runner_service.list_backtest_trades(backtest.id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.get("/{strategy_id}/backtests/{backtest_id}/runtime/equity")
+def get_backtest_runtime_equity_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List runtime equity snapshots recorded by strategy-backtest."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    try:
+        return backtest_runner_service.list_backtest_equity(backtest.id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
 @router.get("/{strategy_id}/backtests/{backtest_id}/logs")
 def get_backtest_logs_endpoint(
     strategy_id: int,

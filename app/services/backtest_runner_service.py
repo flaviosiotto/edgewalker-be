@@ -421,6 +421,58 @@ class BacktestRunnerService:
         except Exception as exc:
             raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
 
+    def list_backtest_trades(self, backtest_id: int) -> dict[str, Any]:
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/trades")
+                if resp.status_code == 404:
+                    return {"trades": []}
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest trades fetch failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
+
+        if isinstance(data, dict):
+            raw_trades = data.get("trades") or []
+        elif isinstance(data, list):
+            raw_trades = data
+        else:
+            raw_trades = []
+        return {"trades": list(raw_trades)}
+
+    def list_backtest_equity(self, backtest_id: int) -> dict[str, Any]:
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/equity")
+                if resp.status_code == 404:
+                    return {"equity": []}
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest equity fetch failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
+
+        if isinstance(data, dict):
+            raw_equity = data.get("equity") or []
+        elif isinstance(data, list):
+            raw_equity = data
+        else:
+            raw_equity = []
+        return {"equity": list(raw_equity)}
+
     def _create_redis_client(self):
         import redis as sync_redis
 
