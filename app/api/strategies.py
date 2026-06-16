@@ -43,7 +43,9 @@ from app.services.strategy_service import (
     update_strategy_layout,
     update_backtest_layout,
 )
-from app.utils.auth_utils import get_current_active_user
+from app.utils.auth_utils import (
+    get_current_active_user,
+)
 
 router = APIRouter(prefix="/strategies", tags=["Strategies"])
 

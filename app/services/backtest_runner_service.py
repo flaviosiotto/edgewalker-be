@@ -44,6 +44,28 @@ RUNNER_CORS_ALLOWED_ORIGINS = os.getenv(
     os.getenv("BACKEND_CORS_ORIGINS", ""),
 )
 RUNNER_CORS_ALLOW_CREDENTIALS = os.getenv("RUNNER_CORS_ALLOW_CREDENTIALS", "true")
+RUNNER_TRAEFIK_ENTRYPOINTS = os.getenv("RUNNER_TRAEFIK_ENTRYPOINTS", "").strip()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+
+
+def _normalize_root_path(value: str | None) -> str:
+    if not value or value == "/":
+        return ""
+
+    normalized = value.strip()
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized.rstrip("/")
+
+
+API_ROOT_PATH = _normalize_root_path(os.getenv("API_ROOT_PATH", "/api"))
+
+
+def _public_runner_route(*segments: str) -> str:
+    suffix = "/".join(segment.strip("/") for segment in segments if segment)
+    if not suffix:
+        return API_ROOT_PATH or "/"
+    return f"{API_ROOT_PATH}/{suffix}" if API_ROOT_PATH else f"/{suffix}"
 
 
 def _docker_runtime_requirements() -> str:
@@ -145,6 +167,8 @@ class BacktestRunnerService:
             existing.remove(force=True)
 
         stream_id = f"backtest-{backtest_id}"
+        runner_prefix = _public_runner_route("runners", stream_id)
+        backend_url = os.getenv("BACKEND_URL", "http://backend:8000")
         env: dict[str, str] = {
             "BACKTEST_MODE": "true",
             "BACKTEST_ID": str(backtest_id),
@@ -167,14 +191,15 @@ class BacktestRunnerService:
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
             "PYTHONPATH": "/app",
             "RUNNER_INTERNAL_URL": f"http://{container_name}:8080",
-            "BACKEND_URL": os.getenv("BACKEND_URL", "http://backend:8000"),
+            "BACKEND_URL": backend_url,
+            "RUNNER_AGENT_TOKEN_URL": f"{backend_url}/runners/agent-token",
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
             "ALGORITHM": os.getenv("ALGORITHM", "RS256"),
             "JWT_ISSUER": os.getenv("JWT_ISSUER", "edgewalker-backend"),
             "JWT_PUBLIC_KEY_PATH": os.getenv("JWT_PUBLIC_KEY_PATH", "/run/secrets/edgewalker-jwt/public.pem"),
             "ACCESS_TOKEN_AUDIENCE": os.getenv("ACCESS_TOKEN_AUDIENCE", "edgewalker-ui"),
-            "AGENT_TOKEN_AUDIENCE": os.getenv("RUNNER_TOKEN_AUDIENCE", "edgewalker-runner"),
-            "AGENT_TOKEN_ALLOWED_PURPOSES": "runner_backend,agent_runner_callback",
+            "RUNNER_TOKEN_AUDIENCE": os.getenv("RUNNER_TOKEN_AUDIENCE", "edgewalker-runner"),
+            "AGENT_TOKEN_AUDIENCE": os.getenv("AGENT_TOKEN_AUDIENCE", "edgewalker-agent"),
             "CORS_ALLOWED_ORIGINS": RUNNER_CORS_ALLOWED_ORIGINS,
             "CORS_ALLOW_CREDENTIALS": RUNNER_CORS_ALLOW_CREDENTIALS,
             "BROKER_SYNC_ENABLED": "false",
@@ -183,6 +208,8 @@ class BacktestRunnerService:
             "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"),
             "OTEL_SERVICE_NAME": f"strategy-runner-backtest-{backtest_id}",
         }
+        if PUBLIC_BASE_URL:
+            env["RUNNER_PUBLIC_BASE_URL"] = f"{PUBLIC_BASE_URL}{runner_prefix}"
         if REDIS_URL:
             env["REDIS_URL"] = REDIS_URL
         if REDIS_USERNAME:
@@ -199,6 +226,17 @@ class BacktestRunnerService:
             env["MANAGER_CHAT_SESSION_ID"] = manager_chat_session_id
 
         labels = {
+            "traefik.enable": "true",
+            f"traefik.http.routers.backtest-runner-{backtest_id}.rule": f"PathPrefix(`{runner_prefix}`)",
+            f"traefik.http.routers.backtest-runner-{backtest_id}.priority": "200",
+            f"traefik.http.middlewares.backtest-runner-{backtest_id}-strip.stripprefix.prefixes": runner_prefix,
+            f"traefik.http.middlewares.backtest-runner-{backtest_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
+            f"traefik.http.middlewares.backtest-runner-{backtest_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+            f"traefik.http.middlewares.backtest-runner-{backtest_id}-cors.headers.accesscontrolallowheaders": "*",
+            f"traefik.http.middlewares.backtest-runner-{backtest_id}-cors.headers.accesscontrolallowcredentials": RUNNER_CORS_ALLOW_CREDENTIALS.lower(),
+            f"traefik.http.middlewares.backtest-runner-{backtest_id}-cors.headers.addvaryheader": "true",
+            f"traefik.http.routers.backtest-runner-{backtest_id}.middlewares": f"backtest-runner-{backtest_id}-strip,backtest-runner-{backtest_id}-cors",
+            f"traefik.http.services.backtest-runner-{backtest_id}.loadbalancer.server.port": "8080",
             "edgewalker.type": "strategy-runner-backtest",
             "edgewalker.backtest_id": str(backtest_id),
             "edgewalker.strategy_id": str(strategy_id),
@@ -207,6 +245,8 @@ class BacktestRunnerService:
         }
         if TRAEFIK_DOCKER_NETWORK:
             labels["traefik.docker.network"] = TRAEFIK_DOCKER_NETWORK
+        if RUNNER_TRAEFIK_ENTRYPOINTS:
+            labels[f"traefik.http.routers.backtest-runner-{backtest_id}.entrypoints"] = RUNNER_TRAEFIK_ENTRYPOINTS
 
         volumes = {
             f"{EDGEWALKER_PATH}/strategies": {"bind": "/opt/edgewalker/strategies", "mode": "ro"},

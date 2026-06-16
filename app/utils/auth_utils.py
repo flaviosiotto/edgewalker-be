@@ -8,7 +8,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
 
 from app.core.config import settings
-from app.models.strategy import LiveStatus, StrategyLive
+from app.models.strategy import BacktestResult, BacktestStatus, LiveStatus, Strategy, StrategyLive
 from app.models.user import User
 from app.db.database import get_session
 
@@ -241,18 +241,37 @@ async def get_current_runner_principal(
     )
 
     runner_live_id = principal.claims.get("live_id")
-    if runner_live_id is None:
-        raise _credentials_exception("Runner token is missing live session binding")
-
-    strategy_live = session.get(StrategyLive, runner_live_id)
-    if strategy_live is None:
-        raise _credentials_exception("Runner live session not found")
-
-    if strategy_live.status == LiveStatus.STOPPED.value:
-        raise _credentials_exception("Runner live session is no longer active")
-
+    runner_backtest_id = principal.claims.get("backtest_id")
     runner_strategy_id = principal.claims.get("strategy_id")
-    if runner_strategy_id is not None and str(runner_strategy_id) != str(strategy_live.strategy_id):
+
+    if runner_live_id is not None:
+        strategy_live = session.get(StrategyLive, runner_live_id)
+        if strategy_live is None:
+            raise _credentials_exception("Runner live session not found")
+
+        if strategy_live.status == LiveStatus.STOPPED.value:
+            raise _credentials_exception("Runner live session is no longer active")
+
+        if runner_strategy_id is not None and str(runner_strategy_id) != str(strategy_live.strategy_id):
+            raise _credentials_exception("Runner token does not match this strategy")
+
+        return principal
+
+    if runner_backtest_id is None:
+        raise _credentials_exception("Runner token is missing live or backtest binding")
+
+    backtest = session.get(BacktestResult, runner_backtest_id)
+    if backtest is None:
+        raise _credentials_exception("Runner backtest not found")
+
+    if backtest.status not in {BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value}:
+        raise _credentials_exception("Runner backtest is no longer active")
+
+    strategy = session.get(Strategy, backtest.strategy_id)
+    if strategy is None or strategy.user_id != principal.user.id:
+        raise _credentials_exception("Runner token does not match this backtest owner")
+
+    if runner_strategy_id is not None and str(runner_strategy_id) != str(backtest.strategy_id):
         raise _credentials_exception("Runner token does not match this strategy")
 
     return principal

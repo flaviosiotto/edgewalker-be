@@ -264,6 +264,11 @@ class LiveRunnerService:
         conn_id = str(account_config["connection_id"]) if account_config and "connection_id" in account_config else ""
         conn_suffix = f":{conn_id}" if conn_id else ""
         
+        stream_id = f"strategy-{live_id}"
+        live_runner_prefix = _public_runner_route("live", "instances", str(live_id), "runner")
+        runner_prefix = _public_runner_route("runners", stream_id)
+        backend_url = os.getenv("BACKEND_URL", "http://backend:8000")
+
         env = {
             "REDIS_HOST": REDIS_HOST,
             "REDIS_PORT": REDIS_PORT,
@@ -282,11 +287,13 @@ class LiveRunnerService:
             "PYTHONPATH": "/app",
             "RUNNER_INTERNAL_URL": f"http://{container_name}:8080",
             # Backend API URL for manager agent notifications
-            "BACKEND_URL": os.getenv("BACKEND_URL", "http://backend:8000"),
+            "BACKEND_URL": backend_url,
+            "RUNNER_AGENT_TOKEN_URL": f"{backend_url}/runners/agent-token",
             "ALGORITHM": os.getenv("ALGORITHM", "RS256"),
             "JWT_ISSUER": os.getenv("JWT_ISSUER", "edgewalker-backend"),
             "JWT_PUBLIC_KEY_PATH": os.getenv("JWT_PUBLIC_KEY_PATH", "/run/secrets/edgewalker-jwt/public.pem"),
             "ACCESS_TOKEN_AUDIENCE": os.getenv("ACCESS_TOKEN_AUDIENCE", "edgewalker-ui"),
+            "RUNNER_TOKEN_AUDIENCE": os.getenv("RUNNER_TOKEN_AUDIENCE", "edgewalker-runner"),
             "AGENT_TOKEN_AUDIENCE": os.getenv("AGENT_TOKEN_AUDIENCE", "edgewalker-agent"),
             # Database URL for direct order/position persistence + config loading
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
@@ -309,10 +316,7 @@ class LiveRunnerService:
             env["BACKEND_AUTH_TOKEN"] = backend_auth_token
 
         if PUBLIC_BASE_URL:
-            env["RUNNER_PUBLIC_BASE_URL"] = (
-                f"{PUBLIC_BASE_URL}"
-                f"{_public_runner_route('live', 'instances', str(live_id), 'runner')}"
-            )
+            env["RUNNER_PUBLIC_BASE_URL"] = f"{PUBLIC_BASE_URL}{runner_prefix}"
 
         # Manager agent webhook (so the runner can call the agent directly)
         if manager_webhook_url:
@@ -344,8 +348,6 @@ class LiveRunnerService:
         # Traefik labels for routing
         # Route: /api/live/instances/{live_id}/runner/* -> container:8080
         # Priority must be higher than the backend's generic /api route
-        live_runner_prefix = _public_runner_route("live", "instances", str(live_id), "runner")
-
         labels = {
             "traefik.enable": "true",
             f"traefik.http.routers.live-runner-{live_id}.rule": f"PathPrefix(`{live_runner_prefix}`)",
@@ -358,17 +360,29 @@ class LiveRunnerService:
             f"traefik.http.middlewares.live-runner-{live_id}-cors.headers.addvaryheader": "true",
             f"traefik.http.routers.live-runner-{live_id}.middlewares": f"live-runner-{live_id}-strip,live-runner-{live_id}-cors",
             f"traefik.http.services.live-runner-{live_id}.loadbalancer.server.port": "8080",
+            f"traefik.http.routers.runner-{stream_id}.rule": f"PathPrefix(`{runner_prefix}`)",
+            f"traefik.http.routers.runner-{stream_id}.priority": "200",
+            f"traefik.http.middlewares.runner-{stream_id}-strip.stripprefix.prefixes": runner_prefix,
+            f"traefik.http.middlewares.runner-{stream_id}-cors.headers.accesscontrolalloworiginlist": RUNNER_CORS_ALLOWED_ORIGINS,
+            f"traefik.http.middlewares.runner-{stream_id}-cors.headers.accesscontrolallowmethods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+            f"traefik.http.middlewares.runner-{stream_id}-cors.headers.accesscontrolallowheaders": "*",
+            f"traefik.http.middlewares.runner-{stream_id}-cors.headers.accesscontrolallowcredentials": str(RUNNER_CORS_ALLOW_CREDENTIALS).lower(),
+            f"traefik.http.middlewares.runner-{stream_id}-cors.headers.addvaryheader": "true",
+            f"traefik.http.routers.runner-{stream_id}.middlewares": f"runner-{stream_id}-strip,runner-{stream_id}-cors",
+            f"traefik.http.services.runner-{stream_id}.loadbalancer.server.port": "8080",
             # Custom labels for identification
             "edgewalker.type": "strategy-runner",
             "edgewalker.strategy_id": str(strategy_id),
             "edgewalker.live_id": str(live_id),
             "edgewalker.symbol": symbol,
+            "edgewalker.stream_id": stream_id,
         }
 
         if TRAEFIK_DOCKER_NETWORK:
             labels["traefik.docker.network"] = TRAEFIK_DOCKER_NETWORK
         if RUNNER_TRAEFIK_ENTRYPOINTS:
             labels[f"traefik.http.routers.live-runner-{live_id}.entrypoints"] = RUNNER_TRAEFIK_ENTRYPOINTS
+            labels[f"traefik.http.routers.runner-{stream_id}.entrypoints"] = RUNNER_TRAEFIK_ENTRYPOINTS
 
         if legacy_strategy_route:
             legacy_runner_prefix = _public_runner_route("runners", str(strategy_id))
