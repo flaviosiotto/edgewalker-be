@@ -14,6 +14,7 @@ from app.schemas.strategy import (
     BacktestRead,
     BacktestUpdate,
     BacktestPlaybackControl,
+    BacktestRuntimeOrderRequest,
     TradeRead,
     RuleTriggerRequest,
     RuleTriggerResponse,
@@ -250,6 +251,57 @@ def get_backtest_runtime_orders_endpoint(
     backtest = get_backtest(session, backtest_id, current_user.id)
     try:
         return backtest_runner_service.list_backtest_orders(backtest.id, active_only=active_only)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.post("/{strategy_id}/backtests/{backtest_id}/runtime/orders")
+def submit_backtest_runtime_order_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    payload: BacktestRuntimeOrderRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Submit a manual order to the source-of-truth strategy-backtest ledger."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    order_payload = payload.model_dump(exclude_none=True)
+    extra = dict(order_payload.get("extra") or {})
+    extra.setdefault("reason", "manual_backtest_order")
+    extra.setdefault("source", "backtest_detail_ui")
+    extra.setdefault("strategy_id", strategy_id)
+    extra.setdefault("backtest_id", backtest.id)
+    order_payload["extra"] = extra
+    order_payload.setdefault(
+        "order_ref",
+        f"strategy-{strategy_id}:backtest-{backtest.id}:manual:{int(datetime.now(timezone.utc).timestamp() * 1000)}",
+    )
+    try:
+        return backtest_runner_service.place_backtest_order(backtest.id, order_payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.delete("/{strategy_id}/backtests/{backtest_id}/runtime/orders/{order_id}")
+def cancel_backtest_runtime_order_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    order_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Cancel an order recorded by strategy-backtest when it is still cancellable."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    try:
+        return backtest_runner_service.cancel_backtest_order(
+            backtest.id,
+            order_id,
+            status_message="Cancelled from backtest detail UI",
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 

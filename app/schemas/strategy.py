@@ -222,6 +222,20 @@ class BacktestPlaybackControl(BaseModel):
     steps: Optional[int] = None
 
 
+class BacktestRuntimeOrderRequest(BaseModel):
+    """Manual order command for an active runtime backtest."""
+    symbol: str
+    side: Literal["buy", "sell"]
+    order_type: Literal["market", "limit", "stop"] = "market"
+    quantity: float = 1
+    limit_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    stop_loss_price: Optional[float] = None
+    order_ref: Optional[str] = None
+    extra: Optional[dict[str, Any]] = None
+
+
 # ─── LAYOUT CONFIG SCHEMAS ───
 
 

@@ -403,6 +403,39 @@ class BacktestRunnerService:
             orders = [order for order in orders if str(order.get("status") or "").lower() in active_statuses]
         return {"orders": orders}
 
+    def place_backtest_order(self, backtest_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.post(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/orders", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest order submission failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
+
+    def cancel_backtest_order(self, backtest_id: int, order_id: str, *, status_message: str | None = None) -> dict[str, Any]:
+        params = {"status_message": status_message} if status_message else None
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.delete(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/orders/{order_id}", params=params)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest order cancellation failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
+
     def get_backtest_position(self, backtest_id: int) -> dict[str, Any]:
         try:
             with httpx.Client(timeout=5.0) as client:
