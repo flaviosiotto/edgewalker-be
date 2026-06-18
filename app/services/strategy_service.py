@@ -317,9 +317,10 @@ def create_backtest(
     if source not in allowed_sources:
         source = "ibkr"
     
-    # Validate agent_id if provided
-    if payload.agent_id is not None:
-        _get_owned_agent(session, payload.agent_id, strategy.user_id)
+    # Snapshot the manager agent used by this backtest instance.
+    resolved_agent_id = payload.agent_id if payload.agent_id is not None else strategy.manager_agent_id
+    if resolved_agent_id is not None:
+        _get_owned_agent(session, resolved_agent_id, strategy.user_id)
     
     config_snapshot = _normalize_strategy_indicator_field_references(
         payload.config if payload.config else strategy.definition
@@ -327,7 +328,7 @@ def create_backtest(
 
     backtest = BacktestResult(
         strategy_id=strategy_id,
-        agent_id=payload.agent_id,
+        agent_id=resolved_agent_id,
         # Required parameters
         symbol=payload.symbol,
         start_date=payload.start_date,
@@ -354,6 +355,10 @@ def create_backtest(
         status=BacktestStatus.PENDING.value,
     )
     session.add(backtest)
+    session.flush()
+    chat = _create_backtest_chat(session, strategy, backtest, resolved_agent_id)
+    backtest.chat_id = chat.id
+    session.add(backtest)
     session.commit()
     session.refresh(backtest)
     return backtest
@@ -377,6 +382,77 @@ def get_backtest(session: Session, backtest_id: int, user_id: int | None = None)
     if user_id is not None:
         _ = get_strategy(session, backtest.strategy_id, user_id)
     return backtest
+
+
+def _resolve_backtest_agent_id(strategy: Strategy, backtest: BacktestResult) -> int | None:
+    return backtest.agent_id if backtest.agent_id is not None else strategy.manager_agent_id
+
+
+def _create_backtest_chat(
+    session: Session,
+    strategy: Strategy,
+    backtest: BacktestResult,
+    agent_id: int | None,
+) -> Chat:
+    if backtest.id is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Backtest id is not available",
+        )
+
+    chat = Chat(
+        strategy_id=backtest.strategy_id,
+        user_id=strategy.user_id,
+        id_agent=agent_id,
+        nome=f"Backtest #{backtest.id}",
+        descrizione=f"Chat backtest {backtest.symbol} {backtest.start_date} - {backtest.end_date}",
+        chat_type=Chat.ChatType.BACKTEST,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(chat)
+    session.flush()
+    logger.info("Created Backtest chat (id=%s) for backtest %s", chat.id, backtest.id)
+    return chat
+
+
+def get_or_create_backtest_chat(session: Session, backtest_id: int, user_id: int | None = None) -> Chat:
+    """Get or create the dedicated chat for a single backtest instance."""
+    backtest = get_backtest(session, backtest_id, user_id)
+    strategy = get_strategy(session, backtest.strategy_id, user_id)
+    resolved_agent_id = _resolve_backtest_agent_id(strategy, backtest)
+    if resolved_agent_id is not None:
+        _get_owned_agent(session, resolved_agent_id, strategy.user_id)
+
+    if backtest.chat_id is not None:
+        chat = _load_chat_with_agent(session, backtest.chat_id)
+        changed = False
+        if chat.chat_type != Chat.ChatType.BACKTEST:
+            chat.chat_type = Chat.ChatType.BACKTEST
+            changed = True
+        if chat.strategy_id != backtest.strategy_id:
+            chat.strategy_id = backtest.strategy_id
+            changed = True
+        if chat.id_agent != resolved_agent_id:
+            chat.id_agent = resolved_agent_id
+            changed = True
+        if backtest.agent_id is None and resolved_agent_id is not None:
+            backtest.agent_id = resolved_agent_id
+            session.add(backtest)
+            changed = True
+        if changed:
+            session.add(chat)
+            session.commit()
+            session.refresh(chat)
+        return _load_chat_with_agent(session, chat.id)
+
+    chat = _create_backtest_chat(session, strategy, backtest, resolved_agent_id)
+    backtest.chat_id = chat.id
+    if backtest.agent_id is None and resolved_agent_id is not None:
+        backtest.agent_id = resolved_agent_id
+    session.add(backtest)
+    session.commit()
+    session.refresh(backtest)
+    return _load_chat_with_agent(session, chat.id)
 
 
 def run_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> BacktestResult:
@@ -410,7 +486,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
         )
 
     try:
-        live_chat = get_or_create_live_chat(session, backtest.strategy_id, user_id)
+        backtest_chat = get_or_create_backtest_chat(session, backtest.id, user_id)
         runner_auth_token = create_user_delegated_token(
             session,
             user_id=strategy.user_id,
@@ -425,7 +501,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
         )
         manager_webhook_url: str | None = None
         manager_webhook_auth_token: str | None = None
-        manager_agent_id = resolve_strategy_manager_agent_id(session, backtest.strategy_id, user_id=user_id)
+        manager_agent_id = backtest_chat.id_agent
         if manager_agent_id:
             manager_agent = session.get(Agent, manager_agent_id)
             if manager_agent:
@@ -437,7 +513,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
                     purpose="n8n_runner_webhook",
                     extra_claims={
                         "agent_id": manager_agent.id_agent,
-                        "chat_id": live_chat.id,
+                        "chat_id": backtest_chat.id,
                         "strategy_id": backtest.strategy_id,
                         "backtest_id": backtest.id,
                     },
@@ -462,7 +538,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             manager_webhook_url=manager_webhook_url,
             backend_auth_token=runner_auth_token,
             manager_webhook_auth_token=manager_webhook_auth_token,
-            manager_chat_session_id=_chat_session_id(live_chat),
+            manager_chat_session_id=_chat_session_id(backtest_chat),
             owner_user_id=strategy.user_id,
         )
         logger.info(

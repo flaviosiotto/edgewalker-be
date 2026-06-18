@@ -81,6 +81,7 @@ class Chat(SQLModel, table=True):
         STRATEGY = "strategy"
         GENERIC = "generic"
         LIVE = "live"
+        BACKTEST = "backtest"
 
     chat_type: "Chat.ChatType" = Field(
         sa_column=Column(
@@ -88,7 +89,7 @@ class Chat(SQLModel, table=True):
             nullable=False,
             server_default="user",
         ),
-        description="Tipo chat: user|system|strategy|generic",
+        description="Tipo chat: user|system|strategy|generic|live|backtest",
     )
     created_at: datetime = Field(default_factory=datetime.now, description="Timestamp di creazione")
 

@@ -173,8 +173,7 @@ def _resolve_active_strategy_live(
             .where(StrategyLive.status != LiveStatus.STOPPED.value)
             .order_by(StrategyLive.id.desc())
         ).first()
-        if sl is not None:
-            return sl
+        return sl
     if strategy_id is not None:
         sl = session.exec(
             select(StrategyLive)

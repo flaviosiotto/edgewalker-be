@@ -31,6 +31,7 @@ from app.services.strategy_service import (
     create_backtest,
     list_backtests,
     get_backtest,
+    get_or_create_backtest_chat,
     run_backtest,
     update_backtest,
     delete_backtest,
@@ -152,6 +153,20 @@ def get_backtest_endpoint(
 ):
     """Get backtest details including status and results if completed."""
     return get_backtest(session, backtest_id, current_user.id)
+
+
+@router.get("/{strategy_id}/backtests/{backtest_id}/chat", response_model=ChatRead)
+def get_backtest_chat_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Get or create the dedicated chat for a backtest instance."""
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    if backtest.strategy_id != strategy_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest not found")
+    return get_or_create_backtest_chat(session, backtest_id, current_user.id)
 
 
 @router.post("/{strategy_id}/backtests/{backtest_id}/run", response_model=BacktestRead)

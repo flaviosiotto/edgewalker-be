@@ -133,6 +133,7 @@ class BacktestRead(BaseModel):
     """Full backtest representation including status and results."""
     id: int
     strategy_id: int
+    chat_id: Optional[int] = None
     agent_id: Optional[int] = None
     
     # Input parameters

@@ -369,6 +369,16 @@ class BacktestResult(SQLModel, table=True):
         )
     )
 
+    chat_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("chat.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+
     # Agent that executes this backtest via n8n webhook
     agent_id: Optional[int] = Field(
         default=None,
@@ -458,6 +468,10 @@ class BacktestResult(SQLModel, table=True):
 
     strategy: Strategy | None = Relationship(
         sa_relationship=relationship("Strategy", back_populates="backtests")
+    )
+
+    chat: Optional["Chat"] = Relationship(
+        sa_relationship=relationship("Chat", foreign_keys="[BacktestResult.chat_id]")
     )
 
     agent: "Agent | None" = Relationship(
