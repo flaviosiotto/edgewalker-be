@@ -266,3 +266,15 @@ class GatewayClient:
         params = {"account": account} if account else None
         resp = await self._get("/positions", params=params)
         return resp.get("positions", [])
+
+    async def reread_positions(
+        self,
+        *,
+        account: str | None = None,
+        force_publish: bool = True,
+    ) -> dict:
+        """Trigger a gateway-side positions snapshot reread."""
+        payload: dict[str, Any] = {"force_publish": force_publish}
+        if account:
+            payload["account"] = account
+        return await self._post("/positions/reread", json=payload)

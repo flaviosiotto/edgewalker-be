@@ -55,6 +55,8 @@ class AccountOrdersResetResponse(BaseModel):
     fills_since: datetime | None = None
     fills_published_count: int = 0
     latest_fill_event_at: datetime | None = None
+    positions_count: int = 0
+    position_snapshots_published: int = 0
     message: str | None = None
 
 
@@ -168,6 +170,10 @@ async def reset_account_orders_endpoint(
             account=account.account_id,
             persist_checkpoint=False,
         )
+        position_result = await client.reread_positions(
+            account=account.account_id,
+            force_publish=True,
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -196,8 +202,10 @@ async def reset_account_orders_endpoint(
         fills_since=fills_since,
         fills_published_count=int(fill_result.get("published_count") or 0),
         latest_fill_event_at=latest_fill_event_at,
+        positions_count=int(position_result.get("positions_count") or 0),
+        position_snapshots_published=int(position_result.get("snapshots_published") or 0),
         message=(
-            f"Deleted {deleted_count} orders and {deleted_fill_count} fills, then triggered broker reread for account {account.account_id} from the last {lookback_days}d"
+            f"Deleted {deleted_count} orders and {deleted_fill_count} fills, then triggered broker order/fill/position reread for account {account.account_id} from the last {lookback_days}d"
         ),
     )
 
