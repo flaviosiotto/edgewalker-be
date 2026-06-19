@@ -506,6 +506,43 @@ class BacktestRunnerService:
             raw_equity = []
         return {"equity": list(raw_equity)}
 
+    def list_backtest_alerts(self, backtest_id: int, *, active_only: bool = False) -> dict[str, Any]:
+        container = self._get_container(backtest_id)
+        if not container:
+            return {"alerts": []}
+
+        container.reload()
+        if container.status != "running":
+            return {"alerts": []}
+
+        token = self._container_env(container, "BACKEND_AUTH_TOKEN")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        params = {"active_only": active_only} if active_only else None
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(f"http://{container.name}:8080/alerts", headers=headers, params=params)
+                if resp.status_code == 404:
+                    return {"alerts": []}
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest runner alerts fetch failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest runner is not reachable for backtest {backtest_id}: {exc}") from exc
+
+        if isinstance(data, dict):
+            raw_alerts = data.get("alerts") or []
+        elif isinstance(data, list):
+            raw_alerts = data
+        else:
+            raw_alerts = []
+        return {"alerts": list(raw_alerts)}
+
     def _create_redis_client(self):
         import redis as sync_redis
 

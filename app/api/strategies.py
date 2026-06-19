@@ -372,6 +372,24 @@ def get_backtest_runtime_equity_endpoint(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
+@router.get("/{strategy_id}/backtests/{backtest_id}/runtime/alerts")
+def get_backtest_runtime_alerts_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    active_only: bool = Query(default=False),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List structured alerts tracked by the active backtest runner."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    try:
+        return backtest_runner_service.list_backtest_alerts(backtest.id, active_only=active_only)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
 @router.get("/{strategy_id}/backtests/{backtest_id}/logs")
 def get_backtest_logs_endpoint(
     strategy_id: int,
