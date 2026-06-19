@@ -138,6 +138,8 @@ class BacktestRunnerService:
         symbol: str,
         timeframe: str,
         *,
+        broker_type: str = "",
+        position_accounting_mode: str = "netting",
         manager_webhook_url: str | None = None,
         backend_auth_token: str | None = None,
         manager_webhook_auth_token: str | None = None,
@@ -177,6 +179,8 @@ class BacktestRunnerService:
             "BACKTEST_DEBUG_HOLD_SECONDS": BACKTEST_DEBUG_HOLD_SECONDS,
             "REAL_DATA_CONNECTION_ID": str(connection_id),
             "CONNECTION_ID": str(connection_id),
+            "BROKER_TYPE": str(broker_type or ""),
+            "POSITION_ACCOUNTING_MODE": str(position_accounting_mode or "netting"),
             "REDIS_HOST": REDIS_HOST,
             "REDIS_PORT": REDIS_PORT,
             "STRATEGY_ID": str(strategy_id),
@@ -243,6 +247,8 @@ class BacktestRunnerService:
             "edgewalker.strategy_id": str(strategy_id),
             "edgewalker.symbol": symbol,
             "edgewalker.stream_id": stream_id,
+            "edgewalker.broker_type": str(broker_type or ""),
+            "edgewalker.position_accounting_mode": str(position_accounting_mode or "netting"),
         }
         if TRAEFIK_DOCKER_NETWORK:
             labels["traefik.docker.network"] = TRAEFIK_DOCKER_NETWORK

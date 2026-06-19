@@ -39,6 +39,46 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _coerce_position_accounting_mode(value: Any) -> str | None:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if not text:
+        return None
+    aliases = {
+        "net": "netting",
+        "netting": "netting",
+        "hedge": "hedging",
+        "hedging": "hedging",
+        "dual_side": "hedging",
+        "ticket": "ticket_based",
+        "ticket_based": "ticket_based",
+        "position_id": "ticket_based",
+    }
+    return aliases.get(text)
+
+
+def _resolve_backtest_position_accounting_mode(connection: Connection | None) -> str:
+    config = connection.config if connection and isinstance(connection.config, dict) else {}
+    for key in ("position_accounting_mode", "accounting_mode", "position_mode"):
+        mode = _coerce_position_accounting_mode(config.get(key))
+        if mode:
+            return mode
+    broker_type = str(connection.broker_type if connection else "").strip().lower()
+    if broker_type in {"ctrader", "spotware"}:
+        return "ticket_based"
+    return "netting"
+
+
+def _with_backtest_accounting_snapshot(config: Any, *, broker_type: str, position_accounting_mode: str) -> Any:
+    if not isinstance(config, dict):
+        return config
+    snapshot = dict(config)
+    backtest_cfg = dict(snapshot.get("backtest") or {}) if isinstance(snapshot.get("backtest"), dict) else {}
+    backtest_cfg["broker_type"] = broker_type
+    backtest_cfg["position_accounting_mode"] = position_accounting_mode
+    snapshot["backtest"] = backtest_cfg
+    return snapshot
+
 _INDICATOR_OUTPUT_NAME_MAP = {
     "upperband": "upper",
     "middleband": "middle",
@@ -484,6 +524,9 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
                 "Assign a data connection to the strategy before running a backtest."
             ),
         )
+    connection = _get_owned_connection(session, connection_id, strategy.user_id)
+    broker_type = str(connection.broker_type or "").strip().lower()
+    position_accounting_mode = _resolve_backtest_position_accounting_mode(connection)
 
     try:
         backtest_chat = get_or_create_backtest_chat(session, backtest.id, user_id)
@@ -521,10 +564,15 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
 
         raw_strategy_config = backtest.config or strategy.definition
         strategy_config = _normalize_strategy_indicator_field_references(raw_strategy_config)
+        strategy_config = _with_backtest_accounting_snapshot(
+            strategy_config,
+            broker_type=broker_type,
+            position_accounting_mode=position_accounting_mode,
+        )
         if strategy_config != raw_strategy_config:
             backtest.config = strategy_config
             logger.info(
-                "Normalized legacy indicator output names in backtest %d config before runner start",
+                "Normalized backtest %d config before runner start",
                 backtest.id,
             )
 
@@ -535,6 +583,8 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             strategy_config=strategy_config,
             symbol=backtest.symbol,
             timeframe=backtest.timeframe or "5m",
+            broker_type=broker_type,
+            position_accounting_mode=position_accounting_mode,
             manager_webhook_url=manager_webhook_url,
             backend_auth_token=runner_auth_token,
             manager_webhook_auth_token=manager_webhook_auth_token,
