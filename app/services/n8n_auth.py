@@ -9,7 +9,7 @@ from jose import jwt
 from sqlmodel import Session, select
 
 from app.core.config import settings
-from app.models.strategy import LiveStatus, StrategyLive
+from app.models.strategy import BacktestResult, BacktestStatus, LiveStatus, Strategy, StrategyLive
 from app.models.user import User
 from app.utils.auth_utils import (
     create_access_token,
@@ -204,6 +204,30 @@ def _resolve_runner_strategy_live(
     )
 
 
+def _resolve_runner_backtest(
+    session: Session,
+    *,
+    chat_id: int | None,
+    strategy_id: int | None,
+) -> BacktestResult | None:
+    active_statuses = [BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value]
+    if chat_id is not None:
+        return session.exec(
+            select(BacktestResult)
+            .where(BacktestResult.chat_id == chat_id)
+            .where(BacktestResult.status.in_(active_statuses))
+            .order_by(BacktestResult.id.desc())
+        ).first()
+    if strategy_id is not None:
+        return session.exec(
+            select(BacktestResult)
+            .where(BacktestResult.strategy_id == strategy_id)
+            .where(BacktestResult.status.in_(active_statuses))
+            .order_by(BacktestResult.id.desc())
+        ).first()
+    return None
+
+
 def _build_backend_api_metadata_for_live(
     session: Session,
     *,
@@ -242,6 +266,60 @@ def _build_backend_api_metadata_for_live(
     }
 
 
+def _build_runner_api_metadata_for_backtest(
+    session: Session,
+    *,
+    user_id: int,
+    backtest: BacktestResult,
+    extra_claims: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if backtest.id is None:
+        return None
+
+    strategy = session.get(Strategy, backtest.strategy_id)
+    if strategy is None or strategy.user_id != user_id:
+        return None
+
+    stream_id = f"backtest-{backtest.id}"
+    expires_at = datetime.now(timezone.utc) + timedelta(days=365)
+    token_claims: dict[str, Any] = {
+        "strategy_id": backtest.strategy_id,
+        "backtest_id": backtest.id,
+        "stream_id": stream_id,
+        "connection_id": strategy.connection_id,
+        "scopes": list(_DEFAULT_N8N_RUNNER_SCOPES),
+    }
+    if extra_claims:
+        token_claims.update(
+            {key: value for key, value in extra_claims.items() if value is not None}
+        )
+
+    token = create_user_delegated_token(
+        session,
+        user_id=user_id,
+        audience=settings.AGENT_TOKEN_AUDIENCE,
+        purpose="agent_runner_callback",
+        no_expiry=True,
+        extra_claims=token_claims,
+    )
+    return {
+        "mode": "authorization_header",
+        "scheme": "Bearer",
+        "auth_mode": "runner_callback_token",
+        "token": token,
+        "token_type": "Bearer",
+        "expires_at": expires_at.isoformat(),
+        "audience": settings.AGENT_TOKEN_AUDIENCE,
+        "purpose": "agent_runner_callback",
+        "scopes": list(_DEFAULT_N8N_RUNNER_SCOPES),
+        "runner_base_url": _public_runner_base_url(stream_id),
+        "stream_id": stream_id,
+        "backtest_id": backtest.id,
+        "strategy_id": backtest.strategy_id,
+        "connection_id": strategy.connection_id,
+    }
+
+
 def build_n8n_backend_api_metadata(
     session: Session,
     *,
@@ -277,7 +355,7 @@ def build_n8n_runner_api_metadata(
     strategy_id: int | None = None,
     extra_claims: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Issue runner callback metadata for an agent chat bound to a live session."""
+    """Issue runner callback metadata for an agent chat bound to live or backtest."""
     if user_id is None:
         return None
 
@@ -285,7 +363,17 @@ def build_n8n_runner_api_metadata(
         session, chat_id=chat_id, strategy_id=strategy_id
     )
     if sl is None:
-        return None
+        backtest = _resolve_runner_backtest(
+            session, chat_id=chat_id, strategy_id=strategy_id
+        )
+        if backtest is None:
+            return None
+        return _build_runner_api_metadata_for_backtest(
+            session,
+            user_id=user_id,
+            backtest=backtest,
+            extra_claims=extra_claims,
+        )
 
     stream_id = f"strategy-{sl.id}"
     expires_at = datetime.now(timezone.utc) + timedelta(days=365)

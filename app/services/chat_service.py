@@ -170,7 +170,7 @@ def _build_webhook_payload(
         }
     )
     # Hoist standard live context (connection_id, account_id, strategy_id,
-    # strategy_live_id) from api_auth to top-level metadata so the workflow
+    # strategy_live_id, backtest_id, runner_base_url) from api_auth to top-level metadata so the workflow
     # has the same contract whether the message comes from chat, runner
     # startup, or rule conditions.
     if merged_api_auth_metadata is not None:
@@ -178,8 +178,11 @@ def _build_webhook_payload(
             "connection_id",
             "account_id",
             "live_id",
+            "strategy_live_id",
+            "backtest_id",
             "strategy_id",
             "stream_id",
+            "runner_base_url",
         ):
             value = merged_api_auth_metadata.get(ctx_key)
             if value is None:
