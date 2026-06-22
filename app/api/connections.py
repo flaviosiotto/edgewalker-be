@@ -151,15 +151,12 @@ async def list_connections_endpoint(
 ):
     """List all broker connections.
 
-    All active connections are probed in real-time against the broker
-    so the returned status always reflects reality — including gateways
-    that came back online after being marked disconnected.
+    Reads connection status straight from the DB. Health is kept fresh by the
+    connection manager's background loop (``_run_connection_health_loop``), so
+    this endpoint stays O(1) in gateway round-trips. The returned
+    ``last_checked_at``/``is_stale`` fields let callers detect a status that
+    has gone stale (e.g. a gateway reporting "connected" from a cached flag).
     """
-    manager = get_connection_manager()
-    await manager.probe_active_connections()
-    # Re-read after potential status updates
-    session.expire_all()
-
     conns = list_connections(session, current_user.id, active_only=active_only)
     return ConnectionListResponse(
         connections=[ConnectionRead.model_validate(c) for c in conns],

@@ -81,6 +81,17 @@ class Connection(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Last time the connection health was probed (regardless of outcome) and
+    # the last time it probed as healthy. Used to detect stale "connected"
+    # statuses that the gateway may report from a cached flag.
+    last_checked_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    last_ok_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
     # ── Symbol sync settings ──
     sync_enabled: bool = Field(default=True, description="Enable automatic symbol sync")

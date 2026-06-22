@@ -3,10 +3,19 @@ Schemas for Connections & Accounts API.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
+
+
+# A "connected"/"degraded" status older than this is considered stale: the
+# background health loop should refresh well within it (default loop ~20s).
+CONNECTION_STALE_TTL_SECONDS = max(
+    15.0,
+    float(os.getenv("CONNECTION_STALE_TTL_SECONDS", "60")),
+)
 
 
 # =============================================================================
@@ -84,9 +93,29 @@ class ConnectionRead(BaseModel):
     status: str
     status_message: str | None = None
     last_connected_at: datetime | None = None
+    last_checked_at: datetime | None = None
+    last_ok_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     accounts: list[AccountRead] = []
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_stale(self) -> bool:
+        """True when a connected/degraded status hasn't been re-probed recently.
+
+        Lets the UI distinguish a freshly-confirmed "green" from one the gateway
+        may be reporting from a cached flag after a silent broker drop.
+        """
+        if self.status not in {"connected", "degraded"}:
+            return False
+        if self.last_checked_at is None:
+            return True
+        checked = self.last_checked_at
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - checked).total_seconds()
+        return age > CONNECTION_STALE_TTL_SECONDS
 
     class Config:
         from_attributes = True

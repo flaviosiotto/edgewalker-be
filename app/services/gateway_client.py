@@ -111,9 +111,9 @@ class GatewayClient:
         """Check gateway health."""
         return await self._get("/health")
 
-    async def get_status(self) -> dict:
+    async def get_status(self, *, timeout: float | None = None) -> dict:
         """Get detailed connection status."""
-        return await self._get("/status")
+        return await self._get("/status", timeout=timeout)
 
     async def is_connected(self) -> bool:
         """Quick liveness check — True if RT connection is up."""

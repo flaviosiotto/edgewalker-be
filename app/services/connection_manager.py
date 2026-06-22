@@ -93,6 +93,17 @@ CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS = max(
     0.5,
     float(os.getenv("CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS", "2")),
 )
+# Background connection-health loop: probes active connections off the request
+# path so GET /connections can read straight from the DB. A short status-probe
+# timeout keeps a single hung gateway from stalling the whole reconciliation.
+CONNECTION_HEALTH_INTERVAL_SECONDS = max(
+    5.0,
+    float(os.getenv("CONNECTION_HEALTH_INTERVAL_SECONDS", "20")),
+)
+GATEWAY_STATUS_PROBE_TIMEOUT_SECONDS = max(
+    2.0,
+    float(os.getenv("GATEWAY_STATUS_PROBE_TIMEOUT_SECONDS", "8")),
+)
 # Gateway readiness path used by the backend probe. The in-container browser
 # performs the real SSO login, but the backend still waits for the Java gateway's
 # HTTPS listener to come up before handing the launch URL to the user. "/sso/Login"
@@ -790,8 +801,10 @@ def _update_connection_status(
     conn.status_message = message
     now = datetime.now(timezone.utc)
     conn.updated_at = now
+    conn.last_checked_at = now
     if status == ConnectionStatus.CONNECTED:
         conn.last_connected_at = now
+        conn.last_ok_at = now
     else:
         # Deactivate accounts when connection is no longer alive
         acct_stmt = select(Account).where(Account.connection_id == connection_id, Account.is_active == True)  # noqa: E712
@@ -2755,7 +2768,7 @@ class ConnectionManager:
             # Ask the gateway if it's still connected to the broker
             try:
                 client = self.get_gateway_client(connection_id, broker_type)
-                gateway_status = await client.get_status()
+                gateway_status = await client.get_status(timeout=GATEWAY_STATUS_PROBE_TIMEOUT_SECONDS)
                 if gateway_status.get("connected"):
                     actual = ConnectionStatus.CONNECTED
                 elif _gateway_status_is_degraded(gateway_status):
@@ -2789,6 +2802,17 @@ class ConnectionManager:
                 "Connection %s status changed: %s → %s",
                 connection_id, stored_status, actual.value,
             )
+        else:
+            # Status unchanged: still record that we probed it (and when it was
+            # last seen healthy) so the API can detect stale "connected" values.
+            now = datetime.now(timezone.utc)
+            with get_session_context() as session:
+                conn = session.get(Connection, connection_id)
+                if conn is not None:
+                    conn.last_checked_at = now
+                    if actual == ConnectionStatus.CONNECTED:
+                        conn.last_ok_at = now
+                    session.commit()
 
         # Always re-sync accounts when connection is alive so that any
         # stale is_active=False accounts (left over from a previous
@@ -2837,7 +2861,7 @@ class ConnectionManager:
         if not active_ids:
             return
 
-        logger.info("Probing %d active connection(s) for running gateways...", len(active_ids))
+        logger.debug("Probing %d active connection(s) for running gateways...", len(active_ids))
         tasks = [self.check_connection_status(cid) for cid in active_ids]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         reconnected = sum(
@@ -2845,7 +2869,23 @@ class ConnectionManager:
             if isinstance(r, str) and r == ConnectionStatus.CONNECTED.value
         )
         if reconnected:
-            logger.info("Reconciled %d connection(s) back to 'connected'", reconnected)
+            logger.debug("Reconciled %d connection(s) back to 'connected'", reconnected)
+
+    async def _run_connection_health_loop(self) -> None:
+        """Periodically reconcile DB connection status with the live gateways.
+
+        This moves health probing off the request path: GET /connections can
+        then read the DB directly, and ``last_checked_at`` stays fresh so the
+        API can flag stale "connected" statuses.
+        """
+        while self._running:
+            await asyncio.sleep(CONNECTION_HEALTH_INTERVAL_SECONDS)
+            try:
+                await self.probe_active_connections()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Connection health loop iteration failed")
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -2940,6 +2980,9 @@ class ConnectionManager:
 
         # Reconcile: check if any gateway containers survived the restart
         await self.probe_active_connections()
+
+        # Keep DB connection status fresh off the request path
+        self._tasks.append(asyncio.create_task(self._run_connection_health_loop()))
 
         logger.info("Connection manager started")
 
