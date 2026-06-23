@@ -644,10 +644,17 @@ class BacktestRunnerService:
         return container.logs(tail=tail, timestamps=True).decode("utf-8")
 
     def cleanup_finished(self) -> int:
-        containers = self.client.containers.list(
-            all=True,
-            filters={"label": "edgewalker.type=strategy-runner-backtest", "status": "exited"},
-        )
+        containers: list[Container] = []
+        seen: set[str] = set()
+        for status in ("exited", "dead", "created"):
+            for container in self.client.containers.list(
+                all=True,
+                filters={"label": "edgewalker.type=strategy-runner-backtest", "status": status},
+            ):
+                if container.id in seen:
+                    continue
+                seen.add(container.id)
+                containers.append(container)
         count = 0
         for container in containers:
             try:
@@ -655,6 +662,8 @@ class BacktestRunnerService:
                 count += 1
             except Exception as exc:
                 logger.warning("Failed to remove container %s: %s", container.name, exc)
+        if count:
+            logger.info("Removed %d finished backtest runner container(s)", count)
         return count
 
 

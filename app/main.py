@@ -24,6 +24,7 @@ from app.api.connections import router as connections_router
 from app.api.client_portal_launch import router as client_portal_launch_router
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
+from app.services.backtest_runner_monitor import start_backtest_runner_monitor, stop_backtest_runner_monitor
 from app.services.chat_realtime import start_chat_realtime, stop_chat_realtime
 from app.utils.auth_utils import get_current_active_user
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,6 +48,9 @@ async def lifespan(app: FastAPI):
     await start_live_runner_monitor()
     logging.getLogger(__name__).info("Started live runner monitor")
 
+    await start_backtest_runner_monitor()
+    logging.getLogger(__name__).info("Started backtest runner monitor")
+
     start_chat_realtime()
     logging.getLogger(__name__).info("Started chat realtime listener")
 
@@ -54,6 +58,7 @@ async def lifespan(app: FastAPI):
 
     # Cleanup
     stop_chat_realtime()
+    await stop_backtest_runner_monitor()
     await stop_live_runner_monitor()
     await stop_connection_manager()
 
