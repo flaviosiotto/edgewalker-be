@@ -13,6 +13,7 @@ PositionSide = Literal["long", "short", "flat"]
 
 class LivePerformanceSummary(BaseModel):
     total_pnl: float | None = None
+    unrealized_pnl: float | None = None
     total_trades: int = 0
     win_rate: float | None = None
     position_side: PositionSide = "flat"

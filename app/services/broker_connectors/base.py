@@ -20,6 +20,10 @@ class DiscoveredAccount:
     equity: float | None = None
     buying_power: float | None = None
     available_funds: float | None = None
+    unrealized_pnl: float | None = None
+    margin_used: float | None = None
+    maintenance_margin: float | None = None
+    init_margin: float | None = None
     snapshot_at: datetime | None = None
     extra: dict[str, Any] | None = None
 

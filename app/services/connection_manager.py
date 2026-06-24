@@ -682,6 +682,10 @@ def _sync_accounts_from_gateway(
             equity=_safe_float(a.get("equity")),
             buying_power=_safe_float(a.get("buying_power")),
             available_funds=_safe_float(a.get("available_funds")),
+            unrealized_pnl=_safe_float(a.get("unrealized_pnl")),
+            margin_used=_safe_float(a.get("margin_used")),
+            maintenance_margin=_safe_float(a.get("maintenance_margin")),
+            init_margin=_safe_float(a.get("init_margin")),
             snapshot_at=_parse_snapshot_at(a.get("snapshot_at")),
             extra=a.get("extra") if isinstance(a.get("extra"), dict) else None,
         )
@@ -717,6 +721,10 @@ def _upsert_account_snapshot(
             equity=discovered.equity,
             buying_power=discovered.buying_power,
             available_funds=discovered.available_funds,
+            unrealized_pnl=discovered.unrealized_pnl,
+            margin_used=discovered.margin_used,
+            maintenance_margin=discovered.maintenance_margin,
+            init_margin=discovered.init_margin,
             snapshot_at=discovered.snapshot_at,
             is_active=True,
             extra=discovered.extra,
@@ -744,6 +752,14 @@ def _upsert_account_snapshot(
         acct.buying_power = discovered.buying_power
     if discovered.available_funds is not None:
         acct.available_funds = discovered.available_funds
+    if discovered.unrealized_pnl is not None:
+        acct.unrealized_pnl = discovered.unrealized_pnl
+    if discovered.margin_used is not None:
+        acct.margin_used = discovered.margin_used
+    if discovered.maintenance_margin is not None:
+        acct.maintenance_margin = discovered.maintenance_margin
+    if discovered.init_margin is not None:
+        acct.init_margin = discovered.init_margin
     if discovered.snapshot_at is not None:
         acct.snapshot_at = discovered.snapshot_at
     if discovered.extra is not None:
@@ -911,6 +927,10 @@ class ConnectionManager:
             equity=_safe_float(payload.get("equity")),
             buying_power=_safe_float(payload.get("buying_power")),
             available_funds=_safe_float(payload.get("available_funds")),
+            unrealized_pnl=_safe_float(payload.get("unrealized_pnl")),
+            margin_used=_safe_float(payload.get("margin_used")),
+            maintenance_margin=_safe_float(payload.get("maintenance_margin")),
+            init_margin=_safe_float(payload.get("init_margin")),
             snapshot_at=_parse_snapshot_at(payload.get("snapshot_at")),
             extra=payload.get("extra") if isinstance(payload.get("extra"), dict) else None,
         )

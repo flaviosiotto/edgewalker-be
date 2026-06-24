@@ -66,6 +66,7 @@ def _compute_account_scoped_summary(session: Session, sl: StrategyLive) -> LiveP
 
     return LivePerformanceSummary(
         total_pnl=net_pnl + unrealized_pnl,
+        unrealized_pnl=unrealized_pnl,
         total_trades=total_trades,
         win_rate=win_rate,
         position_side=position_side if position_side in {"long", "short", "flat"} else "flat",
@@ -109,6 +110,7 @@ def _compute_strategy_scoped_summary(session: Session, sl: StrategyLive) -> Live
 
     return LivePerformanceSummary(
         total_pnl=net_pnl + unrealized_pnl,
+        unrealized_pnl=unrealized_pnl,
         total_trades=total_trades,
         win_rate=win_rate,
         position_side=position_side if position_side in {"long", "short", "flat"} else "flat",

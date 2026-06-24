@@ -188,6 +188,26 @@ class Account(SQLModel, table=True):
         sa_column=Column(Float, nullable=True),
         description="Normalized available funds in account currency when supported",
     )
+    unrealized_pnl: Optional[float] = Field(
+        default=None,
+        sa_column=Column(Float, nullable=True),
+        description="Account-level unrealized PnL from the last normalized snapshot (mark-to-market)",
+    )
+    margin_used: Optional[float] = Field(
+        default=None,
+        sa_column=Column(Float, nullable=True),
+        description="Normalized margin currently used by open positions when supported",
+    )
+    maintenance_margin: Optional[float] = Field(
+        default=None,
+        sa_column=Column(Float, nullable=True),
+        description="Normalized maintenance margin requirement when supported",
+    )
+    init_margin: Optional[float] = Field(
+        default=None,
+        sa_column=Column(Float, nullable=True),
+        description="Normalized initial margin requirement when supported",
+    )
     snapshot_at: Optional[datetime] = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
