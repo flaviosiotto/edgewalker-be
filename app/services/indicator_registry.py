@@ -211,6 +211,71 @@ CUSTOM_INDICATORS = {
         "parameters": {},
         "outputs": ["value"],
     },
+    # Price-domain indicator (Volume Profile).  Metadata mirrors the edgewalker
+    # library's get_metadata(); kept here because edgewalker is not a backend
+    # dependency.  When the library IS importable, _library_custom_indicators()
+    # takes precedence and supersedes this entry.
+    "volume_profile": {
+        "name": "VPROFILE",
+        "display_name": "Volume Profile",
+        "group": "Custom",
+        "description": "Volume distribution over price with POC and Value Area",
+        "overlay": True,
+        "inputs": {"ohlcv": ["open", "high", "low", "close", "volume"]},
+        "parameters": {
+            "anchor": {
+                "type": "string", "default": "session",
+                "options": ["session", "full_window", "rolling", "fixed_range", "visible_range"],
+                "description": "How the frame is anchored along the time axis",
+            },
+            "bins": {"type": "integer", "default": 24, "min": 2, "max": 500,
+                     "description": "Number of price rows"},
+            "value_area_pct": {"type": "number", "default": 70, "min": 1, "max": 100,
+                               "description": "Percentage of volume that defines the Value Area"},
+            "price_source": {"type": "string", "default": "hl", "options": ["hl", "close"],
+                             "description": "Distribute volume across the H/L range or at the close"},
+            "lookback": {"type": "integer", "default": 200, "min": 2, "max": 5000,
+                         "description": "Bars per frame (rolling anchor)"},
+            "range_start": {"type": "integer", "default": 0,
+                            "description": "Anchor start (epoch seconds) for fixed/visible range"},
+            "range_end": {"type": "integer", "default": 0,
+                          "description": "Anchor end (epoch seconds) for fixed/visible range"},
+        },
+        "outputs": ["volume", "poc", "vah", "val"],
+        "domain": "price",
+        "anchors": [
+            {"kind": "session", "label": "Per Session", "params": {"sessions": 1}},
+            {"kind": "full_window", "label": "Full Window", "params": {}},
+            {"kind": "rolling", "label": "Rolling", "params": {"lookback": 200}},
+            {"kind": "fixed_range", "label": "Fixed Range", "params": {}},
+            {"kind": "visible_range", "label": "Visible Range", "params": {}},
+        ],
+        "default_anchor": "session",
+        "output_groups": [
+            {
+                "name": "histogram", "label": "Volume Profile", "render_type": "price_histogram",
+                "series": [
+                    {"field": "volume", "label": "Volume",
+                     "style": {"type": "histogram", "color": "#2196F3", "line_width": 1, "opacity": 0.4, "visible": True}},
+                ],
+            },
+            {
+                "name": "markers", "label": "Levels", "render_type": "levels",
+                "series": [
+                    {"field": "poc", "label": "Point of Control",
+                     "style": {"type": "line", "color": "#FF9800", "line_width": 2, "opacity": 1.0, "visible": True}},
+                    {"field": "vah", "label": "Value Area High",
+                     "style": {"type": "dashed_line", "color": "#9C27B0", "line_width": 1, "opacity": 1.0, "visible": True}},
+                    {"field": "val", "label": "Value Area Low",
+                     "style": {"type": "dashed_line", "color": "#9C27B0", "line_width": 1, "opacity": 1.0, "visible": True}},
+                ],
+            },
+        ],
+        "output_descriptions": {
+            "volume": "Volume at price", "poc": "Point of Control",
+            "vah": "Value Area High", "val": "Value Area Low",
+        },
+    },
 }
 
 
