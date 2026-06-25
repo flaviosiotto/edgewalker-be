@@ -305,9 +305,25 @@ def _get_talib_indicator_info(func_name: str) -> dict[str, Any] | None:
         return None
 
 
+def _library_custom_indicators() -> list[dict[str, Any]] | None:
+    """Pull custom-indicator metadata from the edgewalker library.
+
+    The library (``edgewalker.indicators``) is the single source of truth and
+    already emits the full rendering metadata (``output_groups``) plus the
+    price-domain "dialect" fields (``domain``, ``anchors``, ``default_anchor``).
+    Falls back to the local ``CUSTOM_INDICATORS`` dict if the import fails.
+    """
+    try:
+        from edgewalker.indicators import CUSTOM_REGISTRY
+        return [ind.get_metadata() for ind in CUSTOM_REGISTRY.values()]
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Falling back to local CUSTOM_INDICATORS: %s", e)
+        return None
+
+
 def get_all_indicators() -> list[dict[str, Any]]:
     """Get information about all available indicators.
-    
+
     Returns a list of indicator definitions including:
     - name: Technical name (e.g., 'SMA', 'MACD')
     - display_name: Human-readable name
@@ -317,25 +333,30 @@ def get_all_indicators() -> list[dict[str, Any]]:
     - inputs: Required input data (e.g., {'price': ['close']})
     - parameters: Configurable parameters with types and defaults
     - outputs: List of output names
+    - domain / anchors / default_anchor: price-domain dialect (e.g. Volume Profile)
     """
     indicators = []
-    
+
     # Get all TA-Lib indicators by group
     groups = talib.get_function_groups()
-    
+
     for group_name, func_names in groups.items():
         for func_name in func_names:
             info = _get_talib_indicator_info(func_name)
             if info:
                 indicators.append(info)
-    
-    # Add custom indicators from edgewalker
-    for key, info in CUSTOM_INDICATORS.items():
-        indicators.append(info)
-    
+
+    # Add custom indicators — prefer the edgewalker library (single source of
+    # truth, includes output_groups + domain/anchors), fall back to local dict.
+    lib_custom = _library_custom_indicators()
+    if lib_custom is not None:
+        indicators.extend(lib_custom)
+    else:
+        indicators.extend(CUSTOM_INDICATORS.values())
+
     # Sort by group, then by name
     indicators.sort(key=lambda x: (x.get("group", ""), x.get("name", "")))
-    
+
     return indicators
 
 
@@ -350,11 +371,19 @@ def get_indicator_by_name(name: str) -> dict[str, Any] | None:
     """
     name_upper = name.upper()
     name_lower = name.lower()
-    
-    # Check custom indicators first
+
+    # Check custom indicators first — prefer the edgewalker library so that
+    # output_groups + domain/anchors are included.
+    try:
+        from edgewalker.indicators import get_custom_indicator
+        ind = get_custom_indicator(name_lower)
+        if ind is not None:
+            return ind.get_metadata()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Library custom lookup failed for %s: %s", name, e)
     if name_lower in CUSTOM_INDICATORS:
         return CUSTOM_INDICATORS[name_lower]
-    
+
     # Try TA-Lib
     try:
         return _get_talib_indicator_info(name_upper)

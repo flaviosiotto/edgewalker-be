@@ -218,6 +218,28 @@ class IndicatorInfo(BaseModel):
     )
     outputs: list[str] = Field(..., description="Output names")
 
+    # ── Domain & anchoring (price-domain "dialect") ──
+    domain: str = Field(
+        "time",
+        description="Output axis: 'time' (one value per bar) or 'price' (binned over price, e.g. Volume Profile)",
+    )
+    anchors: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Supported anchors for price-domain indicators (kind/label/params)",
+    )
+    default_anchor: Optional[str] = Field(
+        None, description="Default anchor kind for price-domain indicators"
+    )
+
+    # ── Rendering metadata (passed through to the chart) ──
+    output_groups: Optional[list[dict[str, Any]]] = Field(
+        None, description="Composable output groups (render_type, series, styles)"
+    )
+    output_descriptions: Optional[dict[str, str]] = Field(None)
+    render_mode: Optional[str] = Field(None)
+    output_styles: Optional[dict[str, str]] = Field(None)
+    output_colors: Optional[dict[str, str]] = Field(None)
+
 
 class IndicatorsListResponse(BaseModel):
     """Response listing all available indicators."""
