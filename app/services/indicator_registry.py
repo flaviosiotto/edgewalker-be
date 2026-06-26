@@ -216,7 +216,7 @@ CUSTOM_INDICATORS = {
     # dependency.  When the library IS importable, _library_custom_indicators()
     # takes precedence and supersedes this entry.
     "volume_profile": {
-        "name": "VPROFILE",
+        "name": "VOLUME_PROFILE",
         "display_name": "Volume Profile",
         "group": "Custom",
         "description": "Volume distribution over price with POC and Value Area",
