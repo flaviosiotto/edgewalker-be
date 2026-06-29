@@ -114,6 +114,14 @@ CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS = max(
     0,
     int(os.getenv("CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS", os.getenv("CLIENT_PORTAL_LAUNCH_TTL_SECONDS", "900"))),
 )
+# A login still in `awaiting_auth` is an in-progress interaction (the user may be
+# entering credentials / 2FA in the popup). Give it a dedicated, longer grace so
+# the idle reaper can't kill the runtime mid-login, while still cleaning up
+# leftover disconnected/error runtimes on the shorter base timeout above.
+CLIENT_PORTAL_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS = max(
+    CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS,
+    int(os.getenv("CLIENT_PORTAL_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS", "1800")),
+)
 CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS = max(
     5.0,
     float(os.getenv("CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS", "30")),
@@ -198,6 +206,27 @@ TWS_READY_TIMEOUT_SECONDS = max(5.0, float(os.getenv("TWS_READY_TIMEOUT_SECONDS"
 TWS_PATH_PREFIX_BASE = os.getenv("TWS_PATH_PREFIX_BASE", CLIENT_PORTAL_PATH_PREFIX_BASE).strip().rstrip("/") or CLIENT_PORTAL_PATH_PREFIX_BASE
 TWS_API_PROBE_TIMEOUT_SECONDS = max(3.0, float(os.getenv("TWS_API_PROBE_TIMEOUT_SECONDS", "15")))
 TWS_API_PROBE_CACHE_SECONDS = max(0.0, float(os.getenv("TWS_API_PROBE_CACHE_SECONDS", "8")))
+# Internal retries inside the probe so a transient handshake hiccup (or accounts
+# not yet published right after login) doesn't read as "not ready".
+TWS_API_PROBE_RETRIES = max(1, int(os.getenv("TWS_API_PROBE_RETRIES", "2")))
+# The readonly readiness probe must NOT reuse the data gateway's clientId. The
+# gateway connects RT with ``client_id`` (default 100) and HIST with ``client_id+1``;
+# if the probe grabbed the same id, IB Gateway would either reject the probe or,
+# worse, still hold the id for a few seconds after the probe disconnects so the
+# gateway's own RT connect fails with error 326 ("client id already in use").
+# Reserve a high, dedicated offset so probe and gateway never compete.
+TWS_API_PROBE_CLIENT_ID_OFFSET = max(2, int(os.getenv("TWS_API_PROBE_CLIENT_ID_OFFSET", "90")))
+# When enabled, a dedicated background loop is the single authority that finishes
+# an interactive IB Gateway login (probe → complete). The frontend is a pure
+# observer, so a login completes even if the user reloaded the page, closed the
+# tab, or the popup flow already timed out. Disable to fall back to manual-only.
+TWS_AUTO_COMPLETE_ENABLED = os.getenv("TWS_AUTO_COMPLETE_ENABLED", "true").lower() == "true"
+# Fast cadence (independent of the heavier all-connections health loop) so a
+# finished login is promoted to "connected" within a few seconds.
+TWS_AUTH_RECONCILE_INTERVAL_SECONDS = max(
+    1.0,
+    float(os.getenv("TWS_AUTH_RECONCILE_INTERVAL_SECONDS", "4")),
+)
 
 
 _TWS_API_PROBE_SCRIPT = r"""
@@ -213,50 +242,78 @@ def emit(payload, *, failed=False):
     print(json.dumps(payload, separators=(",", ":")), file=sys.stderr if failed else sys.stdout, flush=True)
 
 
-async def main():
-    host = os.environ["IBKR_HOST"]
-    port = int(os.environ["IBKR_PORT"])
-    client_id = int(os.environ.get("IBKR_CLIENT_ID", "100"))
-    timeout = float(os.environ.get("IBKR_PROBE_TIMEOUT", "15"))
+async def attempt(host, port, client_id, timeout):
+    # Returns (ready, accounts_count, server_version) or raises.
     ib = IB()
     try:
         await asyncio.wait_for(
             ib.connectAsync(host=host, port=port, clientId=client_id, readonly=True),
             timeout=timeout,
         )
+        # The API server accepts clients as soon as the gateway process is up,
+        # which can be BEFORE the login fully settles and managed accounts are
+        # published. Wait briefly for at least one account so "ready" means the
+        # brokerage session is actually usable, not just that the socket answers.
         accounts = list(ib.managedAccounts() or [])
-        emit({
-            "ready": True,
-            "host": host,
-            "port": port,
-            "client_id": client_id,
-            "server_version": ib.client.serverVersion(),
-            "accounts_count": len(accounts),
-        })
-        return 0
-    except asyncio.TimeoutError:
-        emit({
-            "ready": False,
-            "host": host,
-            "port": port,
-            "client_id": client_id,
-            "error_type": "TimeoutError",
-            "error": f"timeout after {timeout:.1f}s waiting for IB API handshake",
-        }, failed=True)
-        return 1
-    except Exception as exc:
-        emit({
-            "ready": False,
-            "host": host,
-            "port": port,
-            "client_id": client_id,
-            "error_type": type(exc).__name__,
-            "error": str(exc) or repr(exc),
-        }, failed=True)
-        return 1
+        deadline = asyncio.get_event_loop().time() + min(5.0, timeout)
+        while not accounts and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            accounts = list(ib.managedAccounts() or [])
+        return (bool(accounts), len(accounts), ib.client.serverVersion())
     finally:
         if ib.isConnected():
             ib.disconnect()
+
+
+async def main():
+    host = os.environ["IBKR_HOST"]
+    port = int(os.environ["IBKR_PORT"])
+    client_id = int(os.environ.get("IBKR_CLIENT_ID", "100"))
+    timeout = float(os.environ.get("IBKR_PROBE_TIMEOUT", "15"))
+    retries = max(1, int(os.environ.get("IBKR_PROBE_RETRIES", "3")))
+
+    last_error_type = None
+    last_error = None
+    accounts_count = 0
+    server_version = None
+    per_attempt_timeout = max(3.0, timeout / retries)
+
+    for i in range(retries):
+        try:
+            ready, accounts_count, server_version = await attempt(
+                host, port, client_id, per_attempt_timeout
+            )
+            if ready:
+                emit({
+                    "ready": True,
+                    "host": host,
+                    "port": port,
+                    "client_id": client_id,
+                    "server_version": server_version,
+                    "accounts_count": accounts_count,
+                })
+                return 0
+            last_error_type = "NoManagedAccounts"
+            last_error = "API handshake OK but no managed accounts yet (login not fully settled)"
+        except asyncio.TimeoutError:
+            last_error_type = "TimeoutError"
+            last_error = f"timeout after {per_attempt_timeout:.1f}s waiting for IB API handshake"
+        except Exception as exc:
+            last_error_type = type(exc).__name__
+            last_error = str(exc) or repr(exc)
+        if i < retries - 1:
+            await asyncio.sleep(1.0)
+
+    emit({
+        "ready": False,
+        "host": host,
+        "port": port,
+        "client_id": client_id,
+        "accounts_count": accounts_count,
+        "error_type": last_error_type,
+        "error": last_error,
+    }, failed=True)
+    return 1
 
 
 raise SystemExit(asyncio.run(main()))
@@ -870,6 +927,10 @@ class ConnectionManager:
         self._client_portal_dispatcher_received_at: dict[int, datetime] = {}
         self._client_portal_pre_dispatcher_log_probe_at: dict[int, datetime] = {}
         self._tws_api_probe_cache: dict[int, tuple[float, dict[str, Any]]] = {}
+        # Serialize interactive TWS completion per connection so the frontend
+        # polling loop and the background health loop can't both run connect()
+        # concurrently (double spawn / clientId races).
+        self._tws_connect_locks: dict[int, asyncio.Lock] = {}
         try:
             self._docker = docker.from_env()
         except Exception as e:
@@ -1264,7 +1325,13 @@ class ConnectionManager:
         labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(middlewares)
         return labels
 
-    def _spawn_tws_gateway(self, connection_id: int, config: dict[str, Any]) -> tuple[str, int, str]:
+    def _spawn_tws_gateway(
+        self,
+        connection_id: int,
+        config: dict[str, Any],
+        *,
+        allow_recreate: bool = True,
+    ) -> tuple[str, int, str]:
         if not self._docker:
             raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}")
         if not TWS_GATEWAY_IMAGE:
@@ -1282,12 +1349,27 @@ class ConnectionManager:
                     stored_port = 0
                 if stored_port == api_proxy_port:
                     return container_name, api_proxy_port, existing.id
+                if not allow_recreate:
+                    # Never tear down a live IB Gateway just to read status: the
+                    # user may be mid-login (typing credentials / 2FA) in the popup.
+                    logger.debug(
+                        "Reusing running TWS container %s despite port mismatch (stored=%s, computed=%s); "
+                        "recreate suppressed",
+                        container_name,
+                        stored_port or "unset",
+                        api_proxy_port,
+                    )
+                    return container_name, stored_port or api_proxy_port, existing.id
                 logger.info(
                     "Restarting TWS container %s because runtime API port changed from %s to proxy port %s",
                     container_name,
                     stored_port or "unset",
                     api_proxy_port,
                 )
+            elif not allow_recreate:
+                # Container exists but isn't running and we were asked not to
+                # recreate (status-only path): surface the current state instead.
+                return container_name, api_proxy_port, existing.id
             existing.remove(force=True)
 
         self._tws_api_probe_cache.pop(connection_id, None)
@@ -1417,9 +1499,11 @@ class ConnectionManager:
         host = str(config.get(TWS_RUNTIME_HOST_KEY) or self._tws_container_name(connection_id))
         port = int(config.get(TWS_RUNTIME_PORT_KEY) or TWS_GATEWAY_API_PORT)
         try:
-            client_id = int(config.get("client_id") or 100)
+            base_client_id = int(config.get("client_id") or 100)
         except (TypeError, ValueError):
-            client_id = 100
+            base_client_id = 100
+        # Dedicated probe clientId: never the gateway's RT (base) or HIST (base+1).
+        client_id = base_client_id + TWS_API_PROBE_CLIENT_ID_OFFSET
         return host, port, client_id
 
     async def _tws_tcp_ready(self, host: str, port: int) -> bool:
@@ -1462,6 +1546,7 @@ class ConnectionManager:
             "IBKR_PORT": str(port),
             "IBKR_CLIENT_ID": str(client_id),
             "IBKR_PROBE_TIMEOUT": str(TWS_API_PROBE_TIMEOUT_SECONDS),
+            "IBKR_PROBE_RETRIES": str(TWS_API_PROBE_RETRIES),
         }
         labels = {
             "edgewalker.type": "tws-api-probe",
@@ -1676,8 +1761,13 @@ class ConnectionManager:
             else:
                 updated_at = updated_at.astimezone(timezone.utc)
 
+            idle_timeout = (
+                CLIENT_PORTAL_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS
+                if conn.status == ConnectionStatus.AWAITING_AUTH.value
+                else CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS
+            )
             age_seconds = (now - updated_at).total_seconds()
-            if age_seconds < CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS:
+            if age_seconds < idle_timeout:
                 continue
 
             candidates.append(
@@ -1877,13 +1967,21 @@ class ConnectionManager:
                 session.commit()
         return updated_config
 
-    async def _ensure_tws_runtime(self, connection_id: int, config: dict[str, Any]) -> dict[str, Any]:
+    async def _ensure_tws_runtime(
+        self,
+        connection_id: int,
+        config: dict[str, Any],
+        *,
+        allow_recreate: bool = True,
+    ) -> dict[str, Any]:
         if not CLIENT_PORTAL_PATH_ROUTING_ENABLED:
             raise RuntimeError("TWS interactive login requires CLIENT_PORTAL_PATH_ROUTING_ENABLED=true")
 
         existing = self._get_tws_container(connection_id)
         runtime_already_running = bool(existing and existing.status == "running")
-        container_name, api_port, runtime_session_id = self._spawn_tws_gateway(connection_id, config)
+        container_name, api_port, runtime_session_id = self._spawn_tws_gateway(
+            connection_id, config, allow_recreate=allow_recreate
+        )
         if not runtime_already_running:
             try:
                 await self._wait_for_tws_novnc(container_name)
@@ -2512,7 +2610,8 @@ class ConnectionManager:
             status_value = conn.status
             status_message = conn.status_message
 
-        config = await self._ensure_tws_runtime(connection_id, config)
+        # Status read: never recreate a live runtime (the user may be mid-login).
+        config = await self._ensure_tws_runtime(connection_id, config, allow_recreate=False)
         launch_url = None
         if user_id is not None and status_value == ConnectionStatus.AWAITING_AUTH.value:
             launch_url = await create_client_portal_launch_url(
@@ -2545,35 +2644,78 @@ class ConnectionManager:
             "message": probe.get("message") or status_message or "Completa il login IB Gateway nel popup.",
         }
 
+    def _tws_connect_lock(self, connection_id: int) -> asyncio.Lock:
+        lock = self._tws_connect_locks.get(connection_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._tws_connect_locks[connection_id] = lock
+        return lock
+
     async def complete_tws_connect(self, connection_id: int) -> ConnectorResult:
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            if conn is None:
-                return ConnectorResult(success=False, message="Connection not found")
-            config = dict(conn.config or {})
-            user_id = conn.user_id
-
-        try:
-            config = await self._ensure_tws_runtime(connection_id, config)
-        except Exception as exc:
-            return ConnectorResult(success=False, message=f"IB Gateway non raggiungibile: {exc}")
-
-        probe = await self._probe_tws_api(connection_id, config, force=True)
-        if not probe.get("ready"):
-            message = probe.get("message") or "IB Gateway API non ancora pronta"
+        async with self._tws_connect_lock(connection_id):
             with get_session_context() as session:
                 conn = session.get(Connection, connection_id)
-                if conn is not None:
-                    conn.status = ConnectionStatus.AWAITING_AUTH.value
-                    conn.status_message = message
-                    conn.updated_at = datetime.now(timezone.utc)
-                    session.commit()
-            return ConnectorResult(success=False, message=message)
+                if conn is None:
+                    return ConnectorResult(success=False, message="Connection not found")
+                # A concurrent caller (frontend poll vs. health loop) may have
+                # already finished while we waited for the lock.
+                if conn.status == ConnectionStatus.CONNECTED.value:
+                    return ConnectorResult(success=True, message="IB Gateway già connesso")
+                config = dict(conn.config or {})
+                user_id = conn.user_id
 
-        result = await self.connect(connection_id)
-        if result.success:
-            await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
-        return result
+            try:
+                config = await self._ensure_tws_runtime(connection_id, config)
+            except Exception as exc:
+                return ConnectorResult(success=False, message=f"IB Gateway non raggiungibile: {exc}")
+
+            probe = await self._probe_tws_api(connection_id, config, force=True)
+            if not probe.get("ready"):
+                message = probe.get("message") or "IB Gateway API non ancora pronta"
+                with get_session_context() as session:
+                    conn = session.get(Connection, connection_id)
+                    if conn is not None:
+                        conn.status = ConnectionStatus.AWAITING_AUTH.value
+                        conn.status_message = message
+                        conn.updated_at = datetime.now(timezone.utc)
+                        session.commit()
+                return ConnectorResult(success=False, message=message)
+
+            result = await self.connect(connection_id)
+            if result.success:
+                await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
+            return result
+
+    async def _try_autocomplete_tws_connection(
+        self, connection_id: int, config: dict[str, Any]
+    ) -> bool:
+        """Probe an interactive IB Gateway login and finish it autonomously.
+
+        The actual login happens inside the noVNC popup, which the backend cannot
+        observe. Once the TWS API answers we can complete the connection here so
+        completion no longer depends on the frontend polling loop being alive
+        (page reloaded, popup flow timed out, browser closed, ...).
+        """
+        container = self._get_tws_container(connection_id)
+        if container is None or container.status != "running":
+            return False
+
+        probe = await self._probe_tws_api(connection_id, config)
+        if not probe.get("ready"):
+            return False
+
+        logger.info(
+            "TWS API ready for connection %s; auto-completing login from health loop",
+            connection_id,
+        )
+        result = await self.complete_tws_connect(connection_id)
+        if not result.success:
+            logger.warning(
+                "Auto-complete of TWS connection %s failed: %s",
+                connection_id,
+                result.message,
+            )
+        return result.success
 
     # ── Connect ──────────────────────────────────────────────────────
 
@@ -2758,6 +2900,9 @@ class ConnectionManager:
             broker_type = conn.broker_type
             config = dict(conn.config or {})
 
+        # Interactive logins (IB Gateway/TWS, Client Portal) are driven to
+        # completion by the dedicated reconcile loop, not here. The health loop
+        # only monitors already-established connections.
         if (
             (is_client_portal_transport(config) or is_tws_interactive_transport(config))
             and stored_status == ConnectionStatus.AWAITING_AUTH.value
@@ -2907,6 +3052,48 @@ class ConnectionManager:
             except Exception:
                 logger.exception("Connection health loop iteration failed")
 
+    async def reconcile_interactive_auth(self) -> None:
+        """Single completion authority for interactive IB Gateway/TWS logins.
+
+        The actual login happens inside the noVNC popup, which the backend cannot
+        observe directly. This finds connections parked in ``awaiting_auth`` and,
+        once their TWS API answers, completes them — so completion never depends
+        on the frontend (it is a pure observer).
+        """
+        with get_session_context() as session:
+            stmt = select(Connection).where(
+                Connection.is_active == True,  # noqa: E712
+                Connection.status == ConnectionStatus.AWAITING_AUTH.value,
+            )
+            candidates = [
+                (c.id, dict(c.config or {}))
+                for c in session.exec(stmt).all()
+            ]
+
+        candidates = [
+            (cid, config)
+            for cid, config in candidates
+            if is_tws_interactive_transport(config)
+        ]
+        if not candidates:
+            return
+
+        tasks = [
+            self._try_autocomplete_tws_connection(cid, config)
+            for cid, config in candidates
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_interactive_auth_reconcile_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(TWS_AUTH_RECONCILE_INTERVAL_SECONDS)
+            try:
+                await self.reconcile_interactive_auth()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Interactive auth reconcile loop iteration failed")
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def _reset_connected_on_startup(self) -> None:
@@ -3003,6 +3190,12 @@ class ConnectionManager:
 
         # Keep DB connection status fresh off the request path
         self._tasks.append(asyncio.create_task(self._run_connection_health_loop()))
+
+        # Single authority that drives interactive logins to completion
+        if TWS_AUTO_COMPLETE_ENABLED:
+            self._tasks.append(
+                asyncio.create_task(self._run_interactive_auth_reconcile_loop())
+            )
 
         logger.info("Connection manager started")
 
