@@ -2909,17 +2909,27 @@ class ConnectionManager:
         ):
             return stored_status
 
+        # For an interactive IB Gateway/TWS connection that is not actively
+        # connected, the data gateway (gw-N) is absent BY DESIGN — it is only
+        # spawned after login completes. The TWS login runtime (twsgw-N) is owned
+        # by the auth flow (begin/complete) and the idle-cleanup loop, so the
+        # data-gateway health probe must NOT tear it down here. Doing so races
+        # with begin_tws_auth respawning it and surfaces to the user as
+        # "container twsgw-N not found".
+        if (
+            is_tws_interactive_transport(config)
+            and stored_status not in {
+                ConnectionStatus.CONNECTED.value,
+                ConnectionStatus.CONNECTING.value,
+            }
+        ):
+            return stored_status
+
         actual_message: str | None = None
 
         # Check if the container exists and is running
         container = self._get_container(connection_id, broker_type)
         if not container or container.status != "running":
-            if is_tws_interactive_transport(config) and _has_tws_runtime_state(config):
-                tws_container = self._get_tws_container(connection_id)
-                if tws_container is not None and tws_container.status == "running":
-                    if stored_status in {ConnectionStatus.AWAITING_AUTH.value, ConnectionStatus.ERROR.value}:
-                        return stored_status
-
             actual = ConnectionStatus.DISCONNECTED
             if is_client_portal_transport(config):
                 actual_message = "Gateway container terminated; Client Portal runtime stopped"
