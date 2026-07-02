@@ -211,6 +211,36 @@ CUSTOM_INDICATORS = {
         "parameters": {},
         "outputs": ["value"],
     },
+    # Multi-feed indicator (MTF EMA).  Metadata mirrors the edgewalker library's
+    # get_metadata(); kept here because edgewalker is not a backend dependency.
+    # When the library IS importable, _library_custom_indicators() supersedes it.
+    "mtf_ema": {
+        "name": "MTF_EMA",
+        "display_name": "Multi-Timeframe EMA",
+        "group": "Custom",
+        "description": "EMA computed on a higher timeframe, forward-filled onto the chart",
+        "overlay": True,
+        "inputs": {"close": ["close"]},
+        "parameters": {
+            "timeperiod": {"type": "integer", "default": 20, "min": 1, "max": 500},
+            "timeframe": {
+                "type": "string",
+                "default": "1h",
+                "options": ["5m", "15m", "30m", "1h", "4h", "1d"],
+                "description": "Source timeframe the EMA is computed on",
+            },
+        },
+        "outputs": ["value"],
+        "output_groups": [
+            {
+                "name": "mtf_ema", "label": "MTF EMA", "render_type": "independent",
+                "series": [
+                    {"field": "value", "label": "MTF EMA",
+                     "style": {"type": "line", "color": "#9C27B0", "line_width": 2, "opacity": 1.0, "visible": True}},
+                ],
+            },
+        ],
+    },
     # Price-domain indicator (Volume Profile).  Metadata mirrors the edgewalker
     # library's get_metadata(); kept here because edgewalker is not a backend
     # dependency.  When the library IS importable, _library_custom_indicators()
