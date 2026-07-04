@@ -14,3 +14,6 @@ dist/
 
 # Database
 *.db
+
+# graphify knowledge-graph output
+graphify-out/
