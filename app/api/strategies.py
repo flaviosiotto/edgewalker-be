@@ -240,15 +240,23 @@ def get_backtest_runtime_status_endpoint(
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
-    status_payload = backtest_runner_service.get_backtest_status(backtest.id)
+    bt_id = backtest.id
+    strategy = get_strategy(session, backtest.strategy_id, current_user.id)
+    connection_id = strategy.connection_id
+    # Release the pooled DB connection before the blocking HTTP call to the
+    # backtest container: this endpoint is polled once per second per client
+    # during playback, and holding the connection across a slow (up to 5s)
+    # httpx call exhausts the pool.
+    session.close()
+
+    status_payload = backtest_runner_service.get_backtest_status(bt_id)
     service_status = status_payload.setdefault("service", {})
     if isinstance(service_status, dict):
-        strategy = get_strategy(session, backtest.strategy_id, current_user.id)
-        service_status.setdefault("backtest_id", backtest.id)
-        service_status.setdefault("stream_id", f"backtest-{backtest.id}")
-        service_status.setdefault("bars_stream", f"bars:backtest-{backtest.id}")
-        if strategy.connection_id is not None:
-            service_status.setdefault("connection_id", str(strategy.connection_id))
+        service_status.setdefault("backtest_id", bt_id)
+        service_status.setdefault("stream_id", f"backtest-{bt_id}")
+        service_status.setdefault("bars_stream", f"bars:backtest-{bt_id}")
+        if connection_id is not None:
+            service_status.setdefault("connection_id", str(connection_id))
     return status_payload
 
 
@@ -264,8 +272,10 @@ def get_backtest_runtime_orders_endpoint(
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
+    bt_id = backtest.id
+    session.close()  # release the pooled DB connection before the blocking HTTP call
     try:
-        return backtest_runner_service.list_backtest_orders(backtest.id, active_only=active_only)
+        return backtest_runner_service.list_backtest_orders(bt_id, active_only=active_only)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
@@ -332,8 +342,10 @@ def get_backtest_runtime_positions_endpoint(
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
+    bt_id = backtest.id
+    session.close()  # release the pooled DB connection before the blocking HTTP call
     try:
-        return backtest_runner_service.get_backtest_position(backtest.id)
+        return backtest_runner_service.get_backtest_position(bt_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
@@ -349,8 +361,10 @@ def get_backtest_runtime_trades_endpoint(
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
+    bt_id = backtest.id
+    session.close()  # release the pooled DB connection before the blocking HTTP call
     try:
-        return backtest_runner_service.list_backtest_trades(backtest.id)
+        return backtest_runner_service.list_backtest_trades(bt_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
@@ -366,8 +380,10 @@ def get_backtest_runtime_equity_endpoint(
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
+    bt_id = backtest.id
+    session.close()  # release the pooled DB connection before the blocking HTTP call
     try:
-        return backtest_runner_service.list_backtest_equity(backtest.id)
+        return backtest_runner_service.list_backtest_equity(bt_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
@@ -384,8 +400,10 @@ def get_backtest_runtime_alerts_endpoint(
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
+    bt_id = backtest.id
+    session.close()  # release the pooled DB connection before the blocking HTTP call
     try:
-        return backtest_runner_service.list_backtest_alerts(backtest.id, active_only=active_only)
+        return backtest_runner_service.list_backtest_alerts(bt_id, active_only=active_only)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
@@ -402,6 +420,7 @@ def get_backtest_logs_endpoint(
     from app.services.backtest_runner_service import backtest_runner_service
 
     _ = get_backtest(session, backtest_id, current_user.id)  # validate exists
+    session.close()  # release the pooled DB connection before the blocking docker call
     logs = backtest_runner_service.get_container_logs(backtest_id, tail=tail)
     return {"backtest_id": backtest_id, "logs": logs}
 

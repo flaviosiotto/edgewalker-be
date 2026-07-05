@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     CLIENT_PORTAL_PATH_PREFIX_BASE: str = "/ib-access"
 
     DATABASE_URL: str = "sqlite:///./app.db"
+    # Connection pool sizing. Sync `def` endpoints run in FastAPI's threadpool
+    # (default 40) and each pins a DB connection for the whole request, so the
+    # pool must be able to cover that concurrency plus the background loops
+    # (health/auth-reconcile/live-runner monitor). pool_size + max_overflow is
+    # the hard ceiling of connections opened toward Postgres per worker process.
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 20
+    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_RECYCLE: int = 1800
 
     SECRET_KEY: str = "change-me"
     ALGORITHM: str = "RS256"
