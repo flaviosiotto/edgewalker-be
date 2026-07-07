@@ -49,6 +49,16 @@ class LiveStatus(str, Enum):
     STOPPING = "stopping"
     ERROR = "error"
 
+    @classmethod
+    def active_values(cls) -> frozenset[str]:
+        """Statuses that represent a live session with a runner that is (or is
+        expected to be) alive, i.e. worth opening the live view for.
+
+        Explicitly excludes STOPPED (manually stopped) and ERROR (runner
+        crashed): those must route the user back to the strategy design.
+        """
+        return frozenset({cls.STARTING.value, cls.RUNNING.value, cls.STOPPING.value})
+
 
 class Strategy(SQLModel, table=True):
     """Design-time strategy definition. No runtime/live state here."""
@@ -146,14 +156,21 @@ class Strategy(SQLModel, table=True):
 
     @property
     def live(self) -> Optional["StrategyLive"]:
-        """Return the active/latest live session, if any."""
+        """Return the active live session, if any.
+
+        A session counts as "live" only if its runner is (or is expected to be)
+        alive — see LiveStatus.active_values(). A crashed (error) or stopped
+        session is NOT returned, so the caller routes the user to the strategy
+        design instead of into a dead live view.
+        """
         if not self.live_sessions:
             return None
-        # Return first non-stopped, or the most recent
+        # live_sessions is ordered id DESC (most recent first).
+        active = LiveStatus.active_values()
         for sl in self.live_sessions:
-            if sl.status != LiveStatus.STOPPED.value:
+            if sl.status in active:
                 return sl
-        return self.live_sessions[0] if self.live_sessions else None
+        return None
 
 
 class StrategyLive(SQLModel, table=True):

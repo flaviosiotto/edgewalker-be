@@ -613,7 +613,9 @@ def list_live_instances(
     if status_filter:
         stmt = stmt.where(StrategyLive.status == status_filter)
     elif not include_stopped:
-        stmt = stmt.where(StrategyLive.status != LiveStatus.STOPPED.value)
+        # "not stopped" means genuinely active — exclude crashed (error) rows too,
+        # otherwise a dead instance is surfaced as if it were live.
+        stmt = stmt.where(StrategyLive.status.in_(LiveStatus.active_values()))  # type: ignore[union-attr]
     if strategy_id is not None:
         stmt = stmt.where(StrategyLive.strategy_id == strategy_id)
     if parsed_account_ids:
