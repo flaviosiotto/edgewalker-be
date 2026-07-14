@@ -17,6 +17,9 @@ class AssetType(str, Enum):
     FUTURES = "futures"
     INDEX = "index"
     ETF = "etf"
+    CRYPTO = "crypto"
+    COMMODITY = "commodity"
+    CFD = "cfd"
 
 
 class IndicatorConfig(BaseModel):
