@@ -155,8 +155,39 @@ def issue_runner_agent_token_endpoint(
             "backtest_id": backtest.id,
             "stream_id": f"backtest-{backtest.id}",
             "connection_id": strategy.connection_id,
+            "account_id": backtest.account_id,
             "scopes": _DEFAULT_AGENT_RUNNER_SCOPES,
         }
+
+        # Consultative token + backend_api so the agent can read the simulated
+        # account via GET /accounts/{id} — identical shape to live (the account
+        # row is resolved on-read from the backtest service).
+        if backtest.account_id is not None:
+            consultative_purpose = "agent_backend_consult"
+            consultative_token = create_user_delegated_token(
+                session,
+                user_id=runner_principal.user.id,
+                audience=settings.AGENT_TOKEN_AUDIENCE,
+                purpose=consultative_purpose,
+                no_expiry=True,
+                extra_claims={
+                    "strategy_id": backtest.strategy_id,
+                    "backtest_id": backtest.id,
+                    "connection_id": strategy.connection_id,
+                    "account_id": backtest.account_id,
+                    "scopes": _DEFAULT_AGENT_CONSULTATIVE_SCOPES,
+                },
+            )
+            backend_api = {
+                "token": consultative_token,
+                "token_type": "Bearer",
+                "expires_at": expires_at,
+                "audience": settings.AGENT_TOKEN_AUDIENCE,
+                "purpose": consultative_purpose,
+                "scopes": list(_DEFAULT_AGENT_CONSULTATIVE_SCOPES),
+                "account_id": backtest.account_id,
+                "connection_id": strategy.connection_id,
+            }
     else:
         raise HTTPException(status_code=403, detail="Runner token is missing live or backtest binding")
 

@@ -6,11 +6,14 @@ APIs or connection-management routes.
 """
 from __future__ import annotations
 
+import logging
+import os
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.db.database import get_session
 from app.models.user import User
@@ -21,7 +24,12 @@ from app.schemas.live_trading import (
     LivePositionRead,
     LiveTradeRead,
 )
-from app.services.connection_service import get_account, list_accounts, list_all_accounts
+from app.services.connection_service import (
+    SIMULATED_ACCOUNT_TYPE,
+    get_account,
+    list_accounts,
+    list_all_accounts,
+)
 from app.services.connection_service import get_connection
 from app.services.connection_manager import get_connection_manager, resolve_order_history_lookback_days
 from app.services.live_trading_service import (
@@ -35,7 +43,60 @@ from app.services.live_trading_service import (
 )
 from app.utils.auth_utils import get_current_active_or_consultative_user
 
+logger = logging.getLogger(__name__)
+
+_BACKTEST_SERVICE_URL = os.getenv("BACKTEST_SERVICE_URL", "http://strategy-backtest:8080").rstrip("/")
+
 router = APIRouter(prefix="/accounts", tags=["Accounts"])
+
+
+def _resolve_simulated_account_read(session: Session, account, base: AccountRead) -> AccountRead:
+    """Overlay live simulated balance/equity onto a backtest account.
+
+    While the backtest runs, balance/equity come straight from the backtest
+    service (proxy-on-read, always current). Once it ends, the persisted
+    equity_final is authoritative. Any hiccup falls back to the stored row, so
+    a slow/absent backtest service degrades to a stale read, never a 5xx.
+    """
+    from app.models.strategy import BacktestResult, BacktestStatus
+
+    bt = session.exec(
+        select(BacktestResult).where(BacktestResult.account_id == account.id)
+    ).first()
+    if bt is None:
+        return base
+
+    active = bt.status in {BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value}
+    if active:
+        try:
+            with httpx.Client(timeout=3.0) as client:
+                resp = client.get(f"{_BACKTEST_SERVICE_URL}/backtests/{bt.id}/status")
+                resp.raise_for_status()
+                pos = (resp.json() or {}).get("position") or {}
+            cash = pos.get("cash")
+            equity = pos.get("equity")
+            data = base.model_dump()
+            if cash is not None:
+                data["cash_balance"] = float(cash)
+                data["available_funds"] = float(cash)
+            if equity is not None:
+                data["equity"] = float(equity)
+                data["buying_power"] = float(equity)
+            data["snapshot_at"] = datetime.now(timezone.utc)
+            return AccountRead.model_validate(data)
+        except Exception:
+            logger.warning(
+                "Simulated account %s: live status fetch failed, serving stored row",
+                account.id,
+            )
+            return base
+
+    # Finished backtest: the persisted equity_final is authoritative.
+    if bt.equity_final is not None:
+        data = base.model_dump()
+        data["equity"] = float(bt.equity_final)
+        return AccountRead.model_validate(data)
+    return base
 
 
 class AccountOrdersResetRequest(BaseModel):
@@ -95,7 +156,10 @@ def get_account_endpoint(
     account = get_account(session, account_id, current_user.id)
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
-    return AccountRead.model_validate(account)
+    read = AccountRead.model_validate(account)
+    if account.account_type == SIMULATED_ACCOUNT_TYPE:
+        read = _resolve_simulated_account_read(session, account, read)
+    return read
 
 
 @router.get("/{account_id}/orders", response_model=list[LiveOrderRead])

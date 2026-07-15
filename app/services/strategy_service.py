@@ -25,6 +25,7 @@ from app.schemas.strategy import (
     LayoutConfigUpdate,
 )
 from app.schemas.chat import ChatCreate
+from app.services.connection_service import ensure_simulated_backtest_account
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
     build_n8n_backend_api_metadata,
@@ -529,6 +530,20 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
     position_accounting_mode = _resolve_backtest_position_accounting_mode(connection)
 
     try:
+        # Simulated account so the agent can query /accounts/{id} exactly like
+        # live. Balance/equity are resolved on-read from the backtest service.
+        sim_account = ensure_simulated_backtest_account(
+            session,
+            connection.id,
+            backtest.id,
+            initial_capital=float(backtest.initial_capital or 100_000.0),
+            currency=backtest.currency or "USD",
+        )
+        if backtest.account_id != sim_account.id:
+            backtest.account_id = sim_account.id
+            session.add(backtest)
+            session.commit()
+
         backtest_chat = get_or_create_backtest_chat(session, backtest.id, user_id)
         runner_auth_token = create_user_delegated_token(
             session,

@@ -177,6 +177,53 @@ def create_account(
     return account
 
 
+SIMULATED_ACCOUNT_TYPE = "simulated"
+
+
+def ensure_simulated_backtest_account(
+    session: Session,
+    connection_id: int,
+    backtest_id: int,
+    *,
+    initial_capital: float,
+    currency: str = "USD",
+) -> Account:
+    """Create (or reset) the simulated account backing a backtest.
+
+    Keyed by (connection_id, ``BT-{backtest_id}``) so relaunching the same
+    backtest reuses its row, while distinct backtests get distinct accounts —
+    parallel runs never collide. Seeds balance/equity at the initial capital;
+    the live values are resolved on-read from the backtest service.
+    """
+    code = f"BT-{backtest_id}"
+    account = session.exec(
+        select(Account)
+        .where(Account.connection_id == connection_id)
+        .where(Account.account_id == code)
+    ).first()
+    if account is None:
+        account = Account(connection_id=connection_id, account_id=code)
+        session.add(account)
+
+    account.display_name = f"Backtest #{backtest_id}"
+    account.account_type = SIMULATED_ACCOUNT_TYPE
+    account.currency = currency or "USD"
+    account.cash_balance = initial_capital
+    account.equity = initial_capital
+    account.buying_power = initial_capital
+    account.available_funds = initial_capital
+    account.unrealized_pnl = 0.0
+    account.is_active = True
+    account.snapshot_at = datetime.now(timezone.utc)
+    session.commit()
+    session.refresh(account)
+    logger.info(
+        "Ensured simulated backtest account %s (id=%s, connection=%s, backtest=%s)",
+        code, account.id, connection_id, backtest_id,
+    )
+    return account
+
+
 def update_account(session: Session, account_id: int, **fields) -> Account | None:
     account = session.get(Account, account_id)
     if account is None:

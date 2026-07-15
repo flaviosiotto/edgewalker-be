@@ -424,6 +424,18 @@ class BacktestResult(SQLModel, table=True):
     currency: Optional[str] = Field(default="USD", sa_column=Column(String(10), nullable=True))
     expiry: Optional[str] = Field(default=None, sa_column=Column(String(20), nullable=True))
     
+    # Simulated account backing this backtest — lets the agent query
+    # /accounts/{id} exactly like live. Parallels StrategyLive.account_id.
+    account_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("accounts.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
+
     # Backtest execution parameters
     initial_capital: Optional[float] = Field(default=100000.0, sa_column=Column(Float, nullable=True))
     commission: Optional[float] = Field(default=0.0, sa_column=Column(Float, nullable=True))

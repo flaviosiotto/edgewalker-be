@@ -297,8 +297,9 @@ async def get_current_consultative_principal(
         credentials_exception=credentials_exception,
     )
 
-    # Tokens issued with no_expiry are gated by the live session lifecycle:
-    # stopping the live session implicitly revokes them.
+    # Tokens issued with no_expiry are gated by the session lifecycle:
+    # stopping the live session (or finishing the backtest) implicitly revokes
+    # them.
     live_id = principal.claims.get("live_id")
     if live_id is not None:
         strategy_live = session.get(StrategyLive, live_id)
@@ -306,6 +307,12 @@ async def get_current_consultative_principal(
             raise _credentials_exception("Consultative token live session not found")
         if strategy_live.status == LiveStatus.STOPPED.value:
             raise _credentials_exception("Consultative token live session is no longer active")
+
+    backtest_id = principal.claims.get("backtest_id")
+    if backtest_id is not None:
+        backtest = session.get(BacktestResult, backtest_id)
+        if backtest is None:
+            raise _credentials_exception("Consultative token backtest not found")
 
     return principal
 
