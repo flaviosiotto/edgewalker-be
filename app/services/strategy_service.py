@@ -122,6 +122,29 @@ def _normalize_strategy_indicator_field_references(value: Any) -> Any:
     return value
 
 
+def _strip_rule_chat_ids(value: Any) -> Any:
+    """Remove the legacy per-rule ``chat_id`` from a strategy definition.
+
+    The chat/session an ask_agent rule talks to is a run-context property
+    (live -> ``strategy_live.chat``, backtest -> the dedicated backtest chat),
+    never a rule-level one. Older definitions may still carry a design-time
+    ``chat_id`` on rules; strip it so it never leaks into the runner config and
+    hijacks the run's dedicated chat. ``agent_id`` (which agent answers) stays.
+    """
+    if isinstance(value, list):
+        items = cast(list[Any], value)
+        return [_strip_rule_chat_ids(item) for item in items]
+    if isinstance(value, dict):
+        mapping = cast(dict[str, Any], value)
+        is_rule = "action" in mapping and "conditions" in mapping
+        return {
+            key: _strip_rule_chat_ids(item)
+            for key, item in mapping.items()
+            if not (is_rule and key == "chat_id")
+        }
+    return value
+
+
 def _get_owned_agent(session: Session, agent_id: int, user_id: int | None = None) -> Agent:
     agent = session.get(Agent, agent_id)
     if not agent or (user_id is not None and agent.user_id != user_id):
@@ -240,7 +263,9 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
         user_id=user_id,
         name=name,
         description=payload.description,
-        definition=_normalize_strategy_indicator_field_references(payload.definition),
+        definition=_strip_rule_chat_ids(
+            _normalize_strategy_indicator_field_references(payload.definition)
+        ),
         manager_agent_id=payload.manager_agent_id,
         connection_id=payload.connection_id,
         created_at=now,
@@ -301,7 +326,9 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
         strategy.description = payload.description
 
     if payload.definition is not None:
-        strategy.definition = _normalize_strategy_indicator_field_references(payload.definition)
+        strategy.definition = _strip_rule_chat_ids(
+            _normalize_strategy_indicator_field_references(payload.definition)
+        )
 
     if payload.layout_config is not None:
         strategy.layout_config = payload.layout_config
@@ -363,8 +390,10 @@ def create_backtest(
     if resolved_agent_id is not None:
         _get_owned_agent(session, resolved_agent_id, strategy.user_id)
     
-    config_snapshot = _normalize_strategy_indicator_field_references(
-        payload.config if payload.config else strategy.definition
+    config_snapshot = _strip_rule_chat_ids(
+        _normalize_strategy_indicator_field_references(
+            payload.config if payload.config else strategy.definition
+        )
     )
 
     backtest = BacktestResult(
@@ -578,7 +607,9 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
                 )
 
         raw_strategy_config = backtest.config or strategy.definition
-        strategy_config = _normalize_strategy_indicator_field_references(raw_strategy_config)
+        strategy_config = _strip_rule_chat_ids(
+            _normalize_strategy_indicator_field_references(raw_strategy_config)
+        )
         strategy_config = _with_backtest_accounting_snapshot(
             strategy_config,
             broker_type=broker_type,

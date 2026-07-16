@@ -79,6 +79,7 @@ from app.services.strategy_service import (
     get_or_create_live_chat,
     list_live_session_chats,
     resolve_strategy_manager_agent_id,
+    _strip_rule_chat_ids,
 )
 from app.utils.auth_utils import (
     AuthPrincipal,
@@ -384,7 +385,7 @@ async def _start_live_instance_internal(
         timeframe=timeframe,
         account_id=account_id,
         connection_id=connection.id,
-        definition=strategy.definition,
+        definition=_strip_rule_chat_ids(strategy.definition),
     )
     session.add(sl)
     session.commit()
