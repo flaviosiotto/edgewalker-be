@@ -136,11 +136,24 @@ class Strategy(SQLModel, table=True):
         )
     )
 
+    # Design-context chats only. A chat is bound to its context at birth via
+    # ``chat_type``: a live session's chat is ``live``, a backtest's is
+    # ``backtest`` (each also reached through StrategyLive.chat /
+    # BacktestResult.chat). Those run chats still carry ``strategy_id`` purely as
+    # the ON DELETE CASCADE anchor, so they are excluded here — this collection
+    # IS the strategy's design chats, no post-hoc filtering needed by consumers.
+    # viewonly: chats are created with an explicit ``session.add(Chat(...))`` and
+    # removed by the DB-level cascade, never mutated through this collection.
     chats: list["Chat"] = Relationship(
         sa_relationship=relationship(
             "Chat",
-            back_populates="strategy",
-            cascade="all, delete-orphan",
+            primaryjoin=(
+                "and_(Strategy.id == Chat.strategy_id, "
+                "Chat.chat_type.notin_(['live', 'backtest']))"
+            ),
+            foreign_keys="[Chat.strategy_id]",
+            viewonly=True,
+            order_by="Chat.created_at.desc()",
         )
     )
 

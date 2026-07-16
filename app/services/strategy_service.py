@@ -854,7 +854,13 @@ def create_trades_bulk(
 
 
 def list_strategy_chats(session: Session, strategy_id: int, user_id: int | None = None) -> list[Chat]:
-    """List all chats for a strategy."""
+    """List the design-context chats for a strategy.
+
+    Run chats (``live``/``backtest``) are owned by their run entity and reached
+    through it (``/live/sessions/{id}/chats``, the backtest chat endpoint); they
+    only carry ``strategy_id`` for cascade delete. The strategy chat list is the
+    design context, so it must not include them.
+    """
     strategy = get_strategy(session, strategy_id, user_id)
     return list(
         session.exec(
@@ -862,6 +868,7 @@ def list_strategy_chats(session: Session, strategy_id: int, user_id: int | None 
             .options(selectinload(Chat.agent))
             .where(Chat.strategy_id == strategy_id)
             .where(Chat.user_id == strategy.user_id)
+            .where(Chat.chat_type.notin_([Chat.ChatType.LIVE, Chat.ChatType.BACKTEST]))
             .order_by(Chat.created_at.desc())
         ).all()
     )

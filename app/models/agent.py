@@ -113,10 +113,15 @@ class Chat(SQLModel, table=True):
         )
     )
 
+    # The owning strategy (for design chats). Run chats carry strategy_id only
+    # as the ON DELETE CASCADE anchor; the design-scoped `Strategy.chats`
+    # collection is defined by a filtered primaryjoin, so this side is a plain
+    # read view rather than a back-populated pair.
     strategy: Optional["Strategy"] = Relationship(
         sa_relationship=relationship(
             "Strategy",
-            back_populates="chats",
+            foreign_keys="[Chat.strategy_id]",
+            viewonly=True,
         )
     )
 

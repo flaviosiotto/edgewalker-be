@@ -54,8 +54,10 @@ class StrategyRead(BaseModel):
     definition: Any
     created_at: datetime
     updated_at: datetime
+    # Design-context chats only (``Strategy.chats`` is design-scoped at the ORM
+    # level; run chats live/backtest are reached via their run entities).
     chats: list[ChatRead] = []
-    
+
     # AI Agent Manager
     manager_agent_id: Optional[int] = None
 
