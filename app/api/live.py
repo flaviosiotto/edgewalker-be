@@ -77,6 +77,7 @@ from app.services.strategy_service import get_strategy
 from app.services.strategy_service import (
     post_manager_message,
     get_or_create_live_chat,
+    get_or_create_live_session_chat,
     list_live_session_chats,
     resolve_strategy_manager_agent_id,
     _strip_rule_chat_ids,
@@ -374,11 +375,8 @@ async def _start_live_instance_internal(
     }
     broker_type = connection.broker_type
 
-    live_chat = get_or_create_live_chat(session, strategy_id, user_id)
-
     sl = StrategyLive(
         strategy_id=strategy_id,
-        chat_id=live_chat.id,
         manager_agent_id=strategy.manager_agent_id,
         status=LiveStatus.STARTING.value,
         symbol=symbol,
@@ -390,6 +388,9 @@ async def _start_live_instance_internal(
     session.add(sl)
     session.commit()
     session.refresh(sl)
+
+    # Each live session owns a fresh confined chat (chat.live_id -> sl.id).
+    live_chat = get_or_create_live_session_chat(session, sl, user_id)
 
     _append_live_checkpoint(
         session,

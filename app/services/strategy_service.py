@@ -15,7 +15,7 @@ from app.core.config import settings
 from app.models.agent import Agent, Chat
 from app.models.connection import Connection
 from app.models.n8n_chat_history import N8nChatHistory
-from app.models.strategy import Strategy, StrategyLive, BacktestResult, BacktestTrade, BacktestStatus
+from app.models.strategy import Strategy, StrategyLive, BacktestResult, BacktestTrade, BacktestStatus, LiveStatus
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyUpdate,
@@ -426,9 +426,8 @@ def create_backtest(
     )
     session.add(backtest)
     session.flush()
-    chat = _create_backtest_chat(session, strategy, backtest, resolved_agent_id)
-    backtest.chat_id = chat.id
-    session.add(backtest)
+    # The chat is owned by the backtest (chat.backtest_id); no reverse column.
+    _create_backtest_chat(session, strategy, backtest, resolved_agent_id)
     session.commit()
     session.refresh(backtest)
     return backtest
@@ -471,7 +470,7 @@ def _create_backtest_chat(
         )
 
     chat = Chat(
-        strategy_id=backtest.strategy_id,
+        backtest_id=backtest.id,
         user_id=strategy.user_id,
         id_agent=agent_id,
         nome=f"Backtest #{backtest.id}",
@@ -493,35 +492,33 @@ def get_or_create_backtest_chat(session: Session, backtest_id: int, user_id: int
     if resolved_agent_id is not None:
         _get_owned_agent(session, resolved_agent_id, strategy.user_id)
 
-    if backtest.chat_id is not None:
-        chat = _load_chat_with_agent(session, backtest.chat_id)
+    existing = session.exec(
+        select(Chat).where(Chat.backtest_id == backtest.id)
+    ).first()
+    if existing is not None:
         changed = False
-        if chat.chat_type != Chat.ChatType.BACKTEST:
-            chat.chat_type = Chat.ChatType.BACKTEST
+        if existing.chat_type != Chat.ChatType.BACKTEST:
+            existing.chat_type = Chat.ChatType.BACKTEST
             changed = True
-        if chat.strategy_id != backtest.strategy_id:
-            chat.strategy_id = backtest.strategy_id
-            changed = True
-        if chat.id_agent != resolved_agent_id:
-            chat.id_agent = resolved_agent_id
+        if existing.id_agent != resolved_agent_id:
+            existing.id_agent = resolved_agent_id
             changed = True
         if backtest.agent_id is None and resolved_agent_id is not None:
             backtest.agent_id = resolved_agent_id
             session.add(backtest)
             changed = True
         if changed:
-            session.add(chat)
+            session.add(existing)
             session.commit()
-            session.refresh(chat)
-        return _load_chat_with_agent(session, chat.id)
+            session.refresh(existing)
+        return _load_chat_with_agent(session, existing.id)
 
     chat = _create_backtest_chat(session, strategy, backtest, resolved_agent_id)
-    backtest.chat_id = chat.id
     if backtest.agent_id is None and resolved_agent_id is not None:
         backtest.agent_id = resolved_agent_id
-    session.add(backtest)
+        session.add(backtest)
     session.commit()
-    session.refresh(backtest)
+    session.refresh(chat)
     return _load_chat_with_agent(session, chat.id)
 
 
@@ -856,10 +853,9 @@ def create_trades_bulk(
 def list_strategy_chats(session: Session, strategy_id: int, user_id: int | None = None) -> list[Chat]:
     """List the design-context chats for a strategy.
 
-    Run chats (``live``/``backtest``) are owned by their run entity and reached
-    through it (``/live/sessions/{id}/chats``, the backtest chat endpoint); they
-    only carry ``strategy_id`` for cascade delete. The strategy chat list is the
-    design context, so it must not include them.
+    Only design chats carry ``chat.strategy_id`` (run chats are owned via
+    chat.backtest_id / chat.live_id), so this is the strategy's design chats by
+    the FK alone — no chat_type discriminator needed.
     """
     strategy = get_strategy(session, strategy_id, user_id)
     return list(
@@ -868,7 +864,6 @@ def list_strategy_chats(session: Session, strategy_id: int, user_id: int | None 
             .options(selectinload(Chat.agent))
             .where(Chat.strategy_id == strategy_id)
             .where(Chat.user_id == strategy.user_id)
-            .where(Chat.chat_type.notin_([Chat.ChatType.LIVE, Chat.ChatType.BACKTEST]))
             .order_by(Chat.created_at.desc())
         ).all()
     )
@@ -1092,25 +1087,26 @@ def trigger_rule_agent(
 # ─── AI AGENT MANAGER ───
 
 
-def get_or_create_live_chat(session: Session, strategy_id: int, user_id: int | None = None) -> Chat:
-    """Get or create the dedicated 'Live' chat for a strategy.
+def get_or_create_live_session_chat(
+    session: Session,
+    live_session: StrategyLive,
+    user_id: int | None = None,
+) -> Chat:
+    """Get or create the confined chat for a specific live SESSION.
 
-    Every strategy has exactly one chat with ``chat_type='live'``.
-    If none exists it is created automatically, linked to the strategy's
-    manager agent.
+    Each live session owns exactly one chat (``chat.live_id``). A restart
+    creates a new session and therefore a fresh, empty chat.
     """
-    strategy = get_strategy(session, strategy_id, user_id)
-    resolved_manager_agent_id = resolve_strategy_manager_agent_id(session, strategy_id)
+    strategy = get_strategy(session, live_session.strategy_id, user_id)
+    resolved_manager_agent_id = resolve_strategy_manager_agent_id(
+        session, live_session.strategy_id, live_session=live_session, user_id=user_id
+    )
 
-    # Look for existing live chat
     live_chat = session.exec(
-        select(Chat)
-        .where(Chat.strategy_id == strategy_id)
-        .where(Chat.chat_type == Chat.ChatType.LIVE)
+        select(Chat).where(Chat.live_id == live_session.id)
     ).first()
 
     if live_chat:
-        # Ensure it points to the current manager agent
         if live_chat.id_agent != resolved_manager_agent_id:
             live_chat.id_agent = resolved_manager_agent_id
             session.add(live_chat)
@@ -1118,29 +1114,61 @@ def get_or_create_live_chat(session: Session, strategy_id: int, user_id: int | N
             session.refresh(live_chat)
         return _load_chat_with_agent(session, live_chat.id)
 
-    # Create a new live chat
     live_chat = Chat(
-        strategy_id=strategy_id,
+        live_id=live_session.id,
         user_id=strategy.user_id,
         id_agent=resolved_manager_agent_id,
-        nome=f"Live",
-        descrizione="Chat live della strategia — l'agent manager riporta le attività in tempo reale",
+        nome="Live",
+        descrizione="Chat della sessione live — l'agent manager riporta le attività in tempo reale",
         chat_type=Chat.ChatType.LIVE,
         created_at=datetime.now(timezone.utc),
     )
     session.add(live_chat)
     session.commit()
     session.refresh(live_chat)
-    logger.info("Created Live chat (id=%s) for strategy %s", live_chat.id, strategy_id)
+    logger.info("Created Live chat (id=%s) for live session %s", live_chat.id, live_session.id)
     return _load_chat_with_agent(session, live_chat.id)
 
 
-def list_live_session_chats(session: Session, live_id: int, user_id: int | None = None) -> list[Chat]:
-    """List chats relevant to a live session.
+def _current_live_session(session: Session, strategy_id: int) -> StrategyLive | None:
+    """The strategy's current live session: active if any, else the most recent."""
+    active = session.exec(
+        select(StrategyLive)
+        .where(StrategyLive.strategy_id == strategy_id)
+        .where(StrategyLive.status != LiveStatus.STOPPED.value)
+        .order_by(StrategyLive.id.desc())
+    ).first()
+    if active is not None:
+        return active
+    return session.exec(
+        select(StrategyLive)
+        .where(StrategyLive.strategy_id == strategy_id)
+        .order_by(StrategyLive.id.desc())
+    ).first()
 
-    The live page only shows the dedicated LIVE chat plus chats bound to the
-    manager agent snapshot captured on the live session. This keeps the view
-    historically coherent even if the strategy manager changes later.
+
+def get_or_create_live_chat(session: Session, strategy_id: int, user_id: int | None = None) -> Chat:
+    """Get or create the live chat for the strategy's CURRENT live session.
+
+    Live chats are per-session: this resolves the active (else most recent)
+    session and returns its confined chat. Raises 404 if the strategy has
+    never had a live session (there is no live chat without a session).
+    """
+    _ = get_strategy(session, strategy_id, user_id)
+    live_session = _current_live_session(session, strategy_id)
+    if live_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No live session for strategy {strategy_id}",
+        )
+    return get_or_create_live_session_chat(session, live_session, user_id)
+
+
+def list_live_session_chats(session: Session, live_id: int, user_id: int | None = None) -> list[Chat]:
+    """List the chat(s) confined to a live session.
+
+    A live session sees ONLY its own dedicated chat (``chat.live_id``); a
+    restart yields a new session with a fresh, empty chat.
     """
     live_session = session.get(StrategyLive, live_id)
     if not live_session:
@@ -1148,48 +1176,8 @@ def list_live_session_chats(session: Session, live_id: int, user_id: int | None 
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Live session {live_id} not found",
         )
-
-    live_chat = get_or_create_live_chat(session, live_session.strategy_id, user_id)
-    manager_agent_id = resolve_strategy_manager_agent_id(
-        session,
-        live_session.strategy_id,
-        live_session=live_session,
-        user_id=user_id,
-    )
-
-    if manager_agent_id is not None and live_chat.id_agent != manager_agent_id:
-        live_chat.id_agent = manager_agent_id
-        session.add(live_chat)
-        session.commit()
-        session.refresh(live_chat)
-
-    chats = list(
-        session.exec(
-            select(Chat)
-            .options(selectinload(Chat.agent))
-            .where(Chat.strategy_id == live_session.strategy_id)
-            .order_by(Chat.created_at.desc())
-        ).all()
-    )
-
-    relevant: dict[int, Chat] = {live_chat.id: live_chat} if live_chat.id is not None else {}
-    for chat in chats:
-        if chat.id is None:
-            continue
-        if chat.chat_type == Chat.ChatType.LIVE:
-            relevant[chat.id] = chat
-            continue
-        if manager_agent_id is not None and chat.id_agent == manager_agent_id:
-            relevant[chat.id] = chat
-
-    return sorted(
-        relevant.values(),
-        key=lambda chat: (
-            0 if chat.chat_type == Chat.ChatType.LIVE else 1,
-            -(chat.created_at.timestamp() if chat.created_at else 0),
-            -(chat.id or 0),
-        ),
-    )
+    live_chat = get_or_create_live_session_chat(session, live_session, user_id)
+    return [live_chat]
 
 
 def notify_manager_live_start(

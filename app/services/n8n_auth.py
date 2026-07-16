@@ -9,6 +9,7 @@ from jose import jwt
 from sqlmodel import Session, select
 
 from app.core.config import settings
+from app.models.agent import Chat
 from app.models.strategy import BacktestResult, BacktestStatus, LiveStatus, Strategy, StrategyLive
 from app.models.user import User
 from app.utils.auth_utils import (
@@ -169,7 +170,8 @@ def _resolve_active_strategy_live(
     if chat_id is not None:
         sl = session.exec(
             select(StrategyLive)
-            .where(StrategyLive.chat_id == chat_id)
+            .join(Chat, Chat.live_id == StrategyLive.id)
+            .where(Chat.id == chat_id)
             .where(StrategyLive.status != LiveStatus.STOPPED.value)
             .order_by(StrategyLive.id.desc())
         ).first()
@@ -195,7 +197,8 @@ def _resolve_runner_strategy_live(
     if chat_id is not None:
         return session.exec(
             select(StrategyLive)
-            .where(StrategyLive.chat_id == chat_id)
+            .join(Chat, Chat.live_id == StrategyLive.id)
+            .where(Chat.id == chat_id)
             .where(StrategyLive.status != LiveStatus.STOPPED.value)
             .order_by(StrategyLive.id.desc())
         ).first()
@@ -214,7 +217,8 @@ def _resolve_runner_backtest(
     if chat_id is not None:
         return session.exec(
             select(BacktestResult)
-            .where(BacktestResult.chat_id == chat_id)
+            .join(Chat, Chat.backtest_id == BacktestResult.id)
+            .where(Chat.id == chat_id)
             .where(BacktestResult.status.in_(active_statuses))
             .order_by(BacktestResult.id.desc())
         ).first()

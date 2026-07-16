@@ -57,6 +57,10 @@ class Chat(SQLModel, table=True):
         description="FK all'agente associato alla chat",
     )
 
+    # A chat is owned by exactly ONE context, expressed as a chat-side FK:
+    # design -> strategy_id, backtest -> backtest_id, live -> live_id. Only one
+    # of the three is set. All ON DELETE CASCADE, so deleting a context removes
+    # its chat(s). This replaces the old `chat_type`-based discrimination.
     strategy_id: Optional[int] = Field(
         default=None,
         sa_column=Column(
@@ -65,7 +69,29 @@ class Chat(SQLModel, table=True):
             nullable=True,
             index=True,
         ),
-        description="FK alla strategia associata alla chat",
+        description="FK alla strategia (SOLO chat di design)",
+    )
+
+    backtest_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("strategy_backtests.id", ondelete="CASCADE"),
+            nullable=True,
+            index=True,
+        ),
+        description="FK al backtest proprietario (chat di backtest)",
+    )
+
+    live_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("strategy_live.id", ondelete="CASCADE"),
+            nullable=True,
+            index=True,
+        ),
+        description="FK alla sessione live proprietaria (chat live per-sessione)",
     )
 
     nome: str = Field(max_length=255, description="Nome della chat")
@@ -113,15 +139,29 @@ class Chat(SQLModel, table=True):
         )
     )
 
-    # The owning strategy (for design chats). Run chats carry strategy_id only
-    # as the ON DELETE CASCADE anchor; the design-scoped `Strategy.chats`
-    # collection is defined by a filtered primaryjoin, so this side is a plain
-    # read view rather than a back-populated pair.
+    # Owning context (exactly one is set). Design chats via strategy; run chats
+    # via their run entity.
     strategy: Optional["Strategy"] = Relationship(
         sa_relationship=relationship(
             "Strategy",
             foreign_keys="[Chat.strategy_id]",
-            viewonly=True,
+            back_populates="chats",
+        )
+    )
+
+    backtest: Optional["BacktestResult"] = Relationship(
+        sa_relationship=relationship(
+            "BacktestResult",
+            foreign_keys="[Chat.backtest_id]",
+            back_populates="chat",
+        )
+    )
+
+    live_session: Optional["StrategyLive"] = Relationship(
+        sa_relationship=relationship(
+            "StrategyLive",
+            foreign_keys="[Chat.live_id]",
+            back_populates="chat",
         )
     )
 

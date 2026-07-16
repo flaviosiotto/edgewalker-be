@@ -136,23 +136,16 @@ class Strategy(SQLModel, table=True):
         )
     )
 
-    # Design-context chats only. A chat is bound to its context at birth via
-    # ``chat_type``: a live session's chat is ``live``, a backtest's is
-    # ``backtest`` (each also reached through StrategyLive.chat /
-    # BacktestResult.chat). Those run chats still carry ``strategy_id`` purely as
-    # the ON DELETE CASCADE anchor, so they are excluded here — this collection
-    # IS the strategy's design chats, no post-hoc filtering needed by consumers.
-    # viewonly: chats are created with an explicit ``session.add(Chat(...))`` and
-    # removed by the DB-level cascade, never mutated through this collection.
+    # Design chats. Only design chats carry `chat.strategy_id` now (run chats are
+    # owned via chat.backtest_id / chat.live_id), so this collection IS the
+    # strategy's design chats — a plain FK relationship, no discriminator.
     chats: list["Chat"] = Relationship(
         sa_relationship=relationship(
             "Chat",
-            primaryjoin=(
-                "and_(Strategy.id == Chat.strategy_id, "
-                "Chat.chat_type.notin_(['live', 'backtest']))"
-            ),
             foreign_keys="[Chat.strategy_id]",
-            viewonly=True,
+            back_populates="strategy",
+            cascade="all, delete-orphan",
+            passive_deletes=True,
             order_by="Chat.created_at.desc()",
         )
     )
@@ -200,16 +193,6 @@ class StrategyLive(SQLModel, table=True):
             nullable=False,
             index=True,
         )
-    )
-
-    chat_id: Optional[int] = Field(
-        default=None,
-        sa_column=Column(
-            Integer,
-            ForeignKey("chat.id", ondelete="SET NULL"),
-            nullable=True,
-            index=True,
-        ),
     )
 
     manager_agent_id: Optional[int] = Field(
@@ -299,9 +282,23 @@ class StrategyLive(SQLModel, table=True):
         sa_relationship=relationship("Strategy", back_populates="live_sessions")
     )
 
+    # This session's confined chat (chat.live_id -> this row). A restart creates
+    # a new StrategyLive, hence a fresh empty chat. Deleting the session
+    # cascade-deletes its chat via the DB FK.
     chat: Optional["Chat"] = Relationship(
-        sa_relationship=relationship("Chat", foreign_keys="[StrategyLive.chat_id]")
+        sa_relationship=relationship(
+            "Chat",
+            foreign_keys="[Chat.live_id]",
+            back_populates="live_session",
+            uselist=False,
+            passive_deletes=True,
+        )
     )
+
+    @property
+    def chat_id(self) -> Optional[int]:
+        """Read-only id of this session's chat (the FK now lives on chat.live_id)."""
+        return self.chat.id if self.chat is not None else None
 
     manager_agent: Optional["Agent"] = Relationship(
         sa_relationship=relationship("Agent", foreign_keys="[StrategyLive.manager_agent_id]")
@@ -399,15 +396,6 @@ class BacktestResult(SQLModel, table=True):
         )
     )
 
-    chat_id: Optional[int] = Field(
-        default=None,
-        sa_column=Column(
-            Integer,
-            ForeignKey("chat.id", ondelete="SET NULL"),
-            nullable=True,
-            index=True,
-        ),
-    )
 
     # Agent that executes this backtest via n8n webhook
     agent_id: Optional[int] = Field(
@@ -512,9 +500,22 @@ class BacktestResult(SQLModel, table=True):
         sa_relationship=relationship("Strategy", back_populates="backtests")
     )
 
+    # This backtest's dedicated chat (chat.backtest_id -> this row). Deleting the
+    # backtest cascade-deletes its chat via the DB FK.
     chat: Optional["Chat"] = Relationship(
-        sa_relationship=relationship("Chat", foreign_keys="[BacktestResult.chat_id]")
+        sa_relationship=relationship(
+            "Chat",
+            foreign_keys="[Chat.backtest_id]",
+            back_populates="backtest",
+            uselist=False,
+            passive_deletes=True,
+        )
     )
+
+    @property
+    def chat_id(self) -> Optional[int]:
+        """Read-only id of this backtest's chat (the FK now lives on chat.backtest_id)."""
+        return self.chat.id if self.chat is not None else None
 
     agent: "Agent | None" = Relationship(
         sa_relationship=relationship("Agent")
