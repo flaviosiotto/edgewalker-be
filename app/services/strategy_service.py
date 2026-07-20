@@ -386,7 +386,9 @@ def create_backtest(
         source = "ibkr"
     
     # Snapshot the manager agent used by this backtest instance.
-    resolved_agent_id = payload.agent_id if payload.agent_id is not None else strategy.manager_agent_id
+    resolved_agent_id = _resolve_backtest_agent_id(
+        session, strategy, explicit_agent_id=payload.agent_id
+    )
     if resolved_agent_id is not None:
         _get_owned_agent(session, resolved_agent_id, strategy.user_id)
     
@@ -453,8 +455,26 @@ def get_backtest(session: Session, backtest_id: int, user_id: int | None = None)
     return backtest
 
 
-def _resolve_backtest_agent_id(strategy: Strategy, backtest: BacktestResult) -> int | None:
-    return backtest.agent_id if backtest.agent_id is not None else strategy.manager_agent_id
+def _resolve_backtest_agent_id(
+    session: Session,
+    strategy: Strategy,
+    *,
+    explicit_agent_id: int | None = None,
+) -> int | None:
+    """Resolve the manager agent for a backtest run.
+
+    Prefer an explicit snapshot (``backtest.agent_id`` / ``payload.agent_id``),
+    then fall back to the strategy's *effective* manager agent. The fallback
+    delegates to ``resolve_strategy_manager_agent_id`` so a strategy that only
+    configured its agent on the design chat (``strategy.manager_agent_id`` unset)
+    still propagates that agent to the per-backtest chat — otherwise the runner
+    cannot resolve the n8n webhook and alert→agent dispatch fails silently.
+    """
+    if explicit_agent_id is not None:
+        return explicit_agent_id
+    return resolve_strategy_manager_agent_id(
+        session, strategy.id, user_id=strategy.user_id
+    )
 
 
 def _create_backtest_chat(
@@ -488,7 +508,9 @@ def get_or_create_backtest_chat(session: Session, backtest_id: int, user_id: int
     """Get or create the dedicated chat for a single backtest instance."""
     backtest = get_backtest(session, backtest_id, user_id)
     strategy = get_strategy(session, backtest.strategy_id, user_id)
-    resolved_agent_id = _resolve_backtest_agent_id(strategy, backtest)
+    resolved_agent_id = _resolve_backtest_agent_id(
+        session, strategy, explicit_agent_id=backtest.agent_id
+    )
     if resolved_agent_id is not None:
         _get_owned_agent(session, resolved_agent_id, strategy.user_id)
 
