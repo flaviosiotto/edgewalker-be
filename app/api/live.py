@@ -464,7 +464,6 @@ async def _start_live_instance_internal(
             },
         )
 
-    manager_webhook_url: str | None = None
     manager_chat_session_id: str | None = live_chat.n8n_session_id
     runner_auth_token = create_user_delegated_token(
         session,
@@ -478,7 +477,9 @@ async def _start_live_instance_internal(
     if strategy.manager_agent_id:
         manager_agent = session.get(Agent, strategy.manager_agent_id)
         if manager_agent:
-            manager_webhook_url = manager_agent.n8n_webhook
+            # The webhook URL is resolved by the runner from the agent record
+            # (strategy_live.manager_agent_id -> agent.n8n_webhook); only the
+            # auth token — which the runner cannot mint — is injected here.
             manager_webhook_auth_token = create_user_delegated_token(
                 session,
                 user_id=user_id,
@@ -502,7 +503,6 @@ async def _start_live_instance_internal(
         debug_rules=debug_rules,
         account_config=account_config,
         broker_type=broker_type,
-        manager_webhook_url=manager_webhook_url,
         backend_auth_token=runner_auth_token,
         manager_webhook_auth_token=manager_webhook_auth_token,
         manager_chat_session_id=manager_chat_session_id,

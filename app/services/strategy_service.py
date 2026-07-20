@@ -605,13 +605,14 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             },
             no_expiry=True,
         )
-        manager_webhook_url: str | None = None
         manager_webhook_auth_token: str | None = None
         manager_agent_id = backtest_chat.id_agent
         if manager_agent_id:
             manager_agent = session.get(Agent, manager_agent_id)
             if manager_agent:
-                manager_webhook_url = manager_agent.n8n_webhook
+                # The webhook URL itself is resolved by the runner from the
+                # agent record (chat -> agent.n8n_webhook); only the auth token
+                # — which the runner cannot mint — is injected here.
                 manager_webhook_auth_token = create_user_delegated_token(
                     session,
                     user_id=strategy.user_id,
@@ -650,7 +651,6 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             timeframe=backtest.timeframe or "5m",
             broker_type=broker_type,
             position_accounting_mode=position_accounting_mode,
-            manager_webhook_url=manager_webhook_url,
             backend_auth_token=runner_auth_token,
             manager_webhook_auth_token=manager_webhook_auth_token,
             manager_chat_session_id=_chat_session_id(backtest_chat),

@@ -214,7 +214,6 @@ class LiveRunnerService:
         debug_rules: bool = False,
         account_config: dict[str, Any] | None = None,
         broker_type: str | None = None,
-        manager_webhook_url: str | None = None,
         backend_auth_token: str | None = None,
         manager_webhook_auth_token: str | None = None,
         manager_chat_session_id: str | None = None,
@@ -236,7 +235,6 @@ class LiveRunnerService:
             debug_rules: Enable detailed condition logging
             account_config: Broker account config (host, port, account_id, etc.)
             broker_type: Broker type identifier (e.g. 'ibkr')
-            manager_webhook_url: n8n webhook URL for manager agent
             manager_chat_session_id: Chat session ID for manager agent
             strategy_live_id: Database ID of the strategy_live session
             
@@ -318,9 +316,10 @@ class LiveRunnerService:
         if PUBLIC_BASE_URL:
             env["RUNNER_PUBLIC_BASE_URL"] = f"{PUBLIC_BASE_URL}{runner_prefix}"
 
-        # Manager agent webhook (so the runner can call the agent directly)
-        if manager_webhook_url:
-            env["MANAGER_WEBHOOK_URL"] = _rewrite_webhook_for_docker(manager_webhook_url)
+        # Manager agent webhook auth token. The webhook URL itself is resolved
+        # by the runner from the agent record (strategy_live.manager_agent_id ->
+        # agent.n8n_webhook); only the auth token — which the runner cannot mint
+        # — is injected here.
         if manager_webhook_auth_token:
             env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
         if manager_chat_session_id:

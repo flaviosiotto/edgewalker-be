@@ -36,9 +36,6 @@ REDIS_URL = os.getenv("REDIS_URL", "")
 REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
-N8N_INTERNAL_URL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
-N8N_PATH_PREFIX = os.getenv("N8N_PATH_PREFIX", "/n8n")
-
 RUNNER_CORS_ALLOWED_ORIGINS = os.getenv(
     "RUNNER_CORS_ALLOWED_ORIGINS",
     os.getenv("BACKEND_CORS_ORIGINS", ""),
@@ -82,29 +79,6 @@ def _required_runner_image() -> str:
     raise RuntimeError("Missing RUNNER_IMAGE for backend-spawned backtest runners")
 
 
-def _rewrite_webhook_for_docker(url: str) -> str:
-    from urllib.parse import urlparse, urlunparse
-
-    parsed = urlparse(url)
-    path = parsed.path or ""
-    if not path.startswith(N8N_PATH_PREFIX):
-        return url
-
-    new_path = path[len(N8N_PATH_PREFIX):]
-    if not new_path.startswith("/"):
-        new_path = "/" + new_path
-
-    internal = urlparse(N8N_INTERNAL_URL)
-    return urlunparse((
-        internal.scheme,
-        internal.netloc,
-        new_path,
-        parsed.params,
-        parsed.query,
-        parsed.fragment,
-    ))
-
-
 class BacktestRunnerService:
     """Spawn and manage strategy-runner containers for backtests."""
 
@@ -140,7 +114,6 @@ class BacktestRunnerService:
         *,
         broker_type: str = "",
         position_accounting_mode: str = "netting",
-        manager_webhook_url: str | None = None,
         backend_auth_token: str | None = None,
         manager_webhook_auth_token: str | None = None,
         manager_chat_session_id: str | None = None,
@@ -222,8 +195,6 @@ class BacktestRunnerService:
             env["REDIS_PASSWORD"] = REDIS_PASSWORD
         if backend_auth_token:
             env["BACKEND_AUTH_TOKEN"] = backend_auth_token
-        if manager_webhook_url:
-            env["MANAGER_WEBHOOK_URL"] = _rewrite_webhook_for_docker(manager_webhook_url)
         if manager_webhook_auth_token:
             env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
         if manager_chat_session_id:
