@@ -35,6 +35,38 @@ BACKTEST_SERVICE_URL = os.getenv("BACKTEST_SERVICE_URL", "http://strategy-backte
 COMMAND_TIMEOUT = float(os.getenv("POSITION_COMMAND_TIMEOUT", "20"))
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def broker_position_id(position: LivePosition) -> str | None:
+    """The id the broker itself knows this position by, or None if unknown.
+
+    A projection row carries several ids; only this one is meaningful to the
+    gateway. The row's own primary key never is, so it is deliberately not a
+    fallback here — see `_position_broker_ids` for the addressing side.
+    """
+    extra = _as_dict(position.extra)
+    snapshot = _as_dict(extra.get("snapshot_position"))
+    adapter = _as_dict(snapshot.get("raw_position") or snapshot.get("rawPosition"))
+    raw = _as_dict(snapshot.get("raw") or adapter.get("raw"))
+    bucket = str(position.position_bucket or "")
+    candidates = (
+        snapshot.get("broker_position_id"),
+        snapshot.get("position_id"),
+        adapter.get("broker_position_id"),
+        adapter.get("position_id"),
+        raw.get("positionId"),
+        raw.get("position_id"),
+        bucket[len("position:"):] if bucket.startswith("position:") else None,
+    )
+    for candidate in candidates:
+        text = str(candidate).strip() if candidate not in (None, "") else ""
+        if text:
+            return text
+    return None
+
+
 def _position_broker_ids(position: LivePosition) -> set[str]:
     """Every id this projection row may be addressed by."""
     ids: set[str] = set()
@@ -50,6 +82,9 @@ def _position_broker_ids(position: LivePosition) -> set[str]:
             value = snapshot.get(key)
             if value not in (None, ""):
                 ids.add(str(value))
+    resolved = broker_position_id(position)
+    if resolved:
+        ids.add(resolved)
     if position.id is not None:
         ids.add(str(position.id))
     return ids
@@ -129,15 +164,20 @@ async def close_account_position(
         result = backtest_runner_service.close_backtest_position(backtest.id, position_id, payload)
         return {"venue": "backtest", "backtest_id": backtest.id, "result": result}
 
+    # Callers address a position by any of its ids (the row id included), but the
+    # gateway only understands the broker's own id: translate once we have the row.
     row = find_open_position(session, account.id, position_id)
     resolved_symbol = symbol or (row.symbol if row is not None else None)
+    resolved_position_id = str(position_id)
+    if row is not None:
+        resolved_position_id = broker_position_id(row) or resolved_position_id
     connection = session.get(Connection, account.connection_id)
     if connection is None:
         raise ValueError("Account has no connection configured")
     result = await _close_via_gateway(
         connection,
         str(account.account_id) if account.account_id else None,
-        position_id,
+        resolved_position_id,
         quantity=quantity,
         symbol=resolved_symbol,
         extra=command_extra,

@@ -186,6 +186,7 @@ def _coordinator_position_to_read(pos: dict, account_id: int) -> LivePositionRea
     unrealized = pos.get("unrealized_pnl")
     return LivePositionRead(
         id=_synthetic_int_id(ref),
+        broker_position_id=ref or None,
         strategy_live_id=None,
         account_id=account_id,
         position_key=ref or None,
@@ -459,13 +460,21 @@ def list_account_positions_endpoint(
             positions = [p for p in positions if p.symbol.upper() == wanted]
         return positions[:limit]
 
+    from app.services.position_command_service import broker_position_id
+
     positions = list_account_positions(
         session,
         account.id,
         symbol=symbol,
         limit=limit,
     )
-    return [LivePositionRead.model_validate(position) for position in positions]
+    reads: list[LivePositionRead] = []
+    for position in positions:
+        read = LivePositionRead.model_validate(position)
+        # Surface the close handle instead of making every caller dig it out of extra.
+        read.broker_position_id = broker_position_id(position)
+        reads.append(read)
+    return reads
 
 
 class AccountClosePositionRequest(BaseModel):
@@ -487,8 +496,8 @@ async def close_account_position_endpoint(
     """Close a position — the single write path for frontend and agent.
 
     Routed to whoever is authoritative: the backtest ledger for a simulated
-    account, the live runner while one is running (so its order lock serializes
-    the close against the rule engine), otherwise the broker gateway. Callers
+    account, the broker gateway otherwise. `position_id` is the position's
+    `broker_position_id` (the row id is also accepted and translated). Callers
     must never submit an offsetting order instead: on hedging / ticket-based
     brokers that opens a new contrary position rather than closing.
     """

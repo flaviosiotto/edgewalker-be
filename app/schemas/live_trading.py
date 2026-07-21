@@ -207,6 +207,7 @@ class LivePositionRead(BaseModel):
     extra: dict[str, Any] | None = None
 
     # Computed fields (enriched at response time, not persisted)
+    broker_position_id: str | None = None
     last_price: float | None = None
     computed_unrealized_pnl: float | None = None
     computed_market_value: float | None = None
