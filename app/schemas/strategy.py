@@ -239,6 +239,13 @@ class BacktestRuntimeOrderRequest(BaseModel):
     extra: Optional[dict[str, Any]] = None
 
 
+class BacktestRuntimeClosePositionRequest(BaseModel):
+    """Close one position of an active runtime backtest by its ledger id."""
+    quantity: float
+    symbol: Optional[str] = None
+    extra: Optional[dict[str, Any]] = None
+
+
 # ─── LAYOUT CONFIG SCHEMAS ───
 
 

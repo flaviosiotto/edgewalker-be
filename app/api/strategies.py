@@ -14,6 +14,7 @@ from app.schemas.strategy import (
     BacktestRead,
     BacktestUpdate,
     BacktestPlaybackControl,
+    BacktestRuntimeClosePositionRequest,
     BacktestRuntimeOrderRequest,
     TradeRead,
     RuleTriggerRequest,
@@ -305,6 +306,37 @@ def submit_backtest_runtime_order_endpoint(
     )
     try:
         return backtest_runner_service.place_backtest_order(backtest.id, order_payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.post("/{strategy_id}/backtests/{backtest_id}/runtime/positions/{position_id}/close")
+def close_backtest_runtime_position_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    position_id: str,
+    payload: BacktestRuntimeClosePositionRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Close a runtime backtest position through the ledger's own close path.
+
+    Callers must use this instead of submitting an offsetting order: on
+    ticket-based / hedged runs (e.g. cTrader) an opposite order opens a new
+    contrary ticket rather than closing the existing one.
+    """
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    close_payload = payload.model_dump(exclude_none=True)
+    extra = dict(close_payload.get("extra") or {})
+    extra.setdefault("reason", "manual_backtest_close_position")
+    extra.setdefault("source", "backtest_workspace_ui")
+    extra.setdefault("strategy_id", strategy_id)
+    extra.setdefault("backtest_id", backtest.id)
+    close_payload["extra"] = extra
+    try:
+        return backtest_runner_service.close_backtest_position(backtest.id, position_id, close_payload)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 

@@ -413,6 +413,36 @@ class BacktestRunnerService:
         except Exception as exc:
             raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
 
+    def close_backtest_position(
+        self,
+        backtest_id: int,
+        position_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Close one backtest ledger position by its id.
+
+        The canonical close path: strategy-backtest books it as a real close
+        (position_effect=close) instead of an offsetting order, which on
+        ticket-based / hedged runs would open a contrary ticket.
+        """
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.post(
+                    f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/positions/{position_id}/close",
+                    json=payload,
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest position close failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
+
     def get_backtest_position(self, backtest_id: int) -> dict[str, Any]:
         try:
             with httpx.Client(timeout=5.0) as client:
