@@ -96,6 +96,15 @@ class GatewayClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def _patch(self, path: str, json: dict | None = None, timeout: float | None = None) -> dict:
+        async with httpx.AsyncClient(
+            base_url=self._base_url,
+            timeout=timeout or self._timeout,
+        ) as client:
+            resp = await client.patch(path, json=json)
+            resp.raise_for_status()
+            return resp.json()
+
     async def _delete(self, path: str, timeout: float | None = None) -> dict:
         async with httpx.AsyncClient(
             base_url=self._base_url,
@@ -276,12 +285,7 @@ class GatewayClient:
         symbol: str | None = None,
         extra: dict | None = None,
     ) -> dict:
-        """Close a broker-native position by id.
-
-        Only for when no runner owns the position (runner stopped): a live
-        runner must stay the single commander so its ``_order_lock`` keeps
-        closes serialized against the rule engine's own decisions.
-        """
+        """Close a broker-native position by id."""
         payload: dict[str, Any] = {"quantity": quantity}
         if account:
             payload["account"] = account
@@ -290,6 +294,32 @@ class GatewayClient:
         if extra:
             payload["extra"] = extra
         return await self._post(f"/positions/{position_id}/close", json=payload)
+
+    async def amend_position_protection(
+        self,
+        position_id: str | int,
+        *,
+        take_profit_price: float | None = None,
+        stop_loss_price: float | None = None,
+        clear_take_profit: bool = False,
+        clear_stop_loss: bool = False,
+        account: str | None = None,
+        symbol: str | None = None,
+    ) -> dict:
+        """Patch an open position's TP/SL — omitted legs keep their value."""
+        payload: dict[str, Any] = {
+            "clear_take_profit": clear_take_profit,
+            "clear_stop_loss": clear_stop_loss,
+        }
+        if take_profit_price is not None:
+            payload["take_profit_price"] = take_profit_price
+        if stop_loss_price is not None:
+            payload["stop_loss_price"] = stop_loss_price
+        if account:
+            payload["account"] = account
+        if symbol:
+            payload["symbol"] = symbol
+        return await self._patch(f"/positions/{position_id}", json=payload)
 
     async def reread_positions(
         self,

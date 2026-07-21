@@ -521,3 +521,52 @@ async def close_account_position_endpoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+class AccountAmendPositionRequest(BaseModel):
+    """Patch an open position's protection. Omitted legs keep their value."""
+    take_profit_price: float | None = Field(default=None, gt=0)
+    stop_loss_price: float | None = Field(default=None, gt=0)
+    clear_take_profit: bool = False
+    clear_stop_loss: bool = False
+
+
+@router.patch("/{account_id}/positions/{position_id}")
+async def amend_account_position_endpoint(
+    account_id: int,
+    position_id: str,
+    payload: AccountAmendPositionRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Change an open position's take profit / stop loss.
+
+    Patch semantics: a leg left out keeps whatever the broker currently holds,
+    so moving the stop never silently drops the target. Use `clear_take_profit`
+    / `clear_stop_loss` to remove one on purpose.
+    """
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    from app.services.position_command_service import (
+        ProtectionUnsupportedError,
+        amend_account_position_protection,
+    )
+
+    try:
+        return await amend_account_position_protection(
+            session,
+            account,
+            position_id,
+            take_profit_price=payload.take_profit_price,
+            stop_loss_price=payload.stop_loss_price,
+            clear_take_profit=payload.clear_take_profit,
+            clear_stop_loss=payload.clear_stop_loss,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ProtectionUnsupportedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

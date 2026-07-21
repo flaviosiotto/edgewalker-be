@@ -183,3 +183,75 @@ async def close_account_position(
         extra=command_extra,
     )
     return {"venue": "gateway", "connection_id": connection.id, "result": result}
+
+
+class ProtectionUnsupportedError(RuntimeError):
+    """The venue holding this position cannot amend TP/SL."""
+
+
+async def amend_account_position_protection(
+    session: Session,
+    account: Any,
+    position_id: str,
+    *,
+    take_profit_price: float | None = None,
+    stop_loss_price: float | None = None,
+    clear_take_profit: bool = False,
+    clear_stop_loss: bool = False,
+) -> dict[str, Any]:
+    """Patch an open position's TP/SL.
+
+    Patch, not replace: a leg left as None keeps the value the broker already
+    holds, and only the matching clear_* flag removes one. Whether protection is
+    an attribute of the position (cTrader) or a pair of child orders (IBKR,
+    Binance) is the adapter's problem, not the caller's.
+    """
+    if take_profit_price is not None and take_profit_price <= 0:
+        raise ValueError("take_profit_price must be > 0")
+    if stop_loss_price is not None and stop_loss_price <= 0:
+        raise ValueError("stop_loss_price must be > 0")
+    if take_profit_price is not None and clear_take_profit:
+        raise ValueError("take_profit_price and clear_take_profit are mutually exclusive")
+    if stop_loss_price is not None and clear_stop_loss:
+        raise ValueError("stop_loss_price and clear_stop_loss are mutually exclusive")
+    if (
+        take_profit_price is None
+        and stop_loss_price is None
+        and not clear_take_profit
+        and not clear_stop_loss
+    ):
+        raise ValueError("nothing to amend: pass a price or a clear_* flag")
+
+    if account.account_type == SIMULATED_ACCOUNT_TYPE:
+        # The backtest ledger evaluates TP/SL it was given at entry; it has no
+        # amend path. Say so rather than pretend the change landed.
+        raise ProtectionUnsupportedError(
+            "Backtest positions do not support amending TP/SL after entry"
+        )
+
+    row = find_open_position(session, account.id, position_id)
+    resolved_position_id = str(position_id)
+    resolved_symbol: str | None = None
+    if row is not None:
+        resolved_position_id = broker_position_id(row) or resolved_position_id
+        resolved_symbol = row.symbol
+    connection = session.get(Connection, account.connection_id)
+    if connection is None:
+        raise ValueError("Account has no connection configured")
+
+    client = GatewayClient(
+        connection.id, broker_type=connection.broker_type, timeout=COMMAND_TIMEOUT
+    )
+    try:
+        result = await client.amend_position_protection(
+            resolved_position_id,
+            take_profit_price=take_profit_price,
+            stop_loss_price=stop_loss_price,
+            clear_take_profit=clear_take_profit,
+            clear_stop_loss=clear_stop_loss,
+            account=str(account.account_id) if account.account_id else None,
+            symbol=resolved_symbol,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Gateway position amend failed: {exc}") from exc
+    return {"venue": "gateway", "connection_id": connection.id, "result": result}
