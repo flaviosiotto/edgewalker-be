@@ -60,7 +60,6 @@ from app.services.live_trading_service import (
     list_live_fills,
     list_positions,
     list_strategy_orders,
-    list_strategy_positions,
     list_strategy_fills,
     reconcile_on_startup,
     validate_account_for_live,
@@ -1188,20 +1187,6 @@ def list_all_strategy_fills(
     _get_strategy_or_404(session, strategy_id, current_user.id)
     fills = list_strategy_fills(session, strategy_id, limit=limit)
     return [LiveFillRead.model_validate(f) for f in fills]
-
-
-@router.get("/strategies/{strategy_id}/positions", response_model=list[LivePositionRead])
-def list_all_strategy_positions(
-    strategy_id: int,
-    status: str | None = Query(None, description="Filter by status: current positions are always open"),
-    limit: int = Query(200, ge=1, le=2000),
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
-):
-    """List positions across ALL live sessions for a strategy (enriched with PnL)."""
-    _get_strategy_or_404(session, strategy_id, current_user.id)
-    positions = list_strategy_positions(session, strategy_id, status=status, limit=limit)
-    return [_enrich_position(p) for p in positions]
 
 
 @router.get("/sessions/{live_id}/checkpoints")

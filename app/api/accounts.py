@@ -466,3 +466,49 @@ def list_account_positions_endpoint(
         limit=limit,
     )
     return [LivePositionRead.model_validate(position) for position in positions]
+
+
+class AccountClosePositionRequest(BaseModel):
+    """Close one position of an account by its broker position id."""
+    quantity: float = Field(gt=0)
+    symbol: str | None = None
+    reason: str | None = None
+    extra: dict[str, Any] | None = None
+
+
+@router.post("/{account_id}/positions/{position_id}/close")
+async def close_account_position_endpoint(
+    account_id: int,
+    position_id: str,
+    payload: AccountClosePositionRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Close a position — the single write path for frontend and agent.
+
+    Routed to whoever is authoritative: the backtest ledger for a simulated
+    account, the live runner while one is running (so its order lock serializes
+    the close against the rule engine), otherwise the broker gateway. Callers
+    must never submit an offsetting order instead: on hedging / ticket-based
+    brokers that opens a new contrary position rather than closing.
+    """
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    from app.services.position_command_service import close_account_position
+
+    try:
+        return await close_account_position(
+            session,
+            account,
+            position_id,
+            quantity=payload.quantity,
+            symbol=payload.symbol,
+            reason=payload.reason,
+            extra=payload.extra,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

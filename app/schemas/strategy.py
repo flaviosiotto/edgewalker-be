@@ -137,7 +137,10 @@ class BacktestRead(BaseModel):
     strategy_id: int
     chat_id: Optional[int] = None
     agent_id: Optional[int] = None
-    
+    # Simulated account backing this run, so callers address it through the same
+    # account-scoped APIs as live.
+    account_id: Optional[int] = None
+
     # Input parameters
     symbol: str
     start_date: date
@@ -238,12 +241,6 @@ class BacktestRuntimeOrderRequest(BaseModel):
     order_ref: Optional[str] = None
     extra: Optional[dict[str, Any]] = None
 
-
-class BacktestRuntimeClosePositionRequest(BaseModel):
-    """Close one position of an active runtime backtest by its ledger id."""
-    quantity: float
-    symbol: Optional[str] = None
-    extra: Optional[dict[str, Any]] = None
 
 
 # ─── LAYOUT CONFIG SCHEMAS ───

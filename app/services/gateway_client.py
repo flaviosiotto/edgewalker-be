@@ -267,6 +267,30 @@ class GatewayClient:
         resp = await self._get("/positions", params=params)
         return resp.get("positions", [])
 
+    async def close_position(
+        self,
+        position_id: str | int,
+        *,
+        quantity: float,
+        account: str | None = None,
+        symbol: str | None = None,
+        extra: dict | None = None,
+    ) -> dict:
+        """Close a broker-native position by id.
+
+        Only for when no runner owns the position (runner stopped): a live
+        runner must stay the single commander so its ``_order_lock`` keeps
+        closes serialized against the rule engine's own decisions.
+        """
+        payload: dict[str, Any] = {"quantity": quantity}
+        if account:
+            payload["account"] = account
+        if symbol:
+            payload["symbol"] = symbol
+        if extra:
+            payload["extra"] = extra
+        return await self._post(f"/positions/{position_id}/close", json=payload)
+
     async def reread_positions(
         self,
         *,
