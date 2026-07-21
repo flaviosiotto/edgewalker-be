@@ -309,6 +309,78 @@ def list_account_orders_endpoint(
     return orders
 
 
+class AccountPlaceOrderRequest(BaseModel):
+    symbol: str
+    side: str
+    order_type: str = "market"
+    quantity: float = Field(gt=0)
+    limit_price: float | None = Field(default=None, gt=0)
+    stop_price: float | None = Field(default=None, gt=0)
+    take_profit_price: float | None = Field(default=None, gt=0)
+    stop_loss_price: float | None = Field(default=None, gt=0)
+    # Attribution: with it the order carries the strategy's reference prefix,
+    # exactly as one placed by the runner would.
+    strategy_live_id: int | None = None
+    extra: dict[str, Any] | None = None
+
+
+@router.post("/{account_id}/orders")
+async def place_account_order_endpoint(
+    account_id: int,
+    payload: AccountPlaceOrderRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Submit an order — the single write path for frontend and agent."""
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    from app.services.order_command_service import place_account_order
+
+    try:
+        return await place_account_order(
+            session,
+            account,
+            symbol=payload.symbol,
+            side=payload.side,
+            order_type=payload.order_type,
+            quantity=payload.quantity,
+            limit_price=payload.limit_price,
+            stop_price=payload.stop_price,
+            take_profit_price=payload.take_profit_price,
+            stop_loss_price=payload.stop_loss_price,
+            strategy_live_id=payload.strategy_live_id,
+            extra=payload.extra,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.delete("/{account_id}/orders/{order_id}")
+async def cancel_account_order_endpoint(
+    account_id: int,
+    order_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Cancel a working order. `order_id` is the row id or the broker order id."""
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    from app.services.order_command_service import cancel_account_order
+
+    try:
+        return await cancel_account_order(session, account, order_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/{account_id}/orders/reset", response_model=AccountOrdersResetResponse)
 async def reset_account_orders_endpoint(
     account_id: int,

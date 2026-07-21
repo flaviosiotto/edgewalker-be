@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -275,6 +276,48 @@ class GatewayClient:
         params = {"account": account} if account else None
         resp = await self._get("/positions", params=params)
         return resp.get("positions", [])
+
+    async def place_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str = "market",
+        quantity: float,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        take_profit_price: float | None = None,
+        stop_loss_price: float | None = None,
+        account: str | None = None,
+        order_ref: str | None = None,
+        extra: dict | None = None,
+    ) -> dict:
+        """Submit an order to the broker."""
+        payload: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "order_type": order_type,
+            "quantity": quantity,
+        }
+        for key, value in (
+            ("limit_price", limit_price),
+            ("stop_price", stop_price),
+            ("take_profit_price", take_profit_price),
+            ("stop_loss_price", stop_loss_price),
+            ("account", account),
+            ("order_ref", order_ref),
+            ("extra", extra),
+        ):
+            if value:
+                payload[key] = value
+        return await self._post("/orders", json=payload)
+
+    async def cancel_order(self, order_id: str | int, *, symbol: str | None = None) -> dict:
+        """Cancel a working order by its broker order id."""
+        path = f"/orders/{quote(str(order_id), safe='')}"
+        if symbol:
+            path = f"{path}?symbol={quote(symbol, safe='')}"
+        return await self._delete(path)
 
     async def close_position(
         self,
