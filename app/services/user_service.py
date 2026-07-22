@@ -1,10 +1,11 @@
 import logging
+from datetime import datetime, timezone
 
 from sqlmodel import Session, select
 from fastapi import HTTPException, status
 
 from app.core.config import settings
-from app.models.user import User
+from app.models.user import User, UserStatus, apply_status
 from app.schemas.user import UserCreate
 from app.utils.auth_utils import get_password_hash
 
@@ -30,13 +31,16 @@ def create_user(session: Session, payload: UserCreate) -> User:
             detail=f"Ruolo non valido: {role}",
         )
 
+    # Provisioned by an administrator, so it skips verification and approval.
     user = User(
-        email=payload.email,
+        email=payload.email.strip().lower(),
         username=payload.username,
         hashed_password=get_password_hash(payload.password),
-        is_active=True,
         role=role,
+        email_verified_at=datetime.now(timezone.utc),
+        approved_at=datetime.now(timezone.utc),
     )
+    apply_status(user, UserStatus.ACTIVE)
     session.add(user)
     session.commit()
     session.refresh(user)
@@ -61,13 +65,16 @@ def ensure_bootstrap_admin(session: Session) -> None:
         )
         return
 
+    now = datetime.now(timezone.utc)
     admin = User(
-        email=settings.BOOTSTRAP_ADMIN_EMAIL,
+        email=settings.BOOTSTRAP_ADMIN_EMAIL.strip().lower(),
         username=settings.BOOTSTRAP_ADMIN_USERNAME,
         hashed_password=get_password_hash(settings.BOOTSTRAP_ADMIN_PASSWORD),
-        is_active=True,
         role="admin",
+        email_verified_at=now,
+        approved_at=now,
     )
+    apply_status(admin, UserStatus.ACTIVE)
     session.add(admin)
     session.commit()
     logger.info("Seeded bootstrap administrator %s", settings.BOOTSTRAP_ADMIN_EMAIL)

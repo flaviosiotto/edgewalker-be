@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, Dict, Any, cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
@@ -7,14 +7,24 @@ from sqlmodel import Session
 
 from app.db.database import get_session
 from app.schemas.auth import (
+    EmailVerificationRequest,
+    EmailVerificationResponse,
     MessageResponse,
     PasswordChangeRequest,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
     PasswordResetRequestResponse,
     RefreshTokenRequest,
+    RegistrationRequest,
+    RegistrationResponse,
+    ResendVerificationRequest,
     Token,
     TokenWithRefresh,
+)
+from app.services.registration_service import (
+    confirm_email_verification,
+    register_user,
+    resend_verification_email,
 )
 from app.services.password_reset_service import (
     change_password,
@@ -31,7 +41,7 @@ from app.utils.auth_utils import (
 )
 from app.utils.rate_limit import check_rate_limit
 from app.core.config import settings
-from app.models.user import User
+from app.models.user import User, UserStatus
 
 router = APIRouter(
     prefix="/auth",
@@ -76,6 +86,21 @@ def _enforce_password_reset_quota(request: Request, identifier: str) -> None:
             )
 
 
+#: Why a given account cannot sign in. Only ever shown to a caller who already
+#: proved knowledge of the password, so it leaks nothing to an anonymous prober.
+_LOGIN_BLOCKED_REASONS = {
+    UserStatus.PENDING_EMAIL.value: (
+        "Devi confermare il tuo indirizzo email prima di accedere. "
+        "Controlla la posta o richiedi un nuovo link."
+    ),
+    UserStatus.PENDING_APPROVAL.value: (
+        "Il tuo account e' in attesa di approvazione da parte di un amministratore."
+    ),
+    UserStatus.REJECTED.value: "La richiesta di accesso e' stata rifiutata.",
+    UserStatus.SUSPENDED.value: "Questo account e' sospeso.",
+}
+
+
 @router.post("/token", response_model=TokenWithRefresh)
 async def login(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
@@ -88,6 +113,17 @@ async def login(
             detail="Credenziali non valide",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_LOGIN_BLOCKED_REASONS.get(user.status, "Questo account non e' utilizzabile."),
+        )
+
+    user.last_login_at = datetime.now(timezone.utc)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     token_claims = {"sub": user.email, "uid": user.id, "role": user.role}
@@ -133,6 +169,55 @@ async def refresh_access_token(refresh_data: RefreshTokenRequest, session: Sessi
 @router.post("/logout")
 async def logout(current_user: Annotated[User, Depends(get_current_active_user)]):
     return {"message": "Logout effettuato con successo. Cancella i token dal client."}
+
+
+def _enforce_ip_quota(request: Request, bucket: str, limit: int) -> None:
+    decision = check_rate_limit(
+        f"{bucket}:ip:{_client_ip(request)}", limit=limit, window_seconds=3600
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Troppe richieste. Riprova piu' tardi.",
+            headers={"Retry-After": str(decision.retry_after_seconds)},
+        )
+
+
+@router.post(
+    "/register",
+    response_model=RegistrationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def register_endpoint(
+    payload: RegistrationRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    _enforce_ip_quota(request, "register", settings.REGISTRATION_MAX_PER_IP_PER_HOUR)
+    return register_user(session, payload, background_tasks=background_tasks)
+
+
+@router.post("/email/verify", response_model=EmailVerificationResponse)
+async def verify_email_endpoint(
+    payload: EmailVerificationRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    return confirm_email_verification(session, payload.token, background_tasks=background_tasks)
+
+
+@router.post("/email/resend", response_model=RegistrationResponse)
+async def resend_verification_endpoint(
+    payload: ResendVerificationRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    _enforce_ip_quota(
+        request, "verify-resend", settings.EMAIL_VERIFICATION_MAX_RESENDS_PER_HOUR
+    )
+    return resend_verification_email(session, payload.email, background_tasks=background_tasks)
 
 
 @router.post("/password/change", response_model=MessageResponse)

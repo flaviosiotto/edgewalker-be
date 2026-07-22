@@ -94,6 +94,98 @@ def password_reset_email(*, display_name: str, reset_token: str, expires_minutes
     return subject, text_body, html_body
 
 
+def email_verification_email(*, display_name: str, verification_token: str, expires_hours: int):
+    verify_url = build_frontend_url("verify-email", token=verification_token)
+    subject = f"Conferma il tuo indirizzo email {settings.EMAIL_FROM_NAME}"
+
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"benvenuto in {settings.EMAIL_FROM_NAME}. Conferma il tuo indirizzo email "
+        "per completare la registrazione.\n\n"
+        f"Apri questo link:\n{verify_url}\n\n"
+        f"Il link vale {expires_hours} ore.\n\n"
+        "Se non ti sei registrato tu, ignora questa email.\n"
+    )
+
+    html_body = _render(
+        "Conferma il tuo indirizzo email",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"benvenuto in {settings.EMAIL_FROM_NAME}. Conferma il tuo indirizzo email "
+            "per completare la registrazione."
+        )
+        + _BUTTON.format(url=escape(verify_url, quote=True), label="Conferma l'indirizzo")
+        + _paragraph(f"Il link vale {expires_hours} ore.")
+        + _paragraph("Se non ti sei registrato tu, ignora questa email."),
+    )
+
+    return subject, text_body, html_body
+
+
+def account_pending_approval_email(*, display_name: str):
+    subject = f"Richiesta di accesso a {settings.EMAIL_FROM_NAME} ricevuta"
+
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        "il tuo indirizzo email e' stato confermato.\n\n"
+        f"{settings.EMAIL_FROM_NAME} e' in una fase ad accesso riservato, quindi il tuo "
+        "account deve essere approvato da un amministratore. Riceverai una email "
+        "non appena sara' attivo.\n"
+    )
+
+    html_body = _render(
+        "Richiesta ricevuta",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph("il tuo indirizzo email e' stato confermato.")
+        + _paragraph(
+            f"{settings.EMAIL_FROM_NAME} e' in una fase ad accesso riservato, quindi il tuo "
+            "account deve essere approvato da un amministratore. Riceverai una email "
+            "non appena sara' attivo."
+        ),
+    )
+
+    return subject, text_body, html_body
+
+
+def account_approved_email(*, display_name: str):
+    login_url = build_frontend_url("login")
+    subject = f"Il tuo account {settings.EMAIL_FROM_NAME} e' attivo"
+
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        "il tuo account e' stato attivato. Puoi accedere da qui:\n"
+        f"{login_url}\n"
+    )
+
+    html_body = _render(
+        "Il tuo account e' attivo",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph("il tuo account e' stato attivato.")
+        + _BUTTON.format(url=escape(login_url, quote=True), label="Accedi"),
+    )
+
+    return subject, text_body, html_body
+
+
+def account_rejected_email(*, display_name: str):
+    subject = f"Richiesta di accesso a {settings.EMAIL_FROM_NAME}"
+
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        "la tua richiesta di accesso non e' stata approvata.\n\n"
+        "Se pensi si tratti di un errore, rispondi a chi ti ha invitato.\n"
+    )
+
+    html_body = _render(
+        "Richiesta non approvata",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph("la tua richiesta di accesso non e' stata approvata.")
+        + _paragraph("Se pensi si tratti di un errore, rispondi a chi ti ha invitato."),
+    )
+
+    return subject, text_body, html_body
+
+
 def password_changed_email(*, display_name: str):
     subject = f"La password del tuo account {settings.EMAIL_FROM_NAME} è stata modificata"
 

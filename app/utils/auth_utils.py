@@ -23,7 +23,12 @@ class AuthPrincipal:
     claims: dict[str, Any]
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
+def verify_password(plain_password: str, hashed_password: Optional[str]) -> bool:
+    # Accounts that only authenticate through an external provider have no local
+    # hash. Passing None straight to passlib raises, so no password can ever
+    # match for them.
+    if not hashed_password:
+        return False
     return pwd_context.verify(plain_password, hashed_password)
 
 
@@ -176,12 +181,17 @@ def get_user_by_username_or_email(username_or_email: str, session: Session) -> O
 
 
 def authenticate_user(username_or_email: str, password: str, session: Session) -> Optional[User]:
+    """Return the user when the password matches, regardless of account status.
+
+    Status is deliberately NOT enforced here: the login endpoint needs to tell a
+    pending or rejected account why it cannot sign in, and it can only do that
+    safely once the caller has proved knowledge of the password. Every caller
+    must therefore gate on the returned user's status.
+    """
     user = get_user_by_username_or_email(username_or_email, session)
     if not user:
         return None
     if not verify_password(password, user.hashed_password):
-        return None
-    if not user.is_active:
         return None
     return user
 

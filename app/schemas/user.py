@@ -17,6 +17,9 @@ class UserRead(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+    status: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
 
 
 class UserUpdate(BaseModel):

@@ -90,6 +90,16 @@ class Settings(BaseSettings):
     BOOTSTRAP_ADMIN_USERNAME: str = "admin"
     BOOTSTRAP_ADMIN_PASSWORD: Optional[str] = None
 
+    # Who may end up with a usable account:
+    #   closed             -> only allowlisted emails may register at all
+    #   family_and_friends -> allowlisted go straight through, everyone else
+    #                         lands in the administrator approval queue
+    #   open               -> anyone becomes active once their email is verified
+    REGISTRATION_MODE: str = "family_and_friends"
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 48
+    REGISTRATION_MAX_PER_IP_PER_HOUR: int = 10
+    EMAIL_VERIFICATION_MAX_RESENDS_PER_HOUR: int = 5
+
     BACKEND_CORS_ORIGINS: List[str] = []
 
     LOG_LEVEL: str = "INFO"

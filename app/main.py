@@ -13,6 +13,7 @@ from app.db.database import create_db_and_tables, get_session_context
 from app.services.user_service import ensure_bootstrap_admin
 from app.api.auth import router as auth_router
 from app.api.users import router as users_router
+from app.api.admin_users import router as admin_users_router
 from app.api.healthcheck import router as system_router
 from app.api.agents import router as agents_router
 from app.api.chats import router as chats_router
@@ -134,6 +135,7 @@ app.add_middleware(TrackIDMiddleware)
 
 app.include_router(auth_router)
 app.include_router(users_router)
+app.include_router(admin_users_router)
 app.include_router(system_router)
 app.include_router(agents_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(chats_router, dependencies=[Depends(get_current_active_user)])
