@@ -28,13 +28,23 @@ def get_redis() -> Optional["sync_redis.Redis"]:
     with _client_lock:
         if _client is None:
             try:
-                _client = sync_redis.Redis(
-                    host=settings.REDIS_HOST,
-                    port=settings.REDIS_PORT,
-                    decode_responses=True,
-                    socket_timeout=2,
-                    socket_connect_timeout=2,
-                )
+                if settings.REDIS_URL:
+                    _client = sync_redis.from_url(
+                        settings.REDIS_URL,
+                        decode_responses=True,
+                        socket_timeout=2,
+                        socket_connect_timeout=2,
+                    )
+                else:
+                    _client = sync_redis.Redis(
+                        host=settings.REDIS_HOST,
+                        port=settings.REDIS_PORT,
+                        username=settings.REDIS_USERNAME or None,
+                        password=settings.REDIS_PASSWORD or None,
+                        decode_responses=True,
+                        socket_timeout=2,
+                        socket_connect_timeout=2,
+                    )
             except Exception as exc:  # noqa: BLE001 - never break a request
                 logger.warning("Could not build a Redis client: %s", exc)
                 return None

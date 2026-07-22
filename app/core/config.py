@@ -76,8 +76,14 @@ class Settings(BaseSettings):
     # Public origin of the SPA, used to build the links embedded in emails.
     FRONTEND_BASE_URL: str = "http://localhost:5173"
 
+    # REDIS_URL wins when set, matching how connection_manager, live_runner and
+    # backtest_runner already resolve Redis. Deployments hand us a full URL with
+    # credentials and a generated hostname, so host/port alone are not enough.
+    REDIS_URL: str = ""
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
+    REDIS_USERNAME: str = ""
+    REDIS_PASSWORD: str = ""
 
     # Fixed-window caps for the unauthenticated password reset endpoint, applied
     # per identifier and per client IP.

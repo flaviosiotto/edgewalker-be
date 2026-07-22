@@ -271,8 +271,14 @@ async def list_auth_providers():
 @router.get("/oauth/google/authorize")
 async def google_authorize(request: Request, redirect_to: Optional[str] = None):
     _enforce_ip_quota(request, "oauth-authorize", settings.REGISTRATION_MAX_PER_IP_PER_HOUR)
+    try:
+        authorization_url = build_authorization_url(redirect_to)
+    except HTTPException as exc:
+        # The caller is a browser mid-navigation, so an error page beats a JSON
+        # body it will render as raw text.
+        return _spa_redirect(error=str(exc.detail))
     return RedirectResponse(
-        url=build_authorization_url(redirect_to),
+        url=authorization_url,
         status_code=status.HTTP_307_TEMPORARY_REDIRECT,
     )
 
@@ -299,6 +305,10 @@ async def google_callback(
         )
     except OAuthError as exc:
         return _spa_redirect(error=str(exc))
+    except HTTPException as exc:
+        # Registration refused by the gate, or a dependency unavailable: still a
+        # browser navigation, so answer with a redirect rather than JSON.
+        return _spa_redirect(error=str(exc.detail))
 
     if exchange_code is None:
         return _spa_redirect(account_status=account_status)

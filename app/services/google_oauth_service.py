@@ -21,6 +21,7 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import BackgroundTasks, HTTPException, status
 from jose import JWTError, jwt
+from redis.exceptions import RedisError
 from sqlmodel import Session, select
 
 from app.core.config import settings
@@ -66,15 +67,27 @@ def _require_enabled() -> None:
         )
 
 
+def _redis_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Servizio di autenticazione temporaneamente non disponibile.",
+    )
+
+
 def _require_redis():
+    """Return a client, or raise 503.
+
+    Note this only proves a client could be *built*: redis-py connects lazily,
+    so an unreachable server surfaces on the first command, not here. Every call
+    site must therefore also catch RedisError — otherwise the flow dies with a
+    bare 500 instead of a handled failure.
+
+    Unlike rate limiting this cannot fail open: without the stored PKCE verifier
+    the callback is not verifiable, so refuse it outright.
+    """
     client = get_redis()
     if client is None:
-        # Unlike rate limiting, this cannot fail open: without the stored PKCE
-        # verifier the flow is not verifiable, so refuse it outright.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Servizio di autenticazione temporaneamente non disponibile.",
-        )
+        raise _redis_unavailable()
     return client
 
 
@@ -91,11 +104,15 @@ def build_authorization_url(redirect_to: Optional[str] = None) -> str:
     code_challenge = _b64url(hashlib.sha256(code_verifier.encode("ascii")).digest())
     state = _b64url(secrets.token_bytes(32))
 
-    client.setex(
-        f"{_STATE_PREFIX}{state}",
-        settings.OAUTH_STATE_TTL_SECONDS,
-        json.dumps({"code_verifier": code_verifier, "redirect_to": redirect_to or ""}),
-    )
+    try:
+        client.setex(
+            f"{_STATE_PREFIX}{state}",
+            settings.OAUTH_STATE_TTL_SECONDS,
+            json.dumps({"code_verifier": code_verifier, "redirect_to": redirect_to or ""}),
+        )
+    except RedisError as exc:
+        logger.error("Could not store OAuth state in Redis: %s", exc)
+        raise _redis_unavailable() from exc
 
     query = urlencode(
         {
@@ -118,7 +135,11 @@ def _consume_state(state: str) -> dict[str, Any]:
     client = _require_redis()
     key = f"{_STATE_PREFIX}{state}"
     # GETDEL makes the state single-use: a replayed callback finds nothing.
-    raw = client.getdel(key)
+    try:
+        raw = client.getdel(key)
+    except RedisError as exc:
+        logger.error("Could not read OAuth state from Redis: %s", exc)
+        raise _redis_unavailable() from exc
     if not raw:
         raise OAuthError("Sessione di accesso scaduta o non valida. Riprova.")
     return json.loads(raw)
@@ -205,14 +226,24 @@ def _unique_username(session: Session, email: str) -> str:
 def _issue_exchange_code(user_id: int) -> str:
     client = _require_redis()
     code = _b64url(secrets.token_bytes(32))
-    client.setex(f"{_EXCHANGE_PREFIX}{code}", settings.OAUTH_EXCHANGE_TTL_SECONDS, str(user_id))
+    try:
+        client.setex(
+            f"{_EXCHANGE_PREFIX}{code}", settings.OAUTH_EXCHANGE_TTL_SECONDS, str(user_id)
+        )
+    except RedisError as exc:
+        logger.error("Could not store OAuth exchange code in Redis: %s", exc)
+        raise _redis_unavailable() from exc
     return code
 
 
 def consume_exchange_code(code: str) -> int:
     """Trade a one-time code for the user id it was minted for."""
     client = _require_redis()
-    raw = client.getdel(f"{_EXCHANGE_PREFIX}{code}")
+    try:
+        raw = client.getdel(f"{_EXCHANGE_PREFIX}{code}")
+    except RedisError as exc:
+        logger.error("Could not read OAuth exchange code from Redis: %s", exc)
+        raise _redis_unavailable() from exc
     if not raw:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
