@@ -111,6 +111,22 @@ class Settings(BaseSettings):
     OAUTH_EXCHANGE_TTL_SECONDS: int = 120
     OAUTH_HTTP_TIMEOUT_SECONDS: int = 15
 
+    # Brute-force protection on the password login. Counters live in Redis and
+    # fail open: an outage must not lock everyone out of the product.
+    LOGIN_MAX_FAILURES_PER_IDENTIFIER: int = 10
+    LOGIN_MAX_FAILURES_PER_IP: int = 30
+    LOGIN_LOCKOUT_WINDOW_SECONDS: int = 900
+
+    # Two-factor authentication (TOTP).
+    MFA_TOKEN_AUDIENCE: str = "edgewalker-mfa"
+    MFA_CHALLENGE_EXPIRE_MINUTES: int = 5
+    MFA_ISSUER_NAME: str = "Edgewalker"
+    MFA_RECOVERY_CODE_COUNT: int = 10
+    # Secrets are encrypted at rest with a key derived from this value; leave it
+    # unset to derive from SECRET_KEY. Rotating either one makes every enrolled
+    # authenticator undecryptable, so users would have to re-enrol.
+    MFA_ENCRYPTION_KEY: Optional[str] = None
+
     REGISTRATION_MODE: str = "family_and_friends"
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 48
     REGISTRATION_MAX_PER_IP_PER_HOUR: int = 10

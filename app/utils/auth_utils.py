@@ -180,6 +180,11 @@ def get_user_by_username_or_email(username_or_email: str, session: Session) -> O
     return session.exec(statement).first()
 
 
+#: Hash of a value nobody can supply, used to spend the same CPU time on a
+#: missing account as on a real one.
+_DUMMY_PASSWORD_HASH = pwd_context.hash("edgewalker-nonexistent-account-placeholder")
+
+
 def authenticate_user(username_or_email: str, password: str, session: Session) -> Optional[User]:
     """Return the user when the password matches, regardless of account status.
 
@@ -189,7 +194,11 @@ def authenticate_user(username_or_email: str, password: str, session: Session) -
     must therefore gate on the returned user's status.
     """
     user = get_user_by_username_or_email(username_or_email, session)
-    if not user:
+    if not user or not user.hashed_password:
+        # Verify against a throwaway hash anyway. Returning immediately would
+        # answer far faster than a real bcrypt check, turning response time into
+        # an oracle for which addresses are registered.
+        verify_password(password, _DUMMY_PASSWORD_HASH)
         return None
     if not verify_password(password, user.hashed_password):
         return None

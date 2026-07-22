@@ -12,7 +12,14 @@ from app.schemas.auth import (
     AuthProvidersResponse,
     EmailVerificationRequest,
     EmailVerificationResponse,
+    LoginResponse,
     MessageResponse,
+    MfaConfirmRequest,
+    MfaDisableRequest,
+    MfaRecoveryCodesResponse,
+    MfaSetupResponse,
+    MfaStatusResponse,
+    MfaVerifyRequest,
     OAuthExchangeRequest,
     PasswordChangeRequest,
     PasswordResetConfirmRequest,
@@ -23,7 +30,6 @@ from app.schemas.auth import (
     RegistrationResponse,
     ResendVerificationRequest,
     Token,
-    TokenWithRefresh,
 )
 from app.services.registration_service import (
     confirm_email_verification,
@@ -35,6 +41,17 @@ from app.services.google_oauth_service import (
     build_authorization_url,
     complete_google_login,
     consume_exchange_code,
+)
+from app.services.login_protection import check_lockout, clear_failures, register_failure
+from app.services.totp_service import (
+    confirm_enrollment,
+    count_unused_recovery_codes,
+    disable_mfa,
+    is_mfa_enabled,
+    issue_mfa_challenge_token,
+    resolve_mfa_challenge_token,
+    start_enrollment,
+    verify_mfa_code,
 )
 from app.services.password_reset_service import (
     change_password,
@@ -111,13 +128,25 @@ _LOGIN_BLOCKED_REASONS = {
 }
 
 
-@router.post("/token", response_model=TokenWithRefresh)
+@router.post("/token", response_model=LoginResponse)
 async def login(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    request: Request,
     session: Session = Depends(get_session)
 ):
+    client_ip = _client_ip(request)
+
+    lockout = check_lockout(form_data.username, client_ip)
+    if lockout.locked:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Troppi tentativi di accesso falliti. Riprova piu' tardi.",
+            headers={"Retry-After": str(lockout.retry_after_seconds)},
+        )
+
     user = authenticate_user(form_data.username, form_data.password, session)
     if not user:
+        register_failure(form_data.username, client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenziali non valide",
@@ -130,11 +159,42 @@ async def login(
             detail=_LOGIN_BLOCKED_REASONS.get(user.status, "Questo account non e' utilizzabile."),
         )
 
+    # The password was right, so the identifier budget is released even when a
+    # second factor is still outstanding.
+    clear_failures(form_data.username, client_ip)
+    return _complete_login(session, user)
+
+
+@router.post("/2fa/verify", response_model=LoginResponse)
+async def verify_mfa_endpoint(
+    payload: MfaVerifyRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Second factor: exchange the challenge token plus a code for real tokens."""
+    client_ip = _client_ip(request)
+    user = resolve_mfa_challenge_token(session, payload.mfa_token)
+
+    lockout = check_lockout(f"mfa:{user.email}", client_ip)
+    if lockout.locked:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Troppi codici errati. Riprova piu' tardi.",
+            headers={"Retry-After": str(lockout.retry_after_seconds)},
+        )
+
+    if not verify_mfa_code(session, user, payload.code):
+        register_failure(f"mfa:{user.email}", client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Codice non valido o gia' utilizzato.",
+        )
+
+    clear_failures(f"mfa:{user.email}", client_ip)
     user.last_login_at = datetime.now(timezone.utc)
     session.add(user)
     session.commit()
     session.refresh(user)
-
     return _issue_token_pair(user)
 
 
@@ -172,7 +232,7 @@ async def logout(current_user: Annotated[User, Depends(get_current_active_user)]
     return {"message": "Logout effettuato con successo. Cancella i token dal client."}
 
 
-def _issue_token_pair(user: User) -> dict[str, str]:
+def _issue_token_pair(user: User) -> dict[str, Any]:
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     token_claims = {"sub": user.email, "uid": user.id, "role": user.role}
     return {
@@ -181,7 +241,24 @@ def _issue_token_pair(user: User) -> dict[str, str]:
         ),
         "refresh_token": create_refresh_token(data=token_claims),
         "token_type": "bearer",
+        "mfa_required": False,
     }
+
+
+def _complete_login(session: Session, user: User) -> dict[str, Any]:
+    """Finish any successful first factor.
+
+    Shared by password login and the OAuth exchange so that "Continua con
+    Google" cannot be used to skip an enrolled second factor.
+    """
+    if is_mfa_enabled(session, user.id):
+        return {"mfa_required": True, "mfa_token": issue_mfa_challenge_token(user)}
+
+    user.last_login_at = datetime.now(timezone.utc)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return _issue_token_pair(user)
 
 
 def _spa_redirect(
@@ -317,7 +394,7 @@ async def google_callback(
     )
 
 
-@router.post("/oauth/exchange", response_model=TokenWithRefresh)
+@router.post("/oauth/exchange", response_model=LoginResponse)
 async def oauth_exchange(
     payload: OAuthExchangeRequest,
     session: Session = Depends(get_session),
@@ -332,7 +409,49 @@ async def oauth_exchange(
             detail="Questo account non e' utilizzabile.",
         )
 
-    return _issue_token_pair(user)
+    # Same second-factor gate as the password path.
+    return _complete_login(session, user)
+
+
+@router.get("/2fa/status", response_model=MfaStatusResponse)
+async def mfa_status(
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    session: Session = Depends(get_session),
+):
+    enabled = is_mfa_enabled(session, current_user.id)
+    return {
+        "enabled": enabled,
+        "recovery_codes_remaining": (
+            count_unused_recovery_codes(session, current_user.id) if enabled else 0
+        ),
+    }
+
+
+@router.post("/2fa/setup", response_model=MfaSetupResponse)
+async def mfa_setup(
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    session: Session = Depends(get_session),
+):
+    return start_enrollment(session, current_user)
+
+
+@router.post("/2fa/confirm", response_model=MfaRecoveryCodesResponse)
+async def mfa_confirm(
+    payload: MfaConfirmRequest,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    session: Session = Depends(get_session),
+):
+    return {"recovery_codes": confirm_enrollment(session, current_user, payload.code)}
+
+
+@router.post("/2fa/disable", response_model=MessageResponse)
+async def mfa_disable(
+    payload: MfaDisableRequest,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    session: Session = Depends(get_session),
+):
+    disable_mfa(session, current_user, payload.password, payload.code)
+    return {"message": "Verifica in due passaggi disattivata"}
 
 
 @router.post("/password/change", response_model=MessageResponse)

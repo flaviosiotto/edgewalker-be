@@ -45,6 +45,49 @@ class AuthProvidersResponse(BaseModel):
     google: bool
 
 
+class LoginResponse(BaseModel):
+    """Either a token pair, or a challenge when the account has 2FA enabled.
+
+    Accounts without 2FA keep seeing exactly the previous shape, so existing
+    clients are unaffected.
+    """
+
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    token_type: Optional[str] = None
+    mfa_required: bool = False
+    mfa_token: Optional[str] = None
+
+
+class MfaVerifyRequest(BaseModel):
+    mfa_token: str
+    code: str
+
+
+class MfaStatusResponse(BaseModel):
+    enabled: bool
+    recovery_codes_remaining: int = 0
+
+
+class MfaSetupResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+    qr_svg: str
+
+
+class MfaConfirmRequest(BaseModel):
+    code: str
+
+
+class MfaRecoveryCodesResponse(BaseModel):
+    recovery_codes: list[str]
+
+
+class MfaDisableRequest(BaseModel):
+    password: Optional[str] = None
+    code: Optional[str] = None
+
+
 class OAuthExchangeRequest(BaseModel):
     code: str
 
