@@ -9,18 +9,11 @@ is down is a worse outcome than the abuse window it would close.
 """
 
 import logging
-import threading
 from dataclasses import dataclass
-from typing import Optional
 
-import redis as sync_redis
-
-from app.core.config import settings
+from app.utils.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
-
-_client: Optional["sync_redis.Redis"] = None
-_client_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -29,25 +22,8 @@ class RateLimitDecision:
     retry_after_seconds: int = 0
 
 
-def _get_client() -> Optional["sync_redis.Redis"]:
-    global _client
-    if _client is not None:
-        return _client
-
-    with _client_lock:
-        if _client is None:
-            try:
-                _client = sync_redis.Redis(
-                    host=settings.REDIS_HOST,
-                    port=settings.REDIS_PORT,
-                    decode_responses=True,
-                    socket_timeout=2,
-                    socket_connect_timeout=2,
-                )
-            except Exception as exc:  # noqa: BLE001 - limiter must never break a request
-                logger.warning("Rate limiter could not build a Redis client: %s", exc)
-                return None
-    return _client
+def _get_client():
+    return get_redis()
 
 
 def check_rate_limit(key: str, *, limit: int, window_seconds: int) -> RateLimitDecision:

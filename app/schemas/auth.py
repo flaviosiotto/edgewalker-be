@@ -41,6 +41,14 @@ class MessageResponse(BaseModel):
     message: str
 
 
+class AuthProvidersResponse(BaseModel):
+    google: bool
+
+
+class OAuthExchangeRequest(BaseModel):
+    code: str
+
+
 class RegistrationRequest(BaseModel):
     email: EmailStr
     username: str = Field(min_length=3, max_length=64)

@@ -1,15 +1,19 @@
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, Dict, Any, cast
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session
 
 from app.db.database import get_session
 from app.schemas.auth import (
+    AuthProvidersResponse,
     EmailVerificationRequest,
     EmailVerificationResponse,
     MessageResponse,
+    OAuthExchangeRequest,
     PasswordChangeRequest,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
@@ -25,6 +29,12 @@ from app.services.registration_service import (
     confirm_email_verification,
     register_user,
     resend_verification_email,
+)
+from app.services.google_oauth_service import (
+    OAuthError,
+    build_authorization_url,
+    complete_google_login,
+    consume_exchange_code,
 )
 from app.services.password_reset_service import (
     change_password,
@@ -125,16 +135,7 @@ async def login(
     session.commit()
     session.refresh(user)
 
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    token_claims = {"sub": user.email, "uid": user.id, "role": user.role}
-    access_token = create_access_token(data=token_claims, expires_delta=access_token_expires)
-    refresh_token = create_refresh_token(data=token_claims)
-
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer"
-    }
+    return _issue_token_pair(user)
 
 
 @router.post("/refresh", response_model=Token)
@@ -169,6 +170,47 @@ async def refresh_access_token(refresh_data: RefreshTokenRequest, session: Sessi
 @router.post("/logout")
 async def logout(current_user: Annotated[User, Depends(get_current_active_user)]):
     return {"message": "Logout effettuato con successo. Cancella i token dal client."}
+
+
+def _issue_token_pair(user: User) -> dict[str, str]:
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    token_claims = {"sub": user.email, "uid": user.id, "role": user.role}
+    return {
+        "access_token": create_access_token(
+            data=token_claims, expires_delta=access_token_expires
+        ),
+        "refresh_token": create_refresh_token(data=token_claims),
+        "token_type": "bearer",
+    }
+
+
+def _spa_redirect(
+    *,
+    code: Optional[str] = None,
+    account_status: Optional[str] = None,
+    error: Optional[str] = None,
+    redirect_to: Optional[str] = None,
+) -> RedirectResponse:
+    """Send the browser back to the SPA's OAuth landing route.
+
+    Only the single-use exchange code travels in the URL, never a real token:
+    query strings end up in history, logs and Referer headers.
+    """
+    params = {
+        key: value
+        for key, value in (
+            ("code", code),
+            ("status", account_status),
+            ("error", error),
+            ("redirect_to", redirect_to),
+        )
+        if value
+    }
+    base = settings.FRONTEND_BASE_URL.rstrip("/")
+    return RedirectResponse(
+        url=f"{base}/auth/callback?{urlencode(params)}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 def _enforce_ip_quota(request: Request, bucket: str, limit: int) -> None:
@@ -218,6 +260,69 @@ async def resend_verification_endpoint(
         request, "verify-resend", settings.EMAIL_VERIFICATION_MAX_RESENDS_PER_HOUR
     )
     return resend_verification_email(session, payload.email, background_tasks=background_tasks)
+
+
+@router.get("/providers", response_model=AuthProvidersResponse)
+async def list_auth_providers():
+    """Tell the SPA which external login buttons to render."""
+    return {"google": settings.google_oauth_enabled}
+
+
+@router.get("/oauth/google/authorize")
+async def google_authorize(request: Request, redirect_to: Optional[str] = None):
+    _enforce_ip_quota(request, "oauth-authorize", settings.REGISTRATION_MAX_PER_IP_PER_HOUR)
+    return RedirectResponse(
+        url=build_authorization_url(redirect_to),
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+    )
+
+
+@router.get("/oauth/google/callback")
+async def google_callback(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    """Google redirects the browser here. Always answer with a redirect back to
+    the SPA: the user is looking at a browser tab, not at JSON."""
+    if error:
+        return _spa_redirect(error="Accesso con Google annullato.")
+    if not code or not state:
+        return _spa_redirect(error="Risposta di Google incompleta.")
+
+    try:
+        exchange_code, account_status, redirect_to = complete_google_login(
+            session, code=code, state=state, background_tasks=background_tasks
+        )
+    except OAuthError as exc:
+        return _spa_redirect(error=str(exc))
+
+    if exchange_code is None:
+        return _spa_redirect(account_status=account_status)
+    return _spa_redirect(
+        code=exchange_code, account_status=account_status, redirect_to=redirect_to
+    )
+
+
+@router.post("/oauth/exchange", response_model=TokenWithRefresh)
+async def oauth_exchange(
+    payload: OAuthExchangeRequest,
+    session: Session = Depends(get_session),
+):
+    """Trade the single-use code from the callback for the real token pair."""
+    user_id = consume_exchange_code(payload.code)
+
+    user = session.get(User, user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Questo account non e' utilizzabile.",
+        )
+
+    return _issue_token_pair(user)
 
 
 @router.post("/password/change", response_model=MessageResponse)

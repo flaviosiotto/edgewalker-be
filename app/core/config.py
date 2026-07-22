@@ -95,6 +95,16 @@ class Settings(BaseSettings):
     #   family_and_friends -> allowlisted go straight through, everyone else
     #                         lands in the administrator approval queue
     #   open               -> anyone becomes active once their email is verified
+    # Google OAuth (Authorization Code + PKCE, mediated by this backend).
+    # The redirect URI must match a value registered in the Google console
+    # character for character, or Google refuses the exchange.
+    GOOGLE_OAUTH_CLIENT_ID: Optional[str] = None
+    GOOGLE_OAUTH_CLIENT_SECRET: Optional[str] = None
+    GOOGLE_OAUTH_REDIRECT_URI: str = ""
+    OAUTH_STATE_TTL_SECONDS: int = 600
+    OAUTH_EXCHANGE_TTL_SECONDS: int = 120
+    OAUTH_HTTP_TIMEOUT_SECONDS: int = 15
+
     REGISTRATION_MODE: str = "family_and_friends"
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 48
     REGISTRATION_MAX_PER_IP_PER_HOUR: int = 10
@@ -162,6 +172,14 @@ class Settings(BaseSettings):
             )
 
         return self.jwt_signing_key
+
+    @property
+    def google_oauth_enabled(self) -> bool:
+        return bool(
+            self.GOOGLE_OAUTH_CLIENT_ID
+            and self.GOOGLE_OAUTH_CLIENT_SECRET
+            and self.GOOGLE_OAUTH_REDIRECT_URI
+        )
 
     @property
     def password_reset_debug_token_enabled(self) -> bool:

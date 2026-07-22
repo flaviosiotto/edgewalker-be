@@ -186,6 +186,32 @@ def account_rejected_email(*, display_name: str):
     return subject, text_body, html_body
 
 
+def password_reset_for_external_account_email(*, display_name: str, provider_label: str):
+    login_url = build_frontend_url("login")
+    subject = f"Accesso al tuo account {settings.EMAIL_FROM_NAME}"
+
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        "abbiamo ricevuto una richiesta di reimpostazione password per il tuo account.\n\n"
+        f"Il tuo account non ha una password: accedi con {provider_label}.\n"
+        f"{login_url}\n\n"
+        "Se non hai fatto tu la richiesta puoi ignorare questa email.\n"
+    )
+
+    html_body = _render(
+        "Accedi con " + provider_label,
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            "abbiamo ricevuto una richiesta di reimpostazione password per il tuo account."
+        )
+        + _paragraph(f"Il tuo account non ha una password: accedi con {provider_label}.")
+        + _BUTTON.format(url=escape(login_url, quote=True), label=f"Accedi con {provider_label}")
+        + _paragraph("Se non hai fatto tu la richiesta puoi ignorare questa email."),
+    )
+
+    return subject, text_body, html_body
+
+
 def password_changed_email(*, display_name: str):
     subject = f"La password del tuo account {settings.EMAIL_FROM_NAME} è stata modificata"
 

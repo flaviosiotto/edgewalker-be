@@ -10,7 +10,11 @@ from app.core.config import settings
 from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User
 from app.services.email_service import queue_email
-from app.services.email_templates import password_changed_email, password_reset_email
+from app.services.email_templates import (
+    password_changed_email,
+    password_reset_email,
+    password_reset_for_external_account_email,
+)
 from app.utils.auth_utils import (
     get_password_hash,
     get_user_by_username_or_email,
@@ -63,6 +67,23 @@ def _notify_password_changed(
     )
 
 
+def _notify_external_account_reset(
+    background_tasks: Optional[BackgroundTasks],
+    user: User,
+) -> None:
+    subject, text_body, html_body = password_reset_for_external_account_email(
+        display_name=user.display_name,
+        provider_label="Google",
+    )
+    queue_email(
+        background_tasks,
+        to_address=user.email,
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+    )
+
+
 def change_password(
     session: Session,
     user: User,
@@ -70,6 +91,12 @@ def change_password(
     new_password: str,
     background_tasks: Optional[BackgroundTasks] = None,
 ) -> None:
+    if not user.has_usable_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Questo account accede con un provider esterno e non ha una password.",
+        )
+
     if not verify_password(current_password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La password attuale non e' corretta")
 
@@ -105,6 +132,13 @@ def request_password_reset(
 
     user = get_user_by_username_or_email(normalized_identifier, session)
     if user is None or not user.is_active:
+        return {"message": GENERIC_PASSWORD_RESET_MESSAGE, "reset_token": None, "expires_at": None}
+
+    if not user.has_usable_password:
+        # The account signs in through an external provider. Minting a reset
+        # token would silently convert it into a password account, so point the
+        # user at the provider instead. Same generic response either way.
+        _notify_external_account_reset(background_tasks, user)
         return {"message": GENERIC_PASSWORD_RESET_MESSAGE, "reset_token": None, "expires_at": None}
 
     now = datetime.now(timezone.utc)
