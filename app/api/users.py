@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -10,10 +10,15 @@ from app.models.user import User
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
-@router.post("/", response_model=UserRead)
-def register_user(payload: UserCreate, session: Session = Depends(get_session)):
-    user = create_user(session, payload)
-    return user
+@router.post("/", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+def create_user_endpoint(
+    payload: UserCreate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """Provision an account directly. Self-service signup lives under /auth."""
+    _ = current_user
+    return create_user(session, payload)
 
 
 @router.get("/", response_model=list[UserRead])

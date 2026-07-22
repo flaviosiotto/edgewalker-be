@@ -9,7 +9,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
 from app.observability import init_telemetry, instrument_app
-from app.db.database import create_db_and_tables
+from app.db.database import create_db_and_tables, get_session_context
+from app.services.user_service import ensure_bootstrap_admin
 from app.api.auth import router as auth_router
 from app.api.users import router as users_router
 from app.api.healthcheck import router as system_router
@@ -40,7 +41,10 @@ init_telemetry("backend", log_level=settings.LOG_LEVEL)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_db_and_tables()
-    
+
+    with get_session_context() as session:
+        ensure_bootstrap_admin(session)
+
     # Start connection manager (broker connect/disconnect lifecycle)
     await start_connection_manager()
     logging.getLogger(__name__).info("Started connection manager")

@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import List, Optional
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -55,6 +56,40 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    # Outbound email. With EMAIL_ENABLED off the message is logged instead of
+    # delivered, which is how local dev runs without an SMTP server.
+    EMAIL_ENABLED: bool = False
+    SMTP_HOST: str = "mailpit"
+    SMTP_PORT: int = 1025
+    SMTP_USERNAME: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    # Left unset these auto-negotiate: aiosmtplib upgrades the connection when
+    # the server advertises STARTTLS. Forcing them to False would silently send
+    # credentials in the clear against a provider that supports encryption.
+    SMTP_STARTTLS: Optional[bool] = None
+    SMTP_TLS: Optional[bool] = None
+    SMTP_TIMEOUT_SECONDS: int = 15
+    SMTP_MAX_ATTEMPTS: int = 3
+    EMAIL_FROM_ADDRESS: str = "no-reply@edgewalker.tech"
+    EMAIL_FROM_NAME: str = "Edgewalker"
+
+    # Public origin of the SPA, used to build the links embedded in emails.
+    FRONTEND_BASE_URL: str = "http://localhost:5173"
+
+    REDIS_HOST: str = "redis"
+    REDIS_PORT: int = 6379
+
+    # Fixed-window caps for the unauthenticated password reset endpoint, applied
+    # per identifier and per client IP.
+    PASSWORD_RESET_MAX_PER_IDENTIFIER_PER_HOUR: int = 5
+    PASSWORD_RESET_MAX_PER_IP_PER_HOUR: int = 20
+
+    # First-run admin seeding. Applied only when the user table is empty, which
+    # replaces the previous "first user to hit POST /users/ becomes admin" rule.
+    BOOTSTRAP_ADMIN_EMAIL: Optional[str] = None
+    BOOTSTRAP_ADMIN_USERNAME: str = "admin"
+    BOOTSTRAP_ADMIN_PASSWORD: Optional[str] = None
+
     BACKEND_CORS_ORIGINS: List[str] = []
 
     LOG_LEVEL: str = "INFO"
@@ -65,6 +100,19 @@ class Settings(BaseSettings):
     # Sync settings
     SYNC_POLL_INTERVAL_SECONDS: int = 60  # How often to check if sources need sync
     SYNC_STARTUP_ENABLED: bool = True      # Run sync at startup
+
+    @field_validator("SMTP_STARTTLS", "SMTP_TLS", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value):
+        """Treat an empty env var as "not configured".
+
+        docker-compose renders an unset optional variable as the empty string,
+        which pydantic would otherwise reject as an invalid boolean and take the
+        whole process down at startup.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     def _read_secret_material(
         self,
@@ -104,6 +152,16 @@ class Settings(BaseSettings):
             )
 
         return self.jwt_signing_key
+
+    @property
+    def password_reset_debug_token_enabled(self) -> bool:
+        """Return the raw reset token in the API response.
+
+        Only honoured while email delivery is off: once mail actually goes out
+        the token must never travel back to an unauthenticated caller, since
+        that turns the endpoint into an account takeover primitive.
+        """
+        return self.PASSWORD_RESET_DEBUG_RETURN_TOKEN and not self.EMAIL_ENABLED
 
     @property
     def n8n_webhook_jwt_issuer(self) -> str:

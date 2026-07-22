@@ -1,7 +1,7 @@
 from datetime import timedelta
 from typing import Annotated, Optional, Dict, Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session
 
@@ -29,6 +29,7 @@ from app.utils.auth_utils import (
     get_user_by_email,
     get_current_active_user,
 )
+from app.utils.rate_limit import check_rate_limit
 from app.core.config import settings
 from app.models.user import User
 
@@ -37,6 +38,42 @@ router = APIRouter(
     tags=["Authentication"],
     responses={404: {"description": "Not found"}},
 )
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client address, honouring the reverse proxy in front of us."""
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_password_reset_quota(request: Request, identifier: str) -> None:
+    """Cap reset requests per identifier and per caller.
+
+    Both counters matter: the per-identifier one stops a single mailbox from
+    being flooded, the per-IP one stops a single caller from walking a list of
+    addresses.
+    """
+    quotas = (
+        (
+            f"password-reset:id:{identifier.strip().lower()}",
+            settings.PASSWORD_RESET_MAX_PER_IDENTIFIER_PER_HOUR,
+        ),
+        (
+            f"password-reset:ip:{_client_ip(request)}",
+            settings.PASSWORD_RESET_MAX_PER_IP_PER_HOUR,
+        ),
+    )
+
+    for key, limit in quotas:
+        decision = check_rate_limit(key, limit=limit, window_seconds=3600)
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Troppe richieste di reset password. Riprova piu' tardi.",
+                headers={"Retry-After": str(decision.retry_after_seconds)},
+            )
 
 
 @router.post("/token", response_model=TokenWithRefresh)
@@ -102,24 +139,40 @@ async def logout(current_user: Annotated[User, Depends(get_current_active_user)]
 async def change_password_endpoint(
     payload: PasswordChangeRequest,
     current_user: Annotated[User, Depends(get_current_active_user)],
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ):
-    change_password(session, current_user, payload.current_password, payload.new_password)
+    change_password(
+        session,
+        current_user,
+        payload.current_password,
+        payload.new_password,
+        background_tasks=background_tasks,
+    )
     return {"message": "Password aggiornata con successo"}
 
 
 @router.post("/password-reset/request", response_model=PasswordResetRequestResponse)
 async def request_password_reset_endpoint(
     payload: PasswordResetRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ):
-    return request_password_reset(session, payload.identifier)
+    _enforce_password_reset_quota(request, payload.identifier)
+    return request_password_reset(session, payload.identifier, background_tasks=background_tasks)
 
 
 @router.post("/password-reset/confirm", response_model=MessageResponse)
 async def confirm_password_reset_endpoint(
     payload: PasswordResetConfirmRequest,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ):
-    confirm_password_reset(session, payload.token, payload.new_password)
+    confirm_password_reset(
+        session,
+        payload.token,
+        payload.new_password,
+        background_tasks=background_tasks,
+    )
     return {"message": "Password reimpostata con successo"}

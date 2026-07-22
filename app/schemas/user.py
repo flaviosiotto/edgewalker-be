@@ -7,6 +7,7 @@ class UserCreate(BaseModel):
     email: EmailStr
     username: str
     password: str
+    role: Optional[str] = None
 
 
 class UserRead(BaseModel):

@@ -1,13 +1,16 @@
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from fastapi import HTTPException, status
+from fastapi import BackgroundTasks, HTTPException, status
 from sqlmodel import Session, select
 
 from app.core.config import settings
 from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User
+from app.services.email_service import queue_email
+from app.services.email_templates import password_changed_email, password_reset_email
 from app.utils.auth_utils import (
     get_password_hash,
     get_user_by_username_or_email,
@@ -44,7 +47,29 @@ def _invalidate_active_tokens(session: Session, user_id: int, used_at: datetime)
         session.add(reset_token)
 
 
-def change_password(session: Session, user: User, current_password: str, new_password: str) -> None:
+def _notify_password_changed(
+    background_tasks: Optional[BackgroundTasks],
+    *,
+    email: str,
+    username: str,
+) -> None:
+    subject, text_body, html_body = password_changed_email(display_name=username)
+    queue_email(
+        background_tasks,
+        to_address=email,
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+    )
+
+
+def change_password(
+    session: Session,
+    user: User,
+    current_password: str,
+    new_password: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> None:
     if not verify_password(current_password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La password attuale non e' corretta")
 
@@ -52,14 +77,28 @@ def change_password(session: Session, user: User, current_password: str, new_pas
     if verify_password(new_password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La nuova password deve essere diversa da quella attuale")
 
+    # Captured before the commit: expire_on_commit would otherwise force a
+    # reload of these attributes just to build the notification.
+    recipient_email, recipient_username = user.email, user.username
+
     now = datetime.now(timezone.utc)
     user.hashed_password = get_password_hash(new_password)
     _invalidate_active_tokens(session, user.id, now)
     session.add(user)
     session.commit()
 
+    _notify_password_changed(
+        background_tasks,
+        email=recipient_email,
+        username=recipient_username,
+    )
 
-def request_password_reset(session: Session, identifier: str) -> dict[str, object]:
+
+def request_password_reset(
+    session: Session,
+    identifier: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> dict[str, object]:
     normalized_identifier = identifier.strip()
     if not normalized_identifier:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email o username obbligatori")
@@ -78,17 +117,39 @@ def request_password_reset(session: Session, identifier: str) -> dict[str, objec
         token_hash=_hash_reset_token(raw_token),
         expires_at=expires_at,
     )
+    # Captured before the commit, which expires the instance attributes.
+    recipient_email, recipient_username = user.email, user.username
+
     session.add(reset_token)
     session.commit()
 
+    subject, text_body, html_body = password_reset_email(
+        display_name=recipient_username,
+        reset_token=raw_token,
+        expires_minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES,
+    )
+    queue_email(
+        background_tasks,
+        to_address=recipient_email,
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+    )
+
+    debug_token = settings.password_reset_debug_token_enabled
     return {
         "message": GENERIC_PASSWORD_RESET_MESSAGE,
-        "reset_token": raw_token if settings.PASSWORD_RESET_DEBUG_RETURN_TOKEN else None,
-        "expires_at": expires_at if settings.PASSWORD_RESET_DEBUG_RETURN_TOKEN else None,
+        "reset_token": raw_token if debug_token else None,
+        "expires_at": expires_at if debug_token else None,
     }
 
 
-def confirm_password_reset(session: Session, token: str, new_password: str) -> None:
+def confirm_password_reset(
+    session: Session,
+    token: str,
+    new_password: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> None:
     normalized_token = token.strip()
     if not normalized_token:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token di reset obbligatorio")
@@ -115,9 +176,18 @@ def confirm_password_reset(session: Session, token: str, new_password: str) -> N
     if verify_password(new_password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La nuova password deve essere diversa da quella attuale")
 
+    # Captured before the commit, which expires the instance attributes.
+    recipient_email, recipient_username = user.email, user.username
+
     user.hashed_password = get_password_hash(new_password)
     _invalidate_active_tokens(session, user.id, now)
     reset_token.used_at = now
     session.add(user)
     session.add(reset_token)
     session.commit()
+
+    _notify_password_changed(
+        background_tasks,
+        email=recipient_email,
+        username=recipient_username,
+    )
