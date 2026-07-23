@@ -1,0 +1,5 @@
+# cTrader Open API protobuf wheel — installed with `pip install --no-deps` so it
+# does NOT drag in Twisted or its pinned protobuf==3.20.1 (which conflicts with
+# the OpenTelemetry protobuf runtime). Only the generated *_pb2 message modules
+# are loaded, by app/services/ctrader_accounts.py, to resolve the account list.
+ctrader-open-api==0.9.2

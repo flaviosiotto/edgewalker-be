@@ -9,6 +9,7 @@ gateway container.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Optional
@@ -28,6 +29,9 @@ from app.schemas.connection import (
     ConnectionListResponse,
     ConnectionRead,
     ConnectionUpdate,
+    CTraderAccountOption,
+    CTraderAccountsRequest,
+    CTraderAccountsResponse,
     CTraderOAuthConfigResponse,
     CTraderOAuthTokenRequest,
     CTraderOAuthTokenResponse,
@@ -49,6 +53,7 @@ from app.services.connection_service import (
 from app.services.client_portal_service import is_client_portal_transport, is_tws_interactive_transport
 from app.services.connection_manager import get_connection_manager
 from app.services.connection_manager import resolve_order_history_lookback_days
+from app.services.ctrader_accounts import CTraderAccountsError, fetch_ctrader_accounts
 from app.utils.auth_utils import get_current_active_user
 
 logger = logging.getLogger(__name__)
@@ -141,6 +146,50 @@ async def exchange_ctrader_oauth_token(
         token_type=data.get("tokenType"),
         expires_in=data.get("expiresIn"),
     )
+
+
+@router.post("/ctrader/accounts", response_model=CTraderAccountsResponse)
+async def list_ctrader_accounts(
+    payload: CTraderAccountsRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    """List the trading accounts a cTrader access token can see.
+
+    Powers the account pick-list in the connection form: the gateway's
+    "Account ID" is a ``ctidTraderAccountId`` that appears nowhere in the broker
+    UI, so we fetch it here (ApplicationAuth + account list) from the token the
+    user just obtained. A single short-lived Open API round-trip — no gateway
+    container is spawned.
+    """
+    _ = current_user
+    client_id = settings.CTRADER_OAUTH_CLIENT_ID.strip()
+    client_secret = settings.CTRADER_OAUTH_CLIENT_SECRET.strip()
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Applicazione OAuth cTrader non configurata sul backend",
+        )
+
+    try:
+        accounts = await fetch_ctrader_accounts(
+            access_token=payload.access_token.strip(),
+            environment=payload.environment,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+    except CTraderAccountsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"cTrader ha rifiutato la richiesta account: {exc}",
+        ) from exc
+    except (asyncio.TimeoutError, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Impossibile contattare cTrader per la lista account",
+        ) from exc
+
+    options = [CTraderAccountOption(**account) for account in accounts]
+    return CTraderAccountsResponse(accounts=options, count=len(options))
 
 
 @router.get("/", response_model=ConnectionListResponse)

@@ -19,8 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY ./app /app/app
 COPY ./requirements.txt /app/
+COPY ./requirements-ctrader.txt /app/
 
 RUN pip install --upgrade pip && pip install -r requirements.txt
+# cTrader protobuf wheel, installed without its deps (see requirements-ctrader.txt).
+RUN pip install --no-deps -r requirements-ctrader.txt
 
 # Bundle Swagger UI v5 assets locally (supports OpenAPI 3.1).
 # This avoids relying on the browser being able to reach a CDN at runtime.

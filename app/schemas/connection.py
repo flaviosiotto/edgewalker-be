@@ -147,6 +147,25 @@ class CTraderOAuthTokenResponse(BaseModel):
     expires_in: int | None = None
 
 
+class CTraderAccountsRequest(BaseModel):
+    """List the trading accounts a cTrader access token can see."""
+    access_token: str = Field(..., min_length=1)
+    environment: str = Field(default="demo", description="demo | live — only picks which host to dial")
+
+
+class CTraderAccountOption(BaseModel):
+    """One trading account visible to a cTrader access token."""
+    ctid: int = Field(..., description="ctidTraderAccountId — the internal id used as Account ID")
+    login: int | None = Field(default=None, description="Broker-facing login/account number")
+    is_live: bool = Field(default=False, description="True when the account lives on the live host")
+
+
+class CTraderAccountsResponse(BaseModel):
+    """Accounts a cTrader access token can see, for the setup pick-list."""
+    accounts: list[CTraderAccountOption]
+    count: int
+
+
 # =============================================================================
 # Account Schemas
 # =============================================================================
