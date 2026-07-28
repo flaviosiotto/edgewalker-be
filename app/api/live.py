@@ -1333,6 +1333,29 @@ def update_live_layout_endpoint(
 # ═════════════════════════════════════════════════════════════════════
 
 
+class ManagerAgentUpdateRequest(BaseModel):
+    """Change the manager agent of a live session."""
+    manager_agent_id: int | None = None
+
+
+@router.patch("/sessions/{live_id}/manager-agent", response_model=LiveStrategyDetailRead)
+def update_live_manager_agent_endpoint(
+    live_id: int,
+    payload: ManagerAgentUpdateRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Set the manager agent for a live session (and its dedicated chat).
+
+    The runner resolves the agent per-event from ``strategy_live.manager_agent_id``,
+    so the change applies from the next agent-bound event onward.
+    """
+    from app.services.strategy_service import update_live_manager_agent
+
+    sl = update_live_manager_agent(session, live_id, payload.manager_agent_id, current_user.id)
+    return _serialize_live_detail(session, sl)
+
+
 class ManagerMessageRequest(BaseModel):
     """Message to post in the strategy's live chat."""
     message: str

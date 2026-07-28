@@ -211,26 +211,15 @@ def resolve_strategy_manager_agent_id(
 ) -> int | None:
     """Resolve the effective manager agent for a strategy/live session.
 
-    Historical live sessions should prefer their own manager snapshot. When that
-    snapshot is missing, fall back to the strategy manager. As a final fallback,
-    infer the manager from the most recent strategy-bound chat that is already
-    linked to an agent.
+    A live session uses its own snapshot (taken at start); otherwise the
+    strategy's design-time manager agent. No further inference: the agent set
+    in design IS the agent of the run.
     """
     if live_session and live_session.manager_agent_id is not None:
         return live_session.manager_agent_id
 
     strategy = get_strategy(session, strategy_id, user_id)
-    if strategy.manager_agent_id is not None:
-        return strategy.manager_agent_id
-
-    inferred_chat = session.exec(
-        select(Chat)
-        .options(selectinload(Chat.agent))
-        .where(Chat.strategy_id == strategy_id)
-        .where(Chat.id_agent.is_not(None))
-        .order_by(Chat.created_at.desc(), Chat.id.desc())
-    ).first()
-    return inferred_chat.id_agent if inferred_chat else None
+    return strategy.manager_agent_id
 
 
 def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> Strategy:
@@ -1150,6 +1139,38 @@ def get_or_create_live_session_chat(
     session.refresh(live_chat)
     logger.info("Created Live chat (id=%s) for live session %s", live_chat.id, live_session.id)
     return _load_chat_with_agent(session, live_chat.id)
+
+
+def update_live_manager_agent(
+    session: Session,
+    live_id: int,
+    manager_agent_id: int | None,
+    user_id: int | None = None,
+) -> StrategyLive:
+    """Set the manager agent of a live session and keep its chat aligned."""
+    live_session = session.get(StrategyLive, live_id)
+    if live_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Live session {live_id} not found",
+        )
+    strategy = get_strategy(session, live_session.strategy_id, user_id)
+    if manager_agent_id is not None:
+        _get_owned_agent(session, manager_agent_id, strategy.user_id)
+
+    live_session.manager_agent_id = manager_agent_id
+    session.add(live_session)
+
+    live_chat = session.exec(
+        select(Chat).where(Chat.live_id == live_session.id)
+    ).first()
+    if live_chat and live_chat.id_agent != manager_agent_id:
+        live_chat.id_agent = manager_agent_id
+        session.add(live_chat)
+
+    session.commit()
+    session.refresh(live_session)
+    return live_session
 
 
 def _current_live_session(session: Session, strategy_id: int) -> StrategyLive | None:
