@@ -1372,12 +1372,22 @@ def post_manager_message(
     """
     live_chat = get_or_create_live_chat(session, strategy_id, user_id)
 
-    msg_type = "ai" if sender in ("system", "ai", "agent") else "human"
+    # Shape mirrors the rows n8n's Postgres memory writes ({type, content, ...})
+    # so the LangChain history loader keeps working on the same table.
+    # "system" events are factual notifications (runner fills, lifecycle):
+    # they render as neutral System bubbles in the FE and enter the LLM
+    # history as SystemMessage — never as user requests or agent speech.
+    if sender == "system":
+        msg_type = "system"
+    elif sender in ("ai", "agent"):
+        msg_type = "ai"
+    else:
+        msg_type = "human"
     history_entry = N8nChatHistory(
         session_id=live_chat.n8n_session_id,
         message={
             "type": msg_type,
-            "text": message,
+            "content": message,
         },
     )
     session.add(history_entry)
