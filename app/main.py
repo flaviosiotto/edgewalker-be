@@ -22,6 +22,7 @@ from app.api.marketdata import router as marketdata_router
 from app.api.live import router as live_router
 from app.api.runners import router as runners_router
 from app.api.accounts import router as accounts_router
+from app.api.agent_lessons import router as agent_lessons_router
 from app.api.connections import router as connections_router
 from app.api.client_portal_launch import router as client_portal_launch_router
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
@@ -144,5 +145,6 @@ app.include_router(marketdata_router, dependencies=[Depends(get_current_active_u
 app.include_router(live_router)
 app.include_router(runners_router)
 app.include_router(accounts_router)
+app.include_router(agent_lessons_router)
 app.include_router(connections_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(client_portal_launch_router)
