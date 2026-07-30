@@ -387,6 +387,25 @@ def create_backtest(
         )
     )
 
+    # Self-learning snapshot: which lessons were active when this run started.
+    # ab-evaluate adjusts exactly these (and only these) after comparing the
+    # lessons leg against a baseline leg.
+    from app.models.agent_lesson import AgentLesson
+
+    lessons_meta: dict[str, Any] = {"enabled": bool(payload.use_lessons)}
+    if payload.use_lessons:
+        active_lessons = list(session.exec(
+            select(AgentLesson)
+            .where(AgentLesson.strategy_id == strategy_id)
+            .where(AgentLesson.status == "active")
+        ).all())
+        lessons_meta["active_ids"] = [l.id for l in active_lessons]
+        lessons_meta["confidence_snapshot"] = {
+            str(l.id): l.confidence for l in active_lessons
+        }
+    base_parameters = payload.parameters if isinstance(payload.parameters, dict) else {}
+    merged_parameters = {**base_parameters, "lessons": lessons_meta}
+
     backtest = BacktestResult(
         strategy_id=strategy_id,
         agent_id=resolved_agent_id,
@@ -407,8 +426,8 @@ def create_backtest(
         # Backtest execution parameters
         initial_capital=payload.initial_capital,
         commission=payload.commission,
-        # Additional config overrides
-        parameters=payload.parameters,
+        # Additional config overrides (+ lessons snapshot for A/B evaluation)
+        parameters=merged_parameters,
         # Strategy configuration snapshot (explicit override or auto-capture)
         config=config_snapshot,
         # UI layout config (timezone, extended hours, etc.)
@@ -631,6 +650,16 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
                 backtest.id,
             )
 
+        lessons_cfg = (
+            backtest.parameters.get("lessons")
+            if isinstance(backtest.parameters, dict)
+            else None
+        )
+        use_lessons = (
+            bool(lessons_cfg.get("enabled", True))
+            if isinstance(lessons_cfg, dict)
+            else True
+        )
         result = backtest_runner_service.start_backtest(
             backtest_id=backtest.id,
             connection_id=connection_id,
@@ -644,6 +673,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             manager_webhook_auth_token=manager_webhook_auth_token,
             manager_chat_session_id=_chat_session_id(backtest_chat),
             owner_user_id=strategy.user_id,
+            use_lessons=use_lessons,
         )
         logger.info(
             "Started backtest runner for backtest %d: %s",

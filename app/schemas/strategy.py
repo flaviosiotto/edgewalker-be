@@ -102,7 +102,11 @@ class BacktestCreate(BaseModel):
     
     # Agent to execute this backtest via n8n
     agent_id: Optional[int] = None
-    
+
+    # Self-learning: inject/record agent lessons in this run. Disable for the
+    # baseline leg of an A/B comparison.
+    use_lessons: bool = True
+
     # Data source parameters (for fetch)
     source: Optional[Literal["ibkr", "yahoo", "binance", "ctrader"]] = None
     timeframe: str = "5m"  # e.g., "1m", "5m", "15m", "1h", "1d"

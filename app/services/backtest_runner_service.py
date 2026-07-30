@@ -118,6 +118,7 @@ class BacktestRunnerService:
         manager_webhook_auth_token: str | None = None,
         manager_chat_session_id: str | None = None,
         owner_user_id: int | str | None = None,
+        use_lessons: bool = True,
     ) -> dict[str, Any]:
         """Start a strategy-runner container in backtest mode."""
         try:
@@ -199,6 +200,12 @@ class BacktestRunnerService:
             env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
         if manager_chat_session_id:
             env["MANAGER_CHAT_SESSION_ID"] = manager_chat_session_id
+        if not use_lessons:
+            # Baseline A/B leg: no review/synthesis turns and no LEZIONI
+            # APPRESE injection (the workflow reads lessons_enabled from the
+            # runner metadata).
+            env["BACKTEST_LESSON_REVIEW"] = "false"
+            env["LESSONS_ENABLED"] = "false"
 
         labels = {
             "traefik.enable": "true",
