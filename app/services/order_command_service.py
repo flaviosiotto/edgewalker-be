@@ -53,6 +53,20 @@ def build_order_ref(strategy_id: Any, strategy_live_id: Any) -> str:
     return f"{prefix}{uuid.uuid4().hex[:token_len]}"[:MAX_ORDER_REF_LEN]
 
 
+def build_backtest_order_ref(strategy_id: Any, backtest_id: Any) -> str:
+    """Run-ref for backtest orders: ``strategy-{id}:bt-{id}:{token}``.
+
+    Same contract as the live ref: it attributes the order — and, through the
+    coordinator's position book, the position and its eventual close — to the
+    run that placed it, regardless of who decided it (rule engine or agent).
+    """
+    safe_strategy = str(strategy_id or "unknown").replace(":", "_")
+    safe_backtest = str(backtest_id or "unknown").replace(":", "_")
+    prefix = f"strategy-{safe_strategy}:bt-{safe_backtest}:"
+    token_len = max(1, MAX_ORDER_REF_LEN - len(prefix))
+    return f"{prefix}{uuid.uuid4().hex[:token_len]}"[:MAX_ORDER_REF_LEN]
+
+
 def _resolve_order_ref(session: Session, strategy_live_id: int | None) -> str | None:
     """Attribution is opt-in: an order with no strategy context stays unscoped."""
     if strategy_live_id is None:
@@ -128,6 +142,7 @@ async def place_account_order(
             "side": normalised_side,
             "order_type": normalised_type,
             "quantity": quantity,
+            "order_ref": build_backtest_order_ref(backtest.strategy_id, backtest.id),
             "extra": command_extra,
         }
         for key, value in (
