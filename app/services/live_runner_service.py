@@ -324,7 +324,9 @@ class LiveRunnerService:
             env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
         if manager_chat_session_id:
             env["MANAGER_CHAT_SESSION_ID"] = manager_chat_session_id
-        
+        # Initial runner_started webhook to the agent is opt-in (default off).
+        env["NOTIFY_AGENT_ON_START"] = os.getenv("NOTIFY_AGENT_ON_START", "false")
+
         # Add broker / account configuration if provided
         if broker_type:
             env["BROKER_TYPE"] = broker_type

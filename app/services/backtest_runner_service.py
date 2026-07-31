@@ -200,6 +200,8 @@ class BacktestRunnerService:
             env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
         if manager_chat_session_id:
             env["MANAGER_CHAT_SESSION_ID"] = manager_chat_session_id
+        # Initial runner_started webhook to the agent is opt-in (default off).
+        env["NOTIFY_AGENT_ON_START"] = os.getenv("NOTIFY_AGENT_ON_START", "false")
         if not use_lessons:
             # Baseline A/B leg: no review/synthesis turns and no LEZIONI
             # APPRESE injection (the workflow reads lessons_enabled from the
