@@ -119,6 +119,7 @@ class BacktestRunnerService:
         manager_chat_session_id: str | None = None,
         owner_user_id: int | str | None = None,
         use_lessons: bool = True,
+        agent_timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Start a strategy-runner container in backtest mode."""
         try:
@@ -202,6 +203,9 @@ class BacktestRunnerService:
             env["MANAGER_CHAT_SESSION_ID"] = manager_chat_session_id
         # Initial runner_started webhook to the agent is opt-in (default off).
         env["NOTIFY_AGENT_ON_START"] = os.getenv("NOTIFY_AGENT_ON_START", "false")
+        if agent_timeout_s:
+            # Per-run override of the runner's blocking agent-wait timeout.
+            env["BACKTEST_AGENT_WAIT_TIMEOUT_S"] = str(float(agent_timeout_s))
         if not use_lessons:
             # Baseline A/B leg: no review/synthesis turns and no LEZIONI
             # APPRESE injection (the workflow reads lessons_enabled from the

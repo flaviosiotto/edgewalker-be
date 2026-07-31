@@ -1,7 +1,7 @@
 from datetime import datetime, date
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.chat import ChatRead
 from app.schemas.live_strategy import LiveStrategySummaryRead
@@ -106,6 +106,11 @@ class BacktestCreate(BaseModel):
     # Self-learning: inject/record agent lessons in this run. Disable for the
     # baseline leg of an A/B comparison.
     use_lessons: bool = True
+
+    # Max seconds the runner waits for each blocking agent reply before failing
+    # the run. Capped at 570s: the backtest service hold-watchdog ceiling is
+    # 600s and the runner adds a +15s TTL margin on top of this value.
+    agent_timeout_s: Optional[float] = Field(default=None, ge=30, le=570)
 
     # Data source parameters (for fetch)
     source: Optional[Literal["ibkr", "yahoo", "binance", "ctrader"]] = None

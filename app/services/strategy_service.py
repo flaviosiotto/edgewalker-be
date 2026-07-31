@@ -405,6 +405,8 @@ def create_backtest(
         }
     base_parameters = payload.parameters if isinstance(payload.parameters, dict) else {}
     merged_parameters = {**base_parameters, "lessons": lessons_meta}
+    if payload.agent_timeout_s is not None:
+        merged_parameters["agent_timeout_s"] = float(payload.agent_timeout_s)
 
     backtest = BacktestResult(
         strategy_id=strategy_id,
@@ -650,15 +652,18 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
                 backtest.id,
             )
 
-        lessons_cfg = (
-            backtest.parameters.get("lessons")
-            if isinstance(backtest.parameters, dict)
-            else None
-        )
+        run_parameters = backtest.parameters if isinstance(backtest.parameters, dict) else {}
+        lessons_cfg = run_parameters.get("lessons")
         use_lessons = (
             bool(lessons_cfg.get("enabled", True))
             if isinstance(lessons_cfg, dict)
             else True
+        )
+        raw_agent_timeout = run_parameters.get("agent_timeout_s")
+        agent_timeout_s = (
+            float(raw_agent_timeout)
+            if isinstance(raw_agent_timeout, (int, float)) and raw_agent_timeout > 0
+            else None
         )
         result = backtest_runner_service.start_backtest(
             backtest_id=backtest.id,
@@ -674,6 +679,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             manager_chat_session_id=_chat_session_id(backtest_chat),
             owner_user_id=strategy.user_id,
             use_lessons=use_lessons,
+            agent_timeout_s=agent_timeout_s,
         )
         logger.info(
             "Started backtest runner for backtest %d: %s",
