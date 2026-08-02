@@ -29,6 +29,7 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
         agent_name=payload.agent_name,
         n8n_webhook=payload.n8n_webhook,
         is_default=payload.is_default,
+        agent_kind=payload.agent_kind,
     )
     session.add(agent)
     session.commit()
@@ -49,8 +50,11 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
     return agent, chat
 
 
-def list_agents(session: Session, user_id: int) -> list[Agent]:
-    return list(session.exec(select(Agent).where(Agent.user_id == user_id)).all())
+def list_agents(session: Session, user_id: int, kind: str | None = None) -> list[Agent]:
+    statement = select(Agent).where(Agent.user_id == user_id)
+    if kind:
+        statement = statement.where(Agent.agent_kind == kind)
+    return list(session.exec(statement).all())
 
 
 def get_agent(session: Session, agent_id: int, user_id: int | None = None) -> Agent:
@@ -84,6 +88,8 @@ def update_agent(session: Session, agent_id: int, payload: AgentUpdate, user_id:
         agent.n8n_webhook = payload.n8n_webhook
     if payload.is_default is not None:
         agent.is_default = payload.is_default
+    if payload.agent_kind is not None:
+        agent.agent_kind = payload.agent_kind
 
     session.add(agent)
     session.commit()

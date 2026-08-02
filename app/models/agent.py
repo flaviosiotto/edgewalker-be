@@ -31,6 +31,12 @@ class Agent(SQLModel, table=True):
     agent_name: str = Field(sa_column=Column(String(255), nullable=False))
     n8n_webhook: str = Field(sa_column=Column(String(512), nullable=False))
     is_default: bool = Field(sa_column=Column(Boolean, nullable=False, server_default="false"))
+    # design = assiste il design della strategia; running = gestisce i run
+    # live/backtest (ask_agent, alert, review).
+    agent_kind: str = Field(
+        default="running",
+        sa_column=Column(String(16), nullable=False, server_default="running"),
+    )
 
 
 

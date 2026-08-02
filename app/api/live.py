@@ -361,8 +361,19 @@ async def _start_live_instance_internal(
     user_id: int,
     user_email: str | None,
     legacy_strategy_route: bool = False,
+    manager_agent_id: int | None = None,
 ) -> tuple[StrategyLive, dict[str, Any]]:
     strategy = _get_strategy_or_404(session, strategy_id, user_id)
+
+    # Manager agent per-sessione: esplicito dal payload di start, altrimenti
+    # il manager della strategia. L'agent esplicito deve appartenere all'utente.
+    resolved_manager_agent_id = (
+        manager_agent_id if manager_agent_id is not None else strategy.manager_agent_id
+    )
+    if manager_agent_id is not None:
+        owned_agent = session.get(Agent, manager_agent_id)
+        if owned_agent is None or owned_agent.user_id != user_id:
+            raise ValueError(f"Agent {manager_agent_id} not found")
 
     account, connection = validate_account_for_live(session, account_id, user_id)
     account_config = {
@@ -376,7 +387,7 @@ async def _start_live_instance_internal(
 
     sl = StrategyLive(
         strategy_id=strategy_id,
-        manager_agent_id=strategy.manager_agent_id,
+        manager_agent_id=resolved_manager_agent_id,
         status=LiveStatus.STARTING.value,
         symbol=symbol,
         timeframe=timeframe,
@@ -473,8 +484,8 @@ async def _start_live_instance_internal(
         no_expiry=True,
     )
     manager_webhook_auth_token: str | None = None
-    if strategy.manager_agent_id:
-        manager_agent = session.get(Agent, strategy.manager_agent_id)
+    if sl.manager_agent_id:
+        manager_agent = session.get(Agent, sl.manager_agent_id)
         if manager_agent:
             # The webhook URL is resolved by the runner from the agent record
             # (strategy_live.manager_agent_id -> agent.n8n_webhook); only the
@@ -680,6 +691,7 @@ async def create_live_instance(
             user_id=current_user.id,
             user_email=current_user.email,
             legacy_strategy_route=False,
+            manager_agent_id=payload.manager_agent_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

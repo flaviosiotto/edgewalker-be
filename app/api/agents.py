@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -31,10 +31,11 @@ def create_agent_endpoint(
 
 @router.get("/", response_model=list[AgentRead])
 def list_agents_endpoint(
+    kind: str | None = Query(default=None, pattern="^(design|running)$"),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    return list_agents(session, current_user.id)
+    return list_agents(session, current_user.id, kind=kind)
 
 
 @router.get("/{agent_id}", response_model=AgentRead)
