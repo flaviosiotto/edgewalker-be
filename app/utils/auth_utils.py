@@ -234,6 +234,36 @@ async def get_current_active_user(
     return current_user
 
 
+async def get_current_active_principal(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+) -> AuthPrincipal:
+    """Same auth chain as ``get_current_active_user`` but keeps the token claims.
+
+    Used by endpoints that need to know WHO is calling beyond the user — e.g.
+    the ``purpose`` claim distinguishes the FE (``ui_auth``) from n8n-issued
+    agent tokens (``n8n_chat_api_access``, ...).
+    """
+    credentials_exception = _credentials_exception()
+
+    payload = decode_token_for_audiences(
+        token,
+        [settings.ACCESS_TOKEN_AUDIENCE],
+    )
+    if payload is None:
+        raise credentials_exception
+
+    principal = _load_principal_from_payload(
+        payload,
+        session,
+        allowed_token_types={"access"},
+        credentials_exception=credentials_exception,
+    )
+    if not principal.user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return principal
+
+
 async def get_current_admin_user(
     current_user: User = Depends(get_current_active_user),
 ) -> User:
