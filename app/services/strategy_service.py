@@ -645,6 +645,11 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             broker_type=broker_type,
             position_accounting_mode=position_accounting_mode,
         )
+        # Pin user-defined indicators to their current valid version
+        # (params.ew_hash) so the backtest resolves them by content hash.
+        from app.services.indicator_ref_service import inject_user_indicator_refs
+
+        strategy_config = inject_user_indicator_refs(strategy_config, strategy.user_id)
         if strategy_config != raw_strategy_config:
             backtest.config = strategy_config
             logger.info(

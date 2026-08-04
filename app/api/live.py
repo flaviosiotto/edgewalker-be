@@ -81,6 +81,7 @@ from app.services.strategy_service import (
     resolve_strategy_manager_agent_id,
     _strip_rule_chat_ids,
 )
+from app.services.indicator_ref_service import inject_user_indicator_refs
 from app.utils.auth_utils import (
     AuthPrincipal,
     create_user_delegated_token,
@@ -393,7 +394,11 @@ async def _start_live_instance_internal(
         timeframe=timeframe,
         account_id=account_id,
         connection_id=connection.id,
-        definition=_strip_rule_chat_ids(strategy.definition),
+        # Snapshot with user-defined indicators pinned to their current valid
+        # version (params.ew_hash) — the aggregator resolves them by hash.
+        definition=inject_user_indicator_refs(
+            _strip_rule_chat_ids(strategy.definition), user_id
+        ),
     )
     session.add(sl)
     session.commit()
