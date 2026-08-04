@@ -523,6 +523,32 @@ def get_backtest_runtime_alerts_endpoint(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
+@router.get("/{strategy_id}/backtests/{backtest_id}/runtime/agent-calls")
+def get_backtest_agent_calls_endpoint(
+    strategy_id: int,
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List manager-agent invocations recorded by the runner for this backtest.
+
+    Read from the ``agent_call`` table (written by the runner at dispatch
+    time), so the history survives the end of the run. ``bar_ts`` is the
+    simulated replay timestamp used to place each call on the chart.
+    """
+    from sqlmodel import select
+
+    from app.models.agent_call import AgentCall
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    calls = session.exec(
+        select(AgentCall)
+        .where(AgentCall.backtest_id == backtest.id)
+        .order_by(AgentCall.id)
+    ).all()
+    return {"agent_calls": [call.model_dump(mode="json") for call in calls]}
+
+
 @router.get("/{strategy_id}/backtests/{backtest_id}/logs")
 def get_backtest_logs_endpoint(
     strategy_id: int,

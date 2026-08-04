@@ -1066,6 +1066,28 @@ def list_session_fills(
     return [LiveFillRead.model_validate(f) for f in fills]
 
 
+@router.get("/sessions/{live_id}/agent-calls")
+def list_session_agent_calls(
+    live_id: int,
+    limit: int = Query(500, ge=1, le=2000),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List manager-agent invocations recorded by the runner for this session."""
+    from sqlmodel import select
+
+    from app.models.agent_call import AgentCall
+
+    _get_live_or_404(session, live_id, current_user.id)
+    calls = session.exec(
+        select(AgentCall)
+        .where(AgentCall.strategy_live_id == live_id)
+        .order_by(AgentCall.id.desc())  # type: ignore[union-attr]
+        .limit(limit)
+    ).all()
+    return {"agent_calls": [call.model_dump(mode="json") for call in reversed(calls)]}
+
+
 # ═════════════════════════════════════════════════════════════════════
 # LIVE ALERTS  (persistent source of truth for runner-managed alerts)
 # ═════════════════════════════════════════════════════════════════════
