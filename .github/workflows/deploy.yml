@@ -5,6 +5,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      edgewalker_ref:
+        description: Git ref from the edgewalker repository to bake into the backend image
+        required: false
+        default: main
 
 concurrency:
   group: backend-production-${{ github.ref }}
@@ -12,6 +17,7 @@ concurrency:
 
 env:
   REGISTRY: docker.io
+  EDGEWALKER_REPOSITORY: ${{ vars.EDGEWALKER_REPOSITORY != '' && vars.EDGEWALKER_REPOSITORY || 'flaviosiotto/edgewalker' }}
   IMAGE_NAME: ${{ vars.DOCKERHUB_REPOSITORY }}
   DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
   DOKPLOY_APPLICATION_ID: ${{ vars.DOKPLOY_APPLICATION_ID }}
@@ -24,8 +30,69 @@ jobs:
       contents: read
 
     steps:
+      - name: Resolve edgewalker ref
+        id: resolve-ref
+        env:
+          WORKFLOW_DISPATCH_REF: ${{ inputs.edgewalker_ref }}
+        run: |
+          set -eu
+
+          edgewalker_ref="${WORKFLOW_DISPATCH_REF:-}"
+
+          if [ -z "${edgewalker_ref}" ]; then
+            edgewalker_ref="main"
+          fi
+
+          echo "edgewalker_ref=${edgewalker_ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate edgewalker checkout configuration
+        id: edgewalker-config
+        env:
+          EDGEWALKER_REPOSITORY_ACCESS_TOKEN: ${{ secrets.EDGEWALKER_REPOSITORY_ACCESS_TOKEN }}
+          GITHUB_TOKEN_FALLBACK: ${{ github.token }}
+        run: |
+          set -eu
+
+          if [ -z "${EDGEWALKER_REPOSITORY}" ]; then
+            echo "Missing EDGEWALKER_REPOSITORY" >&2
+            exit 1
+          fi
+
+          case "${EDGEWALKER_REPOSITORY}" in
+            */*)
+              ;;
+            *)
+              echo "EDGEWALKER_REPOSITORY must be in owner/repo format. Current value: ${EDGEWALKER_REPOSITORY}" >&2
+              exit 1
+              ;;
+          esac
+
+          token="${EDGEWALKER_REPOSITORY_ACCESS_TOKEN:-${GITHUB_TOKEN_FALLBACK}}"
+
+          status_code=$(curl -sS -o /tmp/edgewalker_repo_check.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${EDGEWALKER_REPOSITORY}")
+
+          if [ "${status_code}" != "200" ]; then
+            echo "Unable to access ${EDGEWALKER_REPOSITORY} (HTTP ${status_code})." >&2
+            echo "If the repository is private and different from the current repository, github.token is not enough: configure EDGEWALKER_REPOSITORY_ACCESS_TOKEN with read access to ${EDGEWALKER_REPOSITORY}." >&2
+            cat /tmp/edgewalker_repo_check.json >&2 || true
+            exit 1
+          fi
+
+          echo "token=${token}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Checkout edgewalker repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.EDGEWALKER_REPOSITORY }}
+          ref: ${{ steps.resolve-ref.outputs.edgewalker_ref }}
+          path: edgewalker
+          token: ${{ steps.edgewalker-config.outputs.token }}
 
       - name: Validate workflow configuration
         env:
@@ -78,6 +145,8 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64
           push: true
+          build-contexts: |
+            edgewalker=./edgewalker
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 

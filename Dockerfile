@@ -25,6 +25,16 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # cTrader protobuf wheel, installed without its deps (see requirements-ctrader.txt).
 RUN pip install --no-deps -r requirements-ctrader.txt
 
+# Shared service foundation (edgewalker_platform) from the `edgewalker` build
+# context (deploy.yml / compose additional_contexts). Only the kit is copied:
+# the indicator library stays out of this image so indicator_registry keeps
+# using its fallback metadata instead of half-importing a package whose
+# scientific deps are not installed here. --no-deps: the kit brings no deps of
+# its own, consumers provide them (see edgewalker_platform/README.md).
+COPY --from=edgewalker pyproject.toml /opt/edgewalker/pyproject.toml
+COPY --from=edgewalker edgewalker_platform /opt/edgewalker/edgewalker_platform
+RUN pip install --no-cache-dir --no-deps -e /opt/edgewalker
+
 # Bundle Swagger UI v5 assets locally (supports OpenAPI 3.1).
 # This avoids relying on the browser being able to reach a CDN at runtime.
 ARG SWAGGER_UI_DIST_VERSION=5
