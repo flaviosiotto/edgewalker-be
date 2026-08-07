@@ -35,6 +35,7 @@ def create_db_and_tables():
     from app.models.agent import Agent, Chat  # noqa: F401
     from app.models.n8n_chat_history import N8nChatHistory  # noqa: F401
     from app.models.password_reset_token import PasswordResetToken  # noqa: F401
+    from app.models.personal_access_token import PersonalAccessToken  # noqa: F401
     from app.models.access_control import (  # noqa: F401
         AccessAllowlist,
         EmailVerificationToken,

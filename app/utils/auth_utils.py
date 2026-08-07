@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
 
@@ -11,6 +11,11 @@ from app.core.config import settings
 from app.models.strategy import BacktestResult, BacktestStatus, LiveStatus, Strategy, StrategyLive
 from app.models.user import User
 from app.db.database import get_session
+from app.services.pat_service import (
+    PAT_TOKEN_PREFIX,
+    enforce_pat_scope,
+    resolve_personal_access_token,
+)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -168,6 +173,43 @@ def _load_principal_from_payload(
     return AuthPrincipal(user=user, claims=payload)
 
 
+def _try_pat_principal(
+    request: Optional[Request],
+    token: str,
+    session: Session,
+) -> Optional[AuthPrincipal]:
+    """Resolve an opaque ``ewp_`` personal access token, or return ``None``.
+
+    ``None`` means "not a PAT, try the JWT path". A malformed/revoked/expired
+    PAT raises immediately: an ``ewp_`` string can never be a valid JWT, so
+    falling through would only produce a less accurate error. Scope enforcement
+    happens here, centrally, against the request method + path — endpoints stay
+    unannotated.
+    """
+    if not token.startswith(PAT_TOKEN_PREFIX):
+        return None
+
+    resolved = resolve_personal_access_token(session, token)
+    if resolved is None:
+        raise _credentials_exception("Invalid, expired or revoked personal access token")
+
+    user, pat = resolved
+    if request is not None:
+        enforce_pat_scope(request.method, request.url.path, pat.scopes)
+
+    claims = {
+        "sub": user.email,
+        "uid": user.id,
+        "username": user.username,
+        "role": user.role,
+        "type": "pat",
+        "purpose": "pat_access",
+        "scopes": pat.scopes,
+        "pat_id": pat.id,
+    }
+    return AuthPrincipal(user=user, claims=claims)
+
+
 def get_user_by_email(email: str, session: Session) -> Optional[User]:
     statement = select(User).where(User.email == email)
     return session.exec(statement).first()
@@ -206,10 +248,15 @@ def authenticate_user(username_or_email: str, password: str, session: Session) -
 
 
 async def get_current_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session)
 ) -> User:
     credentials_exception = _credentials_exception()
+
+    pat_principal = _try_pat_principal(request, token, session)
+    if pat_principal is not None:
+        return pat_principal.user
 
     payload = decode_token_for_audiences(
         token,
@@ -235,6 +282,7 @@ async def get_current_active_user(
 
 
 async def get_current_active_principal(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session),
 ) -> AuthPrincipal:
@@ -242,9 +290,16 @@ async def get_current_active_principal(
 
     Used by endpoints that need to know WHO is calling beyond the user — e.g.
     the ``purpose`` claim distinguishes the FE (``ui_auth``) from n8n-issued
-    agent tokens (``n8n_chat_api_access``, ...).
+    agent tokens (``n8n_chat_api_access``, ...) and personal access tokens
+    (``pat_access``).
     """
     credentials_exception = _credentials_exception()
+
+    pat_principal = _try_pat_principal(request, token, session)
+    if pat_principal is not None:
+        if not pat_principal.user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        return pat_principal
 
     payload = decode_token_for_audiences(
         token,
@@ -367,9 +422,16 @@ async def get_current_consultative_principal(
 
 
 async def get_current_active_or_runner_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session),
 ) -> User:
+    pat_principal = _try_pat_principal(request, token, session)
+    if pat_principal is not None:
+        if not pat_principal.user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        return pat_principal.user
+
     access_payload = decode_token(token, audience=settings.ACCESS_TOKEN_AUDIENCE)
     if access_payload is not None:
         user = _load_principal_from_payload(
@@ -389,9 +451,16 @@ async def get_current_active_or_runner_user(
 
 
 async def get_current_active_or_consultative_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session),
 ) -> User:
+    pat_principal = _try_pat_principal(request, token, session)
+    if pat_principal is not None:
+        if not pat_principal.user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        return pat_principal.user
+
     access_payload = decode_token(token, audience=settings.ACCESS_TOKEN_AUDIENCE)
     if access_payload is not None:
         user = _load_principal_from_payload(

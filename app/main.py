@@ -25,6 +25,7 @@ from app.api.accounts import router as accounts_router
 from app.api.agent_lessons import router as agent_lessons_router
 from app.api.connections import router as connections_router
 from app.api.client_portal_launch import router as client_portal_launch_router
+from app.api.pats import router as pats_router
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
 from app.services.backtest_runner_monitor import start_backtest_runner_monitor, stop_backtest_runner_monitor
@@ -148,3 +149,4 @@ app.include_router(accounts_router)
 app.include_router(agent_lessons_router)
 app.include_router(connections_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(client_portal_launch_router)
+app.include_router(pats_router)
