@@ -148,5 +148,7 @@ app.include_router(runners_router)
 app.include_router(accounts_router)
 app.include_router(agent_lessons_router)
 app.include_router(connections_router, dependencies=[Depends(get_current_active_user)])
-app.include_router(client_portal_launch_router)
 app.include_router(pats_router)
+# Registered last: declares a catch-all /{path:path} route, so every router
+# added after this one would be shadowed and answer 404.
+app.include_router(client_portal_launch_router)
