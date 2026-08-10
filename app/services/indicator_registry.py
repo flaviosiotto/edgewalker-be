@@ -13,8 +13,16 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-import talib
-from talib import abstract
+
+# TA-Lib is dismissed platform-wide (native system indicators replaced it).
+# The import stays guarded so this legacy listing degrades to customs-only
+# instead of breaking the backend when the wheel is absent from the image.
+try:
+    import talib
+    from talib import abstract
+except ImportError:
+    talib = None  # type: ignore[assignment]
+    abstract = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +345,8 @@ OUTPUT_NAME_MAP = {
 
 def _get_talib_indicator_info(func_name: str) -> dict[str, Any] | None:
     """Get detailed info about a TA-Lib indicator using the abstract API."""
+    if abstract is None:
+        return None
     try:
         func = abstract.Function(func_name)
         info = func.info
@@ -434,14 +444,15 @@ def get_all_indicators() -> list[dict[str, Any]]:
     """
     indicators = []
 
-    # Get all TA-Lib indicators by group
-    groups = talib.get_function_groups()
-
-    for group_name, func_names in groups.items():
-        for func_name in func_names:
-            info = _get_talib_indicator_info(func_name)
-            if info:
-                indicators.append(info)
+    # TA-Lib listing survives only where the wheel is still installed
+    # (dismissed platform-wide; this endpoint is legacy, the FE reads the
+    # indicator-svc catalog).
+    if talib is not None:
+        for group_name, func_names in talib.get_function_groups().items():
+            for func_name in func_names:
+                info = _get_talib_indicator_info(func_name)
+                if info:
+                    indicators.append(info)
 
     # Add custom indicators — prefer the edgewalker library (single source of
     # truth, includes output_groups + domain/anchors), fall back to local dict.
@@ -494,11 +505,11 @@ def get_indicator_groups() -> dict[str, list[str]]:
     Returns:
         Dictionary mapping group name to list of indicator names.
     """
-    groups = dict(talib.get_function_groups())
-    
+    groups = dict(talib.get_function_groups()) if talib is not None else {}
+
     # Add custom indicators group
     groups["Custom"] = list(CUSTOM_INDICATORS.keys())
-    
+
     return groups
 
 

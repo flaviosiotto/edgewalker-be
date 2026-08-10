@@ -16,7 +16,6 @@ psycopg2-binary
 pandas
 numpy
 pyarrow
-TA-Lib
 yfinance
 redis>=5.0.0
 docker>=7.0.0
