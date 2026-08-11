@@ -720,9 +720,10 @@ def _sync_accounts(session: Session, connection_id: int, discovered: list[Discov
         )
         existing_map[d.account_id] = acct
 
-    # Deactivate accounts no longer present
+    # Deactivate accounts no longer present (skip already-inactive ones: the
+    # health loop resyncs every ~20s and would otherwise rewrite/log each tick)
     for acct_id, acct in existing_map.items():
-        if acct_id not in discovered_ids:
+        if acct_id not in discovered_ids and acct.is_active:
             acct.is_active = False
             acct.updated_at = now
             logger.info("Deactivated stale account %s for connection %s", acct_id, connection_id)
@@ -1352,6 +1353,9 @@ class ConnectionManager:
             status_value,
         )
 
+        # The data gateway is useless without its login runtime — destroy it
+        # too, otherwise it lingers forever retrying a dead twsgw host.
+        self._destroy_gateway(connection_id, "ibkr")
         self._destroy_tws_gateway(connection_id)
 
         try:
@@ -1678,7 +1682,15 @@ class ConnectionManager:
             logger.warning("Unable to read gateway logs for connection %s: %s", connection_id, exc)
             return ""
         text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        # Drop uvicorn access-log noise from the backend's own /status and
+        # /health polling so the tail surfaces real broker errors instead.
+        lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
+            and '"GET /status' not in line
+            and '"GET /health' not in line
+        ]
         if not lines:
             return ""
         return " | ".join(lines[-8:])[:1200]
@@ -2030,6 +2042,11 @@ class ConnectionManager:
         # data-gateway health probe must NOT tear it down here. Doing so races
         # with begin_tws_auth respawning it and surfaces to the user as
         # "container twsgw-N not found".
+        #
+        # EXCEPTION: if a data gateway container is still running (e.g. the
+        # broker feed dropped transiently and the gateway self-reconnected),
+        # fall through and probe it so the DB status can flip back to
+        # connected without requiring a manual reconnect.
         if (
             broker_type == "ibkr"
             and stored_status not in {
@@ -2037,7 +2054,9 @@ class ConnectionManager:
                 ConnectionStatus.CONNECTING.value,
             }
         ):
-            return stored_status
+            existing = self._get_container(connection_id, broker_type)
+            if not existing or existing.status != "running":
+                return stored_status
 
         actual_message: str | None = None
 
