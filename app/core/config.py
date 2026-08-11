@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -11,16 +11,26 @@ class Settings(BaseSettings):
     API_ROOT_PATH: str = "/api"
     API_V1_STR: str = "/api/v1"
 
-    CLIENT_PORTAL_ACCESS_BASE_URL: str = ""
-    CLIENT_PORTAL_PROXY_BRIDGE_TOKEN: str = ""
-    CLIENT_PORTAL_LAUNCH_TTL_SECONDS: int = 900
-    # Path-based browser routing: when enabled, the launch flow redirects the
-    # browser straight to the per-connection container under
-    # ``CLIENT_PORTAL_ROUTING_BASE_URL/<prefix>/<connection_id>`` instead of
-    # proxying the login through this backend.
-    CLIENT_PORTAL_PATH_ROUTING_ENABLED: bool = False
-    CLIENT_PORTAL_ROUTING_BASE_URL: str = ""
-    CLIENT_PORTAL_PATH_PREFIX_BASE: str = "/ib-access"
+    # Interactive IB Gateway (TWS) launch flow. The browser is redirected to
+    # the per-connection noVNC container under
+    # ``TWS_ROUTING_BASE_URL/<prefix>/<connection_id>``.
+    # Legacy CLIENT_PORTAL_* env names are accepted for deployment continuity.
+    TWS_LAUNCH_TTL_SECONDS: int = Field(
+        900,
+        validation_alias=AliasChoices("TWS_LAUNCH_TTL_SECONDS", "CLIENT_PORTAL_LAUNCH_TTL_SECONDS"),
+    )
+    TWS_PATH_ROUTING_ENABLED: bool = Field(
+        False,
+        validation_alias=AliasChoices("TWS_PATH_ROUTING_ENABLED", "CLIENT_PORTAL_PATH_ROUTING_ENABLED"),
+    )
+    TWS_ROUTING_BASE_URL: str = Field(
+        "",
+        validation_alias=AliasChoices("TWS_ROUTING_BASE_URL", "CLIENT_PORTAL_ROUTING_BASE_URL"),
+    )
+    TWS_PATH_PREFIX_BASE: str = Field(
+        "/ib-access",
+        validation_alias=AliasChoices("TWS_PATH_PREFIX_BASE", "CLIENT_PORTAL_PATH_PREFIX_BASE"),
+    )
 
     DATABASE_URL: str = "sqlite:///./app.db"
     # Connection pool sizing. Sync `def` endpoints run in FastAPI's threadpool

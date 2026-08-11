@@ -23,7 +23,7 @@ import logging
 import os
 import socket
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import docker
@@ -34,21 +34,23 @@ from sqlmodel import Session, select
 from app.db.database import get_session_context
 from app.models.connection import Account, Connection, ConnectionStatus
 from app.services.broker_connectors.base import ConnectorResult, DiscoveredAccount
-from app.services.client_portal_service import (
-    get_client_portal_auth_status,
-    is_client_portal_transport,
-    is_tws_interactive_transport,
-    logout_client_portal_session,
-    resolve_client_portal_base_url,
-    resolve_client_portal_verify_ssl,
-)
-from app.services.client_portal_launch_service import (
-    clear_client_portal_launch_session,
-    create_client_portal_launch_url,
+from app.services.tws_launch_service import (
+    clear_tws_launch_session,
+    create_tws_launch_url,
 )
 from app.services.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
+
+
+def _env_first(*names: str, default: str = "") -> str:
+    """Read the first non-empty env var among *names* (legacy-name fallbacks)."""
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value.strip() != "":
+            return value
+    return default
+
 
 # ── Docker settings ──────────────────────────────────────────────────
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "edgewalker-devops_default")
@@ -74,25 +76,6 @@ HOST_PUID = os.getenv("PUID", "").strip()
 HOST_PGID = os.getenv("PGID", "").strip()
 SPAWN_CONTAINER_USER = os.getenv("SPAWN_CONTAINER_USER", "").strip()
 SPAWN_CODE_MOUNTS = os.getenv("SPAWN_CODE_MOUNTS", "false").lower() == "true"
-CLIENT_PORTAL_GATEWAY_IMAGE = os.getenv(
-    "CLIENT_PORTAL_GATEWAY_IMAGE",
-    "edgewalker-devops-ibkr-client-portal-gw:latest",
-).strip()
-CLIENT_PORTAL_GATEWAY_PREFIX = os.getenv("CLIENT_PORTAL_GATEWAY_PREFIX", "cpgw-").strip() or "cpgw-"
-CLIENT_PORTAL_GATEWAY_PORT = max(1, int(os.getenv("CLIENT_PORTAL_GATEWAY_PORT", "5000")))
-# Public (Traefik-routed) noVNC web port. The user drives an in-container browser
-# over noVNC at https://<host>/ib-access/{id}/; that browser logs in to the
-# gateway on localhost, satisfying IBKR's "same machine" constraint. The gateway
-# API port (CLIENT_PORTAL_GATEWAY_PORT, HTTPS) stays internal for the backend.
-CLIENT_PORTAL_NOVNC_PORT = max(1, int(os.getenv("CLIENT_PORTAL_NOVNC_PORT", "6080")))
-CLIENT_PORTAL_GATEWAY_STARTUP_TIMEOUT_SECONDS = max(
-    5,
-    int(os.getenv("CLIENT_PORTAL_GATEWAY_STARTUP_TIMEOUT_SECONDS", "90")),
-)
-CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS = max(
-    0.5,
-    float(os.getenv("CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS", "2")),
-)
 # Background connection-health loop: probes active connections off the request
 # path so GET /connections can read straight from the DB. A short status-probe
 # timeout keeps a single hung gateway from stalling the whole reconciliation.
@@ -104,86 +87,90 @@ GATEWAY_STATUS_PROBE_TIMEOUT_SECONDS = max(
     2.0,
     float(os.getenv("GATEWAY_STATUS_PROBE_TIMEOUT_SECONDS", "8")),
 )
-# Gateway readiness path used by the backend probe. The in-container browser
-# performs the real SSO login, but the backend still waits for the Java gateway's
-# HTTPS listener to come up before handing the launch URL to the user. "/sso/Login"
-# is served locally by the gateway without contacting IBKR (no upstream session is
-# opened), so probing it is safe and does not pollute the gateway CookieManager.
-CLIENT_PORTAL_GATEWAY_READY_PATH = "/sso/Login"
-CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS = max(
-    0,
-    int(os.getenv("CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS", os.getenv("CLIENT_PORTAL_LAUNCH_TTL_SECONDS", "900"))),
-)
-# A login still in `awaiting_auth` is an in-progress interaction (the user may be
-# entering credentials / 2FA in the popup). Give it a dedicated, longer grace so
-# the idle reaper can't kill the runtime mid-login, while still cleaning up
-# leftover disconnected/error runtimes on the shorter base timeout above.
-CLIENT_PORTAL_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS = max(
-    CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS,
-    int(os.getenv("CLIENT_PORTAL_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS", "1800")),
-)
-CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS = max(
-    5.0,
-    float(os.getenv("CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS", "30")),
-)
-CLIENT_PORTAL_PROXY_BRIDGE_TOKEN = os.getenv("CLIENT_PORTAL_PROXY_BRIDGE_TOKEN", "").strip()
 
-# ── Client Portal path-based browser routing ─────────────────────────
-# When enabled, the browser reaches each spawned Client Portal container
-# directly through Traefik under a stable per-connection path prefix
-# (e.g. https://app.edgewalker.tech/ib-access/{id}). The gateway is configured
-# with a matching portalBaseURL so it emits prefixed URLs/cookies natively, which
-# removes the need for the backend httpx proxy to rewrite the login response body.
-# Each interactive login is serialized per user (one IBKR connection at a time),
-# so the shared public origin's browser cookie jar never hosts two logins at once.
-CLIENT_PORTAL_PATH_ROUTING_ENABLED = (
-    os.getenv("CLIENT_PORTAL_PATH_ROUTING_ENABLED", "false").lower() == "true"
+# ── Interactive IB Gateway (TWS) runtime lifecycle ─────────────────
+# Legacy CLIENT_PORTAL_* env names are accepted as fallbacks for deployment
+# continuity (same convention as the retained Traefik router names).
+TWS_RUNTIME_IDLE_TIMEOUT_SECONDS = max(
+    0,
+    int(_env_first(
+        "TWS_RUNTIME_IDLE_TIMEOUT_SECONDS",
+        "CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS",
+        "TWS_LAUNCH_TTL_SECONDS",
+        "CLIENT_PORTAL_LAUNCH_TTL_SECONDS",
+        default="900",
+    )),
 )
-CLIENT_PORTAL_PATH_PREFIX_BASE = (
-    os.getenv("CLIENT_PORTAL_PATH_PREFIX_BASE", "/ib-access").strip().rstrip("/") or "/ib-access"
+# A login still in `awaiting_auth` is an in-progress interaction (the user may
+# be entering credentials / 2FA in the popup). Give it a dedicated, longer
+# grace so the idle reaper can't kill the runtime mid-login.
+TWS_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS = max(
+    TWS_RUNTIME_IDLE_TIMEOUT_SECONDS,
+    int(_env_first(
+        "TWS_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS",
+        "CLIENT_PORTAL_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS",
+        default="1800",
+    )),
 )
-CLIENT_PORTAL_ROUTING_HOST = os.getenv("CLIENT_PORTAL_ROUTING_HOST", "").strip()
-CLIENT_PORTAL_TRAEFIK_NETWORK = os.getenv(
-    "CLIENT_PORTAL_TRAEFIK_NETWORK", os.getenv("DOCKER_NETWORK", "")
-).strip()
-CLIENT_PORTAL_TRAEFIK_ENTRYPOINT = os.getenv("CLIENT_PORTAL_TRAEFIK_ENTRYPOINT", "websecure").strip()
-CLIENT_PORTAL_TRAEFIK_CERTRESOLVER = os.getenv("CLIENT_PORTAL_TRAEFIK_CERTRESOLVER", "letsencrypt").strip()
-# Whether the per-connection cpgw router terminates TLS. Defaults to true for
-# production (the public access host serves HTTPS). Set to "false" for local
-# development where Traefik only exposes a plain-HTTP entrypoint (e.g. :8081),
-# so the cpgw router is published without TLS instead of failing the handshake.
-CLIENT_PORTAL_TRAEFIK_TLS = (
-    os.getenv("CLIENT_PORTAL_TRAEFIK_TLS", "true").strip().lower() != "false"
+TWS_RUNTIME_CLEANUP_INTERVAL_SECONDS = max(
+    5.0,
+    float(_env_first(
+        "TWS_RUNTIME_CLEANUP_INTERVAL_SECONDS",
+        "CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS",
+        default="30",
+    )),
 )
-CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY = os.getenv("CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY", "1000").strip()
-# Traefik cannot DEFINE a serversTransport from Docker provider labels, only
-# reference one. The cpgw shim serves HTTPS with a self-signed cert, so the
-# upstream needs insecureSkipVerify. Define this transport once in the Traefik
-# file provider (dynamic config) and reference it here with the @file namespace.
-CLIENT_PORTAL_TRAEFIK_SERVERSTRANSPORT = os.getenv(
-    "CLIENT_PORTAL_TRAEFIK_SERVERSTRANSPORT", "ibkr-client-portal-transport@file"
+
+# ── Path-based browser routing for the noVNC login popup ────────────
+# The browser reaches each spawned IB Gateway container through Traefik under
+# a stable per-connection path prefix (e.g. https://app.../ib-access/{id}/).
+TWS_PATH_ROUTING_ENABLED = (
+    _env_first("TWS_PATH_ROUTING_ENABLED", "CLIENT_PORTAL_PATH_ROUTING_ENABLED", default="false").lower()
+    == "true"
+)
+TWS_ROUTING_HOST = _env_first("TWS_ROUTING_HOST", "CLIENT_PORTAL_ROUTING_HOST").strip()
+TWS_TRAEFIK_NETWORK = _env_first(
+    "TWS_TRAEFIK_NETWORK", "CLIENT_PORTAL_TRAEFIK_NETWORK", "DOCKER_NETWORK"
 ).strip()
-# forwardAuth gate: Traefik calls this backend URL before forwarding the browser
-# to the container; the backend validates the short-lived launch cookie and that
-# the requesting user owns the connection. {connection_id} is substituted.
-CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE = os.getenv(
-    "CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE", ""
+TWS_TRAEFIK_ENTRYPOINT = _env_first(
+    "TWS_TRAEFIK_ENTRYPOINT", "CLIENT_PORTAL_TRAEFIK_ENTRYPOINT", default="websecure"
 ).strip()
-# Traefik API base URL (e.g. http://dokploy-traefik:8080) used to confirm the
-# per-connection cpgw router has actually been discovered before the backend
-# hands the launch URL to the browser. Without this check the popup can open
-# BEFORE Traefik picks up the new container's labels, so the first request to
-# /ib-access/{id}/* falls through to the lower-priority frontend SPA router and
-# the user sees the SPA until they refresh (by which point the router exists).
-# Empty disables the router-readiness wait (falls back to shim-only probe).
-CLIENT_PORTAL_TRAEFIK_API_URL = os.getenv("CLIENT_PORTAL_TRAEFIK_API_URL", "").strip().rstrip("/")
-CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS = max(
+TWS_TRAEFIK_CERTRESOLVER = _env_first(
+    "TWS_TRAEFIK_CERTRESOLVER", "CLIENT_PORTAL_TRAEFIK_CERTRESOLVER", default="letsencrypt"
+).strip()
+# Whether the per-connection twsgw router terminates TLS. Set to "false" for
+# local development where Traefik only exposes a plain-HTTP entrypoint.
+TWS_TRAEFIK_TLS = (
+    _env_first("TWS_TRAEFIK_TLS", "CLIENT_PORTAL_TRAEFIK_TLS", default="true").strip().lower() != "false"
+)
+TWS_TRAEFIK_ROUTER_PRIORITY = _env_first(
+    "TWS_TRAEFIK_ROUTER_PRIORITY", "CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY", default="1000"
+).strip()
+# forwardAuth gate: Traefik calls this backend URL before forwarding the
+# browser to the container; the backend validates the short-lived launch
+# cookie and that the requesting user owns the connection.
+TWS_FORWARD_AUTH_URL_TEMPLATE = _env_first(
+    "TWS_FORWARD_AUTH_URL_TEMPLATE", "CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE"
+).strip()
+# Traefik API base URL used to confirm the per-connection router has actually
+# been discovered before the backend hands the launch URL to the browser.
+# Empty disables the router-readiness wait.
+TWS_TRAEFIK_API_URL = _env_first(
+    "TWS_TRAEFIK_API_URL", "CLIENT_PORTAL_TRAEFIK_API_URL"
+).strip().rstrip("/")
+TWS_ROUTER_READY_TIMEOUT_SECONDS = max(
     0.0,
-    float(os.getenv("CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS", "15")),
+    float(_env_first(
+        "TWS_ROUTER_READY_TIMEOUT_SECONDS", "CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS", default="15"
+    )),
 )
-CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS = max(
+TWS_ROUTER_READY_POLL_INTERVAL_SECONDS = max(
     0.25,
-    float(os.getenv("CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS", "0.5")),
+    float(_env_first(
+        "TWS_ROUTER_READY_POLL_INTERVAL_SECONDS",
+        "CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS",
+        default="0.5",
+    )),
 )
 
 # ── IB Gateway / TWS interactive runtime ───────────────────────────
@@ -203,7 +190,9 @@ TWS_GATEWAY_API_PROXY_OFFSET = max(1, int(os.getenv("TWS_GATEWAY_API_PROXY_OFFSE
 TWS_NOVNC_PORT = max(1, int(os.getenv("TWS_NOVNC_PORT", "6080")))
 TWS_READY_POLL_INTERVAL_SECONDS = max(0.5, float(os.getenv("TWS_READY_POLL_INTERVAL_SECONDS", "2")))
 TWS_READY_TIMEOUT_SECONDS = max(5.0, float(os.getenv("TWS_READY_TIMEOUT_SECONDS", "90")))
-TWS_PATH_PREFIX_BASE = os.getenv("TWS_PATH_PREFIX_BASE", CLIENT_PORTAL_PATH_PREFIX_BASE).strip().rstrip("/") or CLIENT_PORTAL_PATH_PREFIX_BASE
+TWS_PATH_PREFIX_BASE = _env_first(
+    "TWS_PATH_PREFIX_BASE", "CLIENT_PORTAL_PATH_PREFIX_BASE", default="/ib-access"
+).strip().rstrip("/") or "/ib-access"
 TWS_API_PROBE_TIMEOUT_SECONDS = max(3.0, float(os.getenv("TWS_API_PROBE_TIMEOUT_SECONDS", "15")))
 TWS_API_PROBE_CACHE_SECONDS = max(0.0, float(os.getenv("TWS_API_PROBE_CACHE_SECONDS", "8")))
 # Internal retries inside the probe so a transient handshake hiccup (or accounts
@@ -320,10 +309,6 @@ raise SystemExit(asyncio.run(main()))
 """
 
 
-def _client_portal_path_prefix(connection_id: int) -> str:
-    return f"{CLIENT_PORTAL_PATH_PREFIX_BASE}/{connection_id}"
-
-
 def _tws_path_prefix(connection_id: int) -> str:
     return f"{TWS_PATH_PREFIX_BASE}/{connection_id}"
 
@@ -340,28 +325,6 @@ BROKER_ACCOUNT_SYNC_GROUP = os.getenv("BROKER_ACCOUNT_SYNC_GROUP", "backend-acco
 BROKER_ACCOUNT_SYNC_ENABLED = os.getenv("BROKER_ACCOUNT_SYNC_ENABLED", "true").lower() == "true"
 BROKER_ACCOUNT_SYNC_BLOCK_MS = max(100, int(os.getenv("BROKER_ACCOUNT_SYNC_BLOCK_MS", "1000")))
 BROKER_ACCOUNT_SYNC_COUNT = max(1, int(os.getenv("BROKER_ACCOUNT_SYNC_COUNT", "50")))
-CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS = max(
-    0,
-    int(os.getenv("CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS", "30")),
-)
-CLIENT_PORTAL_PRE_DISPATCHER_LOG_PROBE_INTERVAL_SECONDS = max(
-    1.0,
-    float(os.getenv("CLIENT_PORTAL_PRE_DISPATCHER_LOG_PROBE_INTERVAL_SECONDS", "3")),
-)
-CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE = (
-    "Autorizzazione 2FA ricevuta. Attendo che IBKR apra la brokerage session."
-)
-CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE = (
-    "Dispatcher ricevuto. Attendo l'apertura della brokerage session IBKR."
-)
-CLIENT_PORTAL_RUNTIME_IDLE_STOP_MESSAGE = (
-    "Sessione Client Portal arrestata automaticamente per inattivita'. Riapri il login se vuoi riprovare."
-)
-CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY = "_client_portal_dispatcher_received_at"
-CLIENT_PORTAL_RUNTIME_BASE_URL_KEY = "_client_portal_runtime_base_url"
-CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY = "_client_portal_runtime_verify_ssl"
-CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY = "_client_portal_runtime_container_name"
-CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY = "_client_portal_runtime_session_id"
 TWS_RUNTIME_HOST_KEY = "_tws_runtime_host"
 TWS_RUNTIME_PORT_KEY = "_tws_runtime_port"
 TWS_RUNTIME_CONTAINER_NAME_KEY = "_tws_runtime_container_name"
@@ -388,42 +351,6 @@ def _parse_snapshot_at(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
-
-
-def _client_portal_runtime_base_url(container_name: str) -> str:
-    return f"https://{container_name}:{CLIENT_PORTAL_GATEWAY_PORT}"
-
-
-def _with_client_portal_runtime_state(
-    config: dict[str, Any] | None,
-    *,
-    base_url: str,
-    container_name: str,
-    runtime_session_id: str,
-    verify_ssl: bool = False,
-) -> dict[str, Any]:
-    updated = dict(config or {})
-    updated[CLIENT_PORTAL_RUNTIME_BASE_URL_KEY] = base_url.rstrip("/")
-    updated[CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY] = bool(verify_ssl)
-    updated[CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY] = container_name
-    updated[CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY] = runtime_session_id.strip()
-    return updated
-
-
-def _clear_client_portal_runtime_state(config: dict[str, Any] | None) -> dict[str, Any]:
-    updated = dict(config or {})
-    updated.pop(CLIENT_PORTAL_RUNTIME_BASE_URL_KEY, None)
-    updated.pop(CLIENT_PORTAL_RUNTIME_VERIFY_SSL_KEY, None)
-    updated.pop(CLIENT_PORTAL_RUNTIME_CONTAINER_NAME_KEY, None)
-    updated.pop(CLIENT_PORTAL_RUNTIME_SESSION_ID_KEY, None)
-    return updated
-
-
-def _has_client_portal_runtime_state(config: dict[str, Any] | None) -> bool:
-    if not isinstance(config, dict):
-        return False
-    value = config.get(CLIENT_PORTAL_RUNTIME_BASE_URL_KEY)
-    return isinstance(value, str) and bool(value.strip())
 
 
 def _with_tws_runtime_state(
@@ -514,36 +441,6 @@ def _spawn_container_user() -> str | None:
     return None
 
 
-def _parse_client_portal_dispatcher_received_at(config: dict[str, Any] | None) -> datetime | None:
-    if not config:
-        return None
-
-    raw_value = config.get(CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY)
-    if not isinstance(raw_value, str) or not raw_value.strip():
-        return None
-
-    try:
-        parsed = datetime.fromisoformat(raw_value)
-    except ValueError:
-        return None
-
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _with_client_portal_dispatcher_received_at(
-    config: dict[str, Any] | None,
-    received_at: datetime | None,
-) -> dict[str, Any]:
-    updated = dict(config or {})
-    if received_at is None:
-        updated.pop(CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY, None)
-    else:
-        updated[CLIENT_PORTAL_DISPATCHER_RECEIVED_AT_KEY] = received_at.astimezone(timezone.utc).isoformat()
-    return updated
-
-
 # ── Gateway Registry ─────────────────────────────────────────────────
 # Each broker type maps to its Docker image, container prefix, label,
 # and a function that builds the environment dict from Connection.config.
@@ -551,40 +448,18 @@ def _with_client_portal_dispatcher_received_at(
 # in ConnectionManager.
 
 def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
-    """Build env vars for a gateway IBKR container."""
-    raw_transport = str(config.get("transport", "legacy"))
-    transport = "tws" if raw_transport.strip().lower() in {"tws", "ib_gateway", "ib-gateway"} else raw_transport
-    ibkr_host = str(config.get(TWS_RUNTIME_HOST_KEY) or config.get("host", "host.docker.internal"))
-    ibkr_port = str(config.get(TWS_RUNTIME_PORT_KEY) or config.get("port") or _tws_api_port_for_config(config))
+    """Build env vars for a gateway IBKR container.
+
+    The data gateway always targets the interactive ``twsgw-{id}`` runtime
+    (its API proxy) recorded in the connection config at login time.
+    """
+    ibkr_host = str(config.get(TWS_RUNTIME_HOST_KEY) or "")
+    ibkr_port = str(config.get(TWS_RUNTIME_PORT_KEY) or _tws_api_proxy_port_for_config(config))
     return {
         "IBKR_HOST": ibkr_host,
         "IBKR_PORT": ibkr_port,
         "IBKR_CLIENT_ID": str(config.get("client_id", 100)),
-        "IBKR_TRANSPORT": transport,
-        "CLIENT_PORTAL_ENABLED": str(config.get("client_portal_enabled", transport == "client_portal")).lower(),
-        "CLIENT_PORTAL_BASE_URL": resolve_client_portal_base_url(config),
-        "CLIENT_PORTAL_VERIFY_SSL": str(resolve_client_portal_verify_ssl(config)).lower(),
     }
-
-
-def _is_loopback_host(value: Any) -> bool:
-    host = str(value or "").strip().lower()
-    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
-
-
-def _ibkr_legacy_loopback_error(config: dict[str, Any]) -> str | None:
-    transport = str(config.get("transport", "legacy")).strip().lower()
-    if transport in {"client_portal", "tws", "ib_gateway", "ib-gateway"}:
-        return None
-    if config.get(TWS_RUNTIME_HOST_KEY):
-        return None
-    if not _is_loopback_host(config.get("host")):
-        return None
-    return (
-        "La connessione IBKR e' configurata come legacy/direct API con host 127.0.0.1. "
-        "In Docker questo indirizzo punta al container gateway, non a IB Gateway. "
-        "Usa il trasporto 'IB Gateway / TWS API containerizzato' oppure imposta un host raggiungibile dal container."
-    )
 
 
 def _binance_env(config: dict[str, Any]) -> dict[str, str]:
@@ -924,8 +799,6 @@ class ConnectionManager:
         self._broker_account_sync_consumer = (
             f"{BROKER_ACCOUNT_SYNC_GROUP}-{socket.gethostname()}-{os.getpid()}"
         )
-        self._client_portal_dispatcher_received_at: dict[int, datetime] = {}
-        self._client_portal_pre_dispatcher_log_probe_at: dict[int, datetime] = {}
         self._tws_api_probe_cache: dict[int, tuple[float, dict[str, Any]]] = {}
         # Serialize interactive TWS completion per connection so the frontend
         # polling loop and the background health loop can't both run connect()
@@ -1091,186 +964,6 @@ class ConnectionManager:
             await redis.aclose()
             logger.info("Broker account-sync consumer stopped")
 
-    def _clear_client_portal_dispatcher_grace(self, connection_id: int) -> None:
-        self._client_portal_dispatcher_received_at.pop(connection_id, None)
-        self._client_portal_pre_dispatcher_log_probe_at.pop(connection_id, None)
-
-    def _client_portal_container_reports_authenticated(self, connection_id: int) -> bool:
-        now = datetime.now(timezone.utc)
-        last_probe_at = self._client_portal_pre_dispatcher_log_probe_at.get(connection_id)
-        if (
-            last_probe_at is not None
-            and (now - last_probe_at).total_seconds() < CLIENT_PORTAL_PRE_DISPATCHER_LOG_PROBE_INTERVAL_SECONDS
-        ):
-            return False
-        self._client_portal_pre_dispatcher_log_probe_at[connection_id] = now
-
-        container = self._get_client_portal_container(connection_id)
-        if not container or container.status != "running":
-            return False
-
-        try:
-            result = container.exec_run(
-                [
-                    "sh",
-                    "-c",
-                    "grep -RaiE 'GET /v1/api/sso/validate[?]gw=1,200|GET /v1/api/iserver/auth/status,200' "
-                    "/opt/clientportal/logs/gw*.log 2>/dev/null | tail -1",
-                ],
-                stdout=True,
-                stderr=False,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed checking Client Portal auth logs for connection %s: %s",
-                connection_id,
-                exc,
-            )
-            return False
-
-        output = result.output.decode("utf-8", errors="ignore").strip()
-        if result.exit_code == 0 and output:
-            logger.info(
-                "Detected Client Portal authenticated session from container logs for connection %s: %s",
-                connection_id,
-                output[-300:],
-            )
-            return True
-        return False
-
-    def _client_portal_container_name(self, connection_id: int) -> str:
-        return f"{CLIENT_PORTAL_GATEWAY_PREFIX}{connection_id}"
-
-    def _get_client_portal_container(self, connection_id: int):
-        if not self._docker:
-            return None
-        try:
-            return self._docker.containers.get(self._client_portal_container_name(connection_id))
-        except NotFound:
-            return None
-        except Exception as e:
-            logger.warning("Docker error checking Client Portal container: %s", e)
-            return None
-
-    def _client_portal_traefik_labels(self, connection_id: int, prefix: str) -> dict[str, str]:
-        """Build Traefik Docker-provider labels that route the public host's
-        ``<prefix>`` to this container's noVNC web port (plain HTTP). A
-        stripPrefix middleware removes ``<prefix>`` so noVNC's static assets and
-        its ``/websockify`` WebSocket resolve at the container root. A forwardAuth
-        middleware (when configured) gates the browser behind the backend's
-        short-lived launch session before Traefik forwards the request.
-
-        The gateway's HTTPS API port stays internal (no public router): the
-        backend reaches it at ``https://<container>:<gateway-port>`` and the
-        in-container browser reaches it on localhost.
-        """
-        if not CLIENT_PORTAL_ROUTING_HOST:
-            raise RuntimeError(
-                "CLIENT_PORTAL_ROUTING_HOST is required when CLIENT_PORTAL_PATH_ROUTING_ENABLED=true"
-            )
-
-        router = f"cpgw-{connection_id}"
-        service = f"cpgw-{connection_id}"
-        strip_middleware = f"cpgw-strip-{connection_id}"
-        rule = f"Host(`{CLIENT_PORTAL_ROUTING_HOST}`) && PathPrefix(`{prefix}`)"
-        labels: dict[str, str] = {
-            "traefik.enable": "true",
-            f"traefik.http.routers.{router}.rule": rule,
-            f"traefik.http.routers.{router}.entrypoints": CLIENT_PORTAL_TRAEFIK_ENTRYPOINT,
-            f"traefik.http.routers.{router}.priority": CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY,
-            f"traefik.http.routers.{router}.service": service,
-            # noVNC/websockify serves plain HTTP on the noVNC port (WebSocket
-            # upgrades are forwarded transparently by Traefik on the same router).
-            f"traefik.http.services.{service}.loadbalancer.server.port": str(CLIENT_PORTAL_NOVNC_PORT),
-            # Strip the per-connection prefix so noVNC assets + /websockify resolve
-            # at the container root (the runtime-generated index.html points the
-            # WebSocket at <prefix>/websockify so it routes back through this router).
-            f"traefik.http.middlewares.{strip_middleware}.stripprefix.prefixes": prefix,
-        }
-
-        middlewares = [f"{strip_middleware}@docker"]
-
-        if CLIENT_PORTAL_TRAEFIK_TLS:
-            if CLIENT_PORTAL_TRAEFIK_CERTRESOLVER:
-                labels[f"traefik.http.routers.{router}.tls.certresolver"] = CLIENT_PORTAL_TRAEFIK_CERTRESOLVER
-            else:
-                labels[f"traefik.http.routers.{router}.tls"] = "true"
-
-        if CLIENT_PORTAL_TRAEFIK_NETWORK:
-            labels["traefik.docker.network"] = CLIENT_PORTAL_TRAEFIK_NETWORK
-
-        if CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE:
-            middleware = f"cpgw-auth-{connection_id}"
-            auth_url = CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE.format(connection_id=connection_id)
-            labels[f"traefik.http.middlewares.{middleware}.forwardauth.address"] = auth_url
-            labels[f"traefik.http.middlewares.{middleware}.forwardauth.trustForwardHeader"] = "true"
-            # forwardAuth runs BEFORE stripPrefix so the gate sees the full
-            # /ib-access/{id} path the launch cookie was scoped to.
-            middlewares.insert(0, f"{middleware}@docker")
-
-        labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(middlewares)
-
-        return labels
-
-    def _spawn_client_portal_gateway(self, connection_id: int) -> tuple[str, str, str]:
-        if not self._docker:
-            raise RuntimeError(f"Docker is not available; {_docker_runtime_requirements()}")
-        if not CLIENT_PORTAL_GATEWAY_IMAGE:
-            raise RuntimeError("CLIENT_PORTAL_GATEWAY_IMAGE is not configured")
-
-        container_name = self._client_portal_container_name(connection_id)
-        existing = self._get_client_portal_container(connection_id)
-        if existing:
-            if existing.status == "running":
-                return container_name, _client_portal_runtime_base_url(container_name), existing.id
-            existing.remove(force=True)
-
-        env = {
-            "CLIENT_PORTAL_ALLOW_REMOTE": "true",
-            "LOG_LEVEL": "INFO",
-        }
-        if CLIENT_PORTAL_PROXY_BRIDGE_TOKEN:
-            env["CLIENT_PORTAL_PROXY_BRIDGE_TOKEN"] = CLIENT_PORTAL_PROXY_BRIDGE_TOKEN
-
-        labels = {
-            "edgewalker.type": "client-portal",
-            "edgewalker.connection_id": str(connection_id),
-        }
-
-        if CLIENT_PORTAL_PATH_ROUTING_ENABLED:
-            prefix = _client_portal_path_prefix(connection_id)
-            env["CLIENT_PORTAL_BASE_PATH"] = prefix
-            labels.update(self._client_portal_traefik_labels(connection_id, prefix))
-
-        try:
-            user = _spawn_container_user()
-            container = self._docker.containers.run(
-                image=CLIENT_PORTAL_GATEWAY_IMAGE,
-                name=container_name,
-                environment=env,
-                labels=labels,
-                network=DOCKER_NETWORK,
-                user=user,
-                detach=True,
-                restart_policy={"Name": "no"},
-            )
-            logger.info("Spawned Client Portal container %s", container_name)
-        except APIError as e:
-            logger.error("Failed to spawn Client Portal container: %s", e)
-            raise
-
-        return container_name, _client_portal_runtime_base_url(container_name), container.id
-
-    def _destroy_client_portal_gateway(self, connection_id: int) -> None:
-        container = self._get_client_portal_container(connection_id)
-        if container:
-            try:
-                container.stop(timeout=10)
-                container.remove(force=True)
-                logger.info("Destroyed Client Portal container %s", self._client_portal_container_name(connection_id))
-            except Exception as e:
-                logger.warning("Error destroying Client Portal container: %s", e)
-
     def _tws_container_name(self, connection_id: int) -> str:
         return f"{TWS_GATEWAY_PREFIX}{connection_id}"
 
@@ -1286,40 +979,47 @@ class ConnectionManager:
             return None
 
     def _tws_traefik_labels(self, connection_id: int, prefix: str) -> dict[str, str]:
-        if not CLIENT_PORTAL_ROUTING_HOST:
+        """Build Traefik Docker-provider labels that route the public host's
+        ``<prefix>`` to this container's noVNC web port. A stripPrefix
+        middleware removes ``<prefix>``; a forwardAuth middleware (when
+        configured) gates the browser behind the backend launch session.
+        """
+        if not TWS_ROUTING_HOST:
             raise RuntimeError(
-                "CLIENT_PORTAL_ROUTING_HOST is required when TWS path routing is enabled"
+                "TWS_ROUTING_HOST (or legacy CLIENT_PORTAL_ROUTING_HOST) is required when TWS path routing is enabled"
             )
 
         router = f"twsgw-{connection_id}"
         service = f"twsgw-{connection_id}"
         strip_middleware = f"twsgw-strip-{connection_id}"
-        rule = f"Host(`{CLIENT_PORTAL_ROUTING_HOST}`) && PathPrefix(`{prefix}`)"
+        rule = f"Host(`{TWS_ROUTING_HOST}`) && PathPrefix(`{prefix}`)"
         labels: dict[str, str] = {
             "traefik.enable": "true",
             f"traefik.http.routers.{router}.rule": rule,
-            f"traefik.http.routers.{router}.entrypoints": CLIENT_PORTAL_TRAEFIK_ENTRYPOINT,
-            f"traefik.http.routers.{router}.priority": CLIENT_PORTAL_TRAEFIK_ROUTER_PRIORITY,
+            f"traefik.http.routers.{router}.entrypoints": TWS_TRAEFIK_ENTRYPOINT,
+            f"traefik.http.routers.{router}.priority": TWS_TRAEFIK_ROUTER_PRIORITY,
             f"traefik.http.routers.{router}.service": service,
             f"traefik.http.services.{service}.loadbalancer.server.port": str(TWS_NOVNC_PORT),
             f"traefik.http.middlewares.{strip_middleware}.stripprefix.prefixes": prefix,
         }
         middlewares = [f"{strip_middleware}@docker"]
 
-        if CLIENT_PORTAL_TRAEFIK_TLS:
-            if CLIENT_PORTAL_TRAEFIK_CERTRESOLVER:
-                labels[f"traefik.http.routers.{router}.tls.certresolver"] = CLIENT_PORTAL_TRAEFIK_CERTRESOLVER
+        if TWS_TRAEFIK_TLS:
+            if TWS_TRAEFIK_CERTRESOLVER:
+                labels[f"traefik.http.routers.{router}.tls.certresolver"] = TWS_TRAEFIK_CERTRESOLVER
             else:
                 labels[f"traefik.http.routers.{router}.tls"] = "true"
 
-        if CLIENT_PORTAL_TRAEFIK_NETWORK:
-            labels["traefik.docker.network"] = CLIENT_PORTAL_TRAEFIK_NETWORK
+        if TWS_TRAEFIK_NETWORK:
+            labels["traefik.docker.network"] = TWS_TRAEFIK_NETWORK
 
-        if CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE:
+        if TWS_FORWARD_AUTH_URL_TEMPLATE:
             middleware = f"twsgw-auth-{connection_id}"
-            auth_url = CLIENT_PORTAL_FORWARD_AUTH_URL_TEMPLATE.format(connection_id=connection_id)
+            auth_url = TWS_FORWARD_AUTH_URL_TEMPLATE.format(connection_id=connection_id)
             labels[f"traefik.http.middlewares.{middleware}.forwardauth.address"] = auth_url
             labels[f"traefik.http.middlewares.{middleware}.forwardauth.trustForwardHeader"] = "true"
+            # forwardAuth runs BEFORE stripPrefix so the gate sees the full
+            # /ib-access/{id} path the launch cookie was scoped to.
             middlewares.insert(0, f"{middleware}@docker")
 
         labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(middlewares)
@@ -1401,7 +1101,7 @@ class ConnectionManager:
             "edgewalker.connection_id": str(connection_id),
         }
 
-        if CLIENT_PORTAL_PATH_ROUTING_ENABLED:
+        if TWS_PATH_ROUTING_ENABLED:
             prefix = _tws_path_prefix(connection_id)
             env["TWS_BASE_PATH"] = prefix
             labels.update(self._tws_traefik_labels(connection_id, prefix))
@@ -1480,7 +1180,7 @@ class ConnectionManager:
                 last_error = f"HTTP {response.status_code}"
             except Exception as exc:
                 last_error = str(exc)
-                if "Name or service not known" in last_error and CLIENT_PORTAL_PATH_ROUTING_ENABLED:
+                if "Name or service not known" in last_error and TWS_PATH_ROUTING_ENABLED:
                     logger.warning(
                         "TWS noVNC container %s is running but not resolvable from backend Docker DNS (%s); "
                         "continuing with Traefik-routed popup readiness",
@@ -1635,59 +1335,6 @@ class ConnectionManager:
         self._tws_api_probe_cache[connection_id] = (asyncio.get_running_loop().time(), payload)
         return dict(payload)
 
-    async def _expire_idle_client_portal_runtime(
-        self,
-        *,
-        connection_id: int,
-        user_id: int,
-        config: dict[str, Any],
-        status_value: str,
-        age_seconds: float,
-    ) -> None:
-        logger.info(
-            "Stopping idle Client Portal container for connection %s after %.0fs (status=%s)",
-            connection_id,
-            age_seconds,
-            status_value,
-        )
-
-        self._clear_client_portal_dispatcher_grace(connection_id)
-
-        if _has_client_portal_runtime_state(config):
-            try:
-                await logout_client_portal_session(config)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to logout stale Client Portal session for connection %s: %s",
-                    connection_id,
-                    exc,
-                )
-
-        self._destroy_client_portal_gateway(connection_id)
-
-        try:
-            await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
-        except Exception as exc:
-            logger.warning(
-                "Failed to clear stale Client Portal launch session for connection %s: %s",
-                connection_id,
-                exc,
-            )
-
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            if conn is None:
-                return
-
-            conn.status = ConnectionStatus.DISCONNECTED.value
-            conn.status_message = CLIENT_PORTAL_RUNTIME_IDLE_STOP_MESSAGE
-            conn.updated_at = datetime.now(timezone.utc)
-            conn.config = _with_client_portal_dispatcher_received_at(
-                _clear_client_portal_runtime_state(conn.config),
-                None,
-            )
-            session.commit()
-
     async def _expire_idle_tws_runtime(
         self,
         *,
@@ -1708,7 +1355,7 @@ class ConnectionManager:
         self._destroy_tws_gateway(connection_id)
 
         try:
-            await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
+            await clear_tws_launch_session(connection_id=connection_id, user_id=user_id)
         except Exception as exc:
             logger.warning(
                 "Failed to clear stale TWS launch session for connection %s: %s",
@@ -1727,8 +1374,8 @@ class ConnectionManager:
             conn.config = _clear_tws_runtime_state(conn.config)
             session.commit()
 
-    async def _cleanup_idle_client_portal_runtimes(self) -> None:
-        if CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS <= 0:
+    async def _cleanup_idle_tws_runtimes(self) -> None:
+        if TWS_RUNTIME_IDLE_TIMEOUT_SECONDS <= 0:
             return
 
         now = datetime.now(timezone.utc)
@@ -1739,12 +1386,8 @@ class ConnectionManager:
 
         for conn in connections:
             config = dict(conn.config or {})
-            if not is_client_portal_transport(config) or not _has_client_portal_runtime_state(config):
-                if not is_tws_interactive_transport(config) or not _has_tws_runtime_state(config):
-                    continue
-                runtime_type = "tws"
-            else:
-                runtime_type = "client_portal"
+            if not _has_tws_runtime_state(config):
+                continue
 
             if conn.status not in {
                 ConnectionStatus.AWAITING_AUTH.value,
@@ -1762,9 +1405,9 @@ class ConnectionManager:
                 updated_at = updated_at.astimezone(timezone.utc)
 
             idle_timeout = (
-                CLIENT_PORTAL_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS
+                TWS_AUTH_RUNTIME_IDLE_TIMEOUT_SECONDS
                 if conn.status == ConnectionStatus.AWAITING_AUTH.value
-                else CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS
+                else TWS_RUNTIME_IDLE_TIMEOUT_SECONDS
             )
             age_seconds = (now - updated_at).total_seconds()
             if age_seconds < idle_timeout:
@@ -1777,125 +1420,40 @@ class ConnectionManager:
                     "config": config,
                     "status_value": conn.status,
                     "age_seconds": age_seconds,
-                    "runtime_type": runtime_type,
                 }
             )
 
         for candidate in candidates:
-            runtime_type = candidate.pop("runtime_type", "client_portal")
-            if runtime_type == "tws":
-                await self._expire_idle_tws_runtime(**candidate)
-            else:
-                await self._expire_idle_client_portal_runtime(**candidate)
+            await self._expire_idle_tws_runtime(**candidate)
 
-    async def _run_client_portal_runtime_cleanup(self) -> None:
+    async def _run_tws_runtime_cleanup(self) -> None:
         while self._running:
             try:
-                await self._cleanup_idle_client_portal_runtimes()
+                await self._cleanup_idle_tws_runtimes()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Client Portal runtime cleanup iteration failed: %s", exc, exc_info=True)
+                logger.warning("TWS runtime cleanup iteration failed: %s", exc, exc_info=True)
 
-            await asyncio.sleep(CLIENT_PORTAL_RUNTIME_CLEANUP_INTERVAL_SECONDS)
-
-    async def _wait_for_client_portal_gateway(self, base_url: str, *, verify_ssl: bool) -> None:
-        deadline = asyncio.get_running_loop().time() + CLIENT_PORTAL_GATEWAY_STARTUP_TIMEOUT_SECONDS
-        last_error = ""
-
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                async with httpx.AsyncClient(
-                    base_url=base_url,
-                    verify=verify_ssl,
-                    timeout=5.0,
-                    follow_redirects=False,
-                ) as client:
-                    # Probe the gateway's local /sso/Login page (TCP + HTTP check
-                    # of the Java gateway listener). This page is served locally
-                    # without contacting IBKR, so it does not open an upstream
-                    # session. The real login happens in the in-container browser.
-                    response = await client.get(CLIENT_PORTAL_GATEWAY_READY_PATH)
-                if response.status_code < 500:
-                    return
-                last_error = f"HTTP {response.status_code}"
-            except Exception as exc:
-                last_error = str(exc)
-
-            await asyncio.sleep(CLIENT_PORTAL_GATEWAY_POLL_INTERVAL_SECONDS)
-
-        raise RuntimeError(
-            f"Client Portal gateway did not become ready in time: {last_error or 'timeout'}"
-        )
-
-    async def _wait_for_client_portal_router(self, connection_id: int) -> None:
-        """Wait until Traefik has discovered the per-connection ``cpgw-{id}``
-        router. The Docker provider picks up the new container's labels
-        asynchronously, so the browser popup can open before the router exists.
-        Until then the lower-priority frontend SPA router answers /ib-access/{id},
-        which is why the user sees the SPA on first open and the login only after
-        a refresh. Polling the Traefik API closes that race deterministically.
-        """
-        if not CLIENT_PORTAL_TRAEFIK_API_URL or CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS <= 0:
-            return
-
-        router_name = f"{CLIENT_PORTAL_GATEWAY_PREFIX}{connection_id}"
-        deadline = asyncio.get_running_loop().time() + CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS
-        last_error = ""
-
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                async with httpx.AsyncClient(
-                    base_url=CLIENT_PORTAL_TRAEFIK_API_URL,
-                    timeout=5.0,
-                    follow_redirects=False,
-                ) as client:
-                    response = await client.get("/api/rawdata")
-                if response.status_code < 500:
-                    routers = (response.json() or {}).get("routers", {})
-                    for name, router in routers.items():
-                        # Provider-qualified names look like "cpgw-4@docker".
-                        if name.split("@", 1)[0] != router_name:
-                            continue
-                        if str(router.get("status", "")).lower() in ("", "enabled"):
-                            logger.info(
-                                "Traefik router %s discovered for connection %s",
-                                name,
-                                connection_id,
-                            )
-                            return
-                    last_error = "router not yet present"
-                else:
-                    last_error = f"HTTP {response.status_code}"
-            except Exception as exc:
-                last_error = str(exc)
-
-            await asyncio.sleep(CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS)
-
-        # Non-fatal: the router usually appears within a second of timeout and a
-        # browser refresh recovers. Surface a warning instead of failing the
-        # launch so users are never blocked by a slow Traefik provider refresh.
-        logger.warning(
-            "Traefik router %s not confirmed within %.0fs for connection %s (%s); "
-            "proceeding anyway",
-            router_name,
-            CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS,
-            connection_id,
-            last_error or "timeout",
-        )
+            await asyncio.sleep(TWS_RUNTIME_CLEANUP_INTERVAL_SECONDS)
 
     async def _wait_for_tws_router(self, connection_id: int) -> None:
-        if not CLIENT_PORTAL_TRAEFIK_API_URL or CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS <= 0:
+        """Wait until Traefik has discovered the per-connection ``twsgw-{id}``
+        router. The Docker provider picks up the new container's labels
+        asynchronously, so the browser popup can open before the router exists
+        and fall through to the lower-priority frontend SPA router.
+        """
+        if not TWS_TRAEFIK_API_URL or TWS_ROUTER_READY_TIMEOUT_SECONDS <= 0:
             return
 
         router_name = f"twsgw-{connection_id}"
-        deadline = asyncio.get_running_loop().time() + CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS
+        deadline = asyncio.get_running_loop().time() + TWS_ROUTER_READY_TIMEOUT_SECONDS
         last_error = ""
 
         while asyncio.get_running_loop().time() < deadline:
             try:
                 async with httpx.AsyncClient(
-                    base_url=CLIENT_PORTAL_TRAEFIK_API_URL,
+                    base_url=TWS_TRAEFIK_API_URL,
                     timeout=5.0,
                     follow_redirects=False,
                 ) as client:
@@ -1918,54 +1476,15 @@ class ConnectionManager:
             except Exception as exc:
                 last_error = str(exc)
 
-            await asyncio.sleep(CLIENT_PORTAL_ROUTER_READY_POLL_INTERVAL_SECONDS)
+            await asyncio.sleep(TWS_ROUTER_READY_POLL_INTERVAL_SECONDS)
 
         logger.warning(
             "Traefik TWS router %s not confirmed within %.0fs for connection %s (%s); proceeding anyway",
             router_name,
-            CLIENT_PORTAL_ROUTER_READY_TIMEOUT_SECONDS,
+            TWS_ROUTER_READY_TIMEOUT_SECONDS,
             connection_id,
             last_error or "timeout",
         )
-
-
-    async def _ensure_client_portal_runtime(self, connection_id: int, config: dict[str, Any]) -> dict[str, Any]:
-        existing = self._get_client_portal_container(connection_id)
-        runtime_already_running = bool(existing and existing.status == "running")
-        container_name, base_url, runtime_session_id = self._spawn_client_portal_gateway(connection_id)
-        if not runtime_already_running:
-            try:
-                await self._wait_for_client_portal_gateway(base_url, verify_ssl=False)
-            except Exception:
-                self._destroy_client_portal_gateway(connection_id)
-                raise
-        else:
-            logger.info(
-                "Reusing running Client Portal container %s for connection %s without readiness probe",
-                container_name,
-                connection_id,
-            )
-
-        # Confirm Traefik has discovered the router before returning the launch
-        # URL, otherwise the popup may open before the route exists and the first
-        # request falls through to the frontend SPA (visible until a refresh).
-        if CLIENT_PORTAL_PATH_ROUTING_ENABLED:
-            await self._wait_for_client_portal_router(connection_id)
-
-        updated_config = _with_client_portal_runtime_state(
-            config,
-            base_url=base_url,
-            container_name=container_name,
-            runtime_session_id=runtime_session_id,
-            verify_ssl=False,
-        )
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            if conn is not None:
-                conn.config = updated_config
-                conn.updated_at = datetime.now(timezone.utc)
-                session.commit()
-        return updated_config
 
     async def _ensure_tws_runtime(
         self,
@@ -1974,8 +1493,11 @@ class ConnectionManager:
         *,
         allow_recreate: bool = True,
     ) -> dict[str, Any]:
-        if not CLIENT_PORTAL_PATH_ROUTING_ENABLED:
-            raise RuntimeError("TWS interactive login requires CLIENT_PORTAL_PATH_ROUTING_ENABLED=true")
+        if not TWS_PATH_ROUTING_ENABLED:
+            raise RuntimeError(
+                "TWS interactive login requires TWS_PATH_ROUTING_ENABLED=true "
+                "(legacy env name: CLIENT_PORTAL_PATH_ROUTING_ENABLED)"
+            )
 
         existing = self._get_tws_container(connection_id)
         runtime_already_running = bool(existing and existing.status == "running")
@@ -1995,7 +1517,7 @@ class ConnectionManager:
                 connection_id,
             )
 
-        if CLIENT_PORTAL_PATH_ROUTING_ENABLED:
+        if TWS_PATH_ROUTING_ENABLED:
             await self._wait_for_tws_router(connection_id)
 
         updated_config = _with_tws_runtime_state(
@@ -2012,104 +1534,6 @@ class ConnectionManager:
                 conn.updated_at = datetime.now(timezone.utc)
                 session.commit()
         return updated_config
-
-    def _client_portal_dispatcher_grace_deadline(
-        self,
-        connection_id: int,
-        *,
-        dispatcher_received_at: datetime | None,
-        connection_status: str,
-        status_message: str | None,
-        updated_at: datetime | None,
-    ) -> datetime | None:
-        if CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS <= 0:
-            self._clear_client_portal_dispatcher_grace(connection_id)
-            return None
-
-        received_at = self._client_portal_dispatcher_received_at.get(connection_id)
-        if received_at is None:
-            received_at = dispatcher_received_at
-
-        if received_at is None:
-            if connection_status != ConnectionStatus.AWAITING_AUTH.value:
-                return None
-            if status_message != CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE:
-                return None
-            received_at = updated_at
-            if received_at is None:
-                return None
-
-        deadline = received_at + timedelta(seconds=CLIENT_PORTAL_DISPATCHER_GRACE_PERIOD_SECONDS)
-        if deadline <= datetime.now(timezone.utc):
-            self._clear_client_portal_dispatcher_grace(connection_id)
-            return None
-
-        return deadline
-
-    def _client_portal_dispatcher_grace_payload(
-        self,
-        connection_id: int,
-        *,
-        gateway_started: bool,
-        connection_status: str,
-        status_message: str | None,
-        updated_at: datetime | None,
-    ) -> dict[str, Any] | None:
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            config = dict(conn.config or {}) if conn is not None else {}
-
-        dispatcher_received_at = _parse_client_portal_dispatcher_received_at(config)
-        deadline = self._client_portal_dispatcher_grace_deadline(
-            connection_id,
-            dispatcher_received_at=dispatcher_received_at,
-            connection_status=connection_status,
-            status_message=status_message,
-            updated_at=updated_at,
-        )
-        if deadline is None:
-            return None
-
-        return {
-            "service_ready": True,
-            "gateway_session_ready": True,
-            "connected": False,
-            "login_authenticated": True,
-            "session_authenticated": False,
-            "authenticated": False,
-            "established": False,
-            "competing": False,
-            "bridge_ready": False,
-            "ready_to_connect": False,
-            "gateway_started": gateway_started,
-            "connection_status": connection_status,
-            "launch_url": None,
-            "message": CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE,
-        }
-
-    async def mark_client_portal_dispatcher_received(self, connection_id: int) -> dict[str, Any]:
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            if conn is None:
-                raise ValueError("Connection not found")
-
-            dispatcher_received_at = datetime.now(timezone.utc)
-            conn.status = ConnectionStatus.AWAITING_AUTH.value
-            conn.status_message = CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE
-            conn.updated_at = dispatcher_received_at
-            conn.config = _with_client_portal_dispatcher_received_at(conn.config, dispatcher_received_at)
-            session.commit()
-
-        self._client_portal_dispatcher_received_at[connection_id] = dispatcher_received_at
-        logger.info(
-            "Recorded Client Portal Dispatcher for connection %s at %s",
-            connection_id,
-            dispatcher_received_at.isoformat(),
-        )
-        return {
-            "success": True,
-            "message": CLIENT_PORTAL_DISPATCHER_ACK_MESSAGE,
-        }
 
     # ── Container management ─────────────────────────────────────────
 
@@ -2267,281 +1691,6 @@ class ConnectionManager:
             _gateway_clients[connection_id] = GatewayClient(connection_id, broker_type=broker_type)
         return _gateway_clients[connection_id]
 
-    async def begin_client_portal_auth(self, connection_id: int, *, user_id: int) -> dict[str, Any]:
-        self._clear_client_portal_dispatcher_grace(connection_id)
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            if conn is None:
-                raise ValueError("Connection not found")
-            config = _with_client_portal_dispatcher_received_at(conn.config, None)
-            conn.config = config
-            session.commit()
-
-        try:
-            config = await self._ensure_client_portal_runtime(connection_id, config)
-        except Exception as exc:
-            message = f"Client Portal non raggiungibile: {exc}"
-            logger.warning(
-                "Client Portal auth start failed for connection %s: %s",
-                connection_id,
-                exc,
-            )
-            with get_session_context() as session:
-                conn = session.get(Connection, connection_id)
-                if conn is not None:
-                    conn.status = ConnectionStatus.ERROR.value
-                    conn.status_message = message
-                    conn.updated_at = datetime.now(timezone.utc)
-                    session.commit()
-            return {
-                "service_ready": False,
-                "authenticated": False,
-                "ready_to_connect": False,
-                "launch_url": None,
-                "message": message,
-            }
-
-        message = "Autenticazione IBKR richiesta nel popup Client Portal."
-
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            if conn is not None:
-                conn.status = ConnectionStatus.AWAITING_AUTH.value
-                conn.status_message = message
-                conn.updated_at = datetime.now(timezone.utc)
-                session.commit()
-
-        try:
-            launch_url = await create_client_portal_launch_url(
-                connection_id=connection_id,
-                user_id=user_id,
-                config=config,
-                force_new=True,
-            )
-        except Exception as exc:
-            message = f"Client Portal launch non disponibile: {exc}"
-            logger.warning(
-                "Client Portal launch URL creation failed for connection %s: %s",
-                connection_id,
-                exc,
-            )
-            with get_session_context() as session:
-                conn = session.get(Connection, connection_id)
-                if conn is not None:
-                    conn.status = ConnectionStatus.ERROR.value
-                    conn.status_message = message
-                    conn.updated_at = datetime.now(timezone.utc)
-                    session.commit()
-            return {
-                "service_ready": False,
-                "authenticated": False,
-                "ready_to_connect": False,
-                "launch_url": None,
-                "message": message,
-            }
-
-        logger.info(
-            "Client Portal auth started for connection %s: service_ready=%s authenticated=%s ready_to_connect=%s launch_url=%s message=%s",
-            connection_id,
-            True,
-            False,
-            False,
-            bool(launch_url),
-            message,
-        )
-        return {
-            "service_ready": True,
-            "authenticated": False,
-                "login_authenticated": False,
-            "ready_to_connect": False,
-            "launch_url": launch_url,
-            "message": message,
-        }
-
-    async def complete_client_portal_connect(self, connection_id: int) -> ConnectorResult:
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            if conn is None:
-                return ConnectorResult(success=False, message="Connection not found")
-            config = dict(conn.config or {})
-            user_id = conn.user_id
-
-        try:
-            config = await self._ensure_client_portal_runtime(connection_id, config)
-        except Exception as exc:
-            return ConnectorResult(success=False, message=f"Client Portal non raggiungibile: {exc}")
-
-        auth = await get_client_portal_auth_status(config)
-        logger.info(
-            "Client Portal connect readiness for connection %s: service_ready=%s gateway_session_ready=%s session_authenticated=%s authenticated=%s bridge_ready=%s ready_to_connect=%s message=%s",
-            connection_id,
-            auth["service_ready"],
-            auth.get("gateway_session_ready", False),
-            auth.get("session_authenticated", False),
-            auth["authenticated"],
-            auth.get("bridge_ready", False),
-            auth.get("ready_to_connect", False),
-            auth.get("message"),
-        )
-        if not auth["service_ready"]:
-            return ConnectorResult(success=False, message=f"Client Portal non raggiungibile: {auth['message']}")
-        if not auth["ready_to_connect"]:
-            wait_message = auth.get("message") or "Client Portal non autenticato"
-            if auth.get("gateway_session_ready") and not auth.get("authenticated"):
-                wait_message = "Login Client Portal completato, ma la brokerage session IBKR non e' ancora pronta. Attendi qualche secondo e riprova."
-            elif auth.get("session_authenticated") and not auth.get("bridge_ready"):
-                wait_message = "Autorizzazione 2FA ricevuta, ma il bridge brokerage IBKR non e' ancora pronto. Attendi qualche secondo e riprova."
-            with get_session_context() as session:
-                conn = session.get(Connection, connection_id)
-                if conn is not None:
-                    conn.status = ConnectionStatus.AWAITING_AUTH.value
-                    conn.status_message = wait_message
-                    conn.updated_at = datetime.now(timezone.utc)
-                    session.commit()
-            return ConnectorResult(success=False, message=wait_message)
-
-        result = await self.connect(connection_id)
-        if result.success:
-            self._clear_client_portal_dispatcher_grace(connection_id)
-            with get_session_context() as session:
-                conn = session.get(Connection, connection_id)
-                if conn is not None:
-                    conn.config = _with_client_portal_dispatcher_received_at(conn.config, None)
-                    session.commit()
-            await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
-            logger.info("Client Portal connect completed for connection %s", connection_id)
-        return result
-
-    async def client_portal_auth_status(self, connection_id: int, *, user_id: int | None = None) -> dict[str, Any]:
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            if conn is None:
-                raise ValueError("Connection not found")
-            config = dict(conn.config or {})
-            status_value = conn.status
-            status_message = conn.status_message
-            updated_at = conn.updated_at
-
-        config = await self._ensure_client_portal_runtime(connection_id, config)
-
-        launch_url = None
-        if user_id is not None and status_value == ConnectionStatus.AWAITING_AUTH.value:
-            try:
-                launch_url = await create_client_portal_launch_url(
-                    connection_id=connection_id,
-                    user_id=user_id,
-                    config=config,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to refresh Client Portal launch URL for connection %s: %s",
-                    connection_id,
-                    exc,
-                )
-
-        container = self._get_client_portal_container(connection_id)
-        gateway_started = bool(container and container.status == "running")
-        dispatcher_received_at = _parse_client_portal_dispatcher_received_at(config)
-
-        grace_payload = self._client_portal_dispatcher_grace_payload(
-            connection_id,
-            gateway_started=gateway_started,
-            connection_status=status_value,
-            status_message=status_message,
-            updated_at=updated_at,
-        )
-        if grace_payload is not None:
-            grace_payload["launch_url"] = launch_url
-            logger.info(
-                "Client Portal auth-status grace for connection %s: gateway_started=%s connection_status=%s launch_url=%s message=%s",
-                connection_id,
-                gateway_started,
-                status_value,
-                bool(launch_url),
-                grace_payload["message"],
-            )
-            return grace_payload
-
-        if (
-            status_value == ConnectionStatus.AWAITING_AUTH.value
-            and dispatcher_received_at is None
-        ):
-            if self._client_portal_container_reports_authenticated(connection_id):
-                dispatcher_received_at = datetime.now(timezone.utc)
-                config = _with_client_portal_dispatcher_received_at(config, dispatcher_received_at)
-                self._client_portal_dispatcher_received_at[connection_id] = dispatcher_received_at
-                status_message = CLIENT_PORTAL_DISPATCHER_WAIT_MESSAGE
-                with get_session_context() as session:
-                    conn = session.get(Connection, connection_id)
-                    if conn is not None:
-                        conn.status = ConnectionStatus.AWAITING_AUTH.value
-                        conn.status_message = status_message
-                        conn.updated_at = dispatcher_received_at
-                        conn.config = _with_client_portal_dispatcher_received_at(conn.config, dispatcher_received_at)
-                        session.commit()
-            else:
-                payload = {
-                    "service_ready": True,
-                    "gateway_session_ready": False,
-                    "connected": False,
-                    "login_authenticated": False,
-                    "session_authenticated": False,
-                    "authenticated": False,
-                    "established": False,
-                    "competing": False,
-                    "bridge_ready": False,
-                    "ready_to_connect": False,
-                    "gateway_started": gateway_started,
-                    "connection_status": status_value,
-                    "launch_url": launch_url,
-                    "message": status_message or "Sessione Client Portal non autenticata. Completa il login nel popup.",
-                }
-                logger.info(
-                    "Client Portal auth-status pre-dispatcher for connection %s: gateway_started=%s connection_status=%s launch_url=%s message=%s",
-                    connection_id,
-                    gateway_started,
-                    status_value,
-                    bool(launch_url),
-                    payload["message"],
-                )
-                return payload
-
-        auth = await get_client_portal_auth_status(config)
-        if auth.get("authenticated") or auth.get("session_authenticated") or auth.get("bridge_ready") or auth.get("ready_to_connect"):
-            self._clear_client_portal_dispatcher_grace(connection_id)
-
-        payload = {
-            "service_ready": auth["service_ready"],
-            "gateway_session_ready": auth.get("gateway_session_ready", False),
-            "connected": auth.get("connected", False),
-            "login_authenticated": auth.get("login_authenticated", False),
-            "session_authenticated": auth.get("session_authenticated", False),
-            "authenticated": auth["authenticated"],
-            "established": auth.get("established", False),
-            "competing": auth.get("competing", False),
-            "bridge_ready": auth.get("bridge_ready", False),
-            "ready_to_connect": auth.get("ready_to_connect", False),
-            "gateway_started": gateway_started,
-            "connection_status": status_value,
-            "launch_url": launch_url,
-            "message": auth["message"],
-        }
-        logger.info(
-            "Client Portal auth-status for connection %s: service_ready=%s gateway_session_ready=%s session_authenticated=%s authenticated=%s bridge_ready=%s ready_to_connect=%s gateway_started=%s connection_status=%s launch_url=%s message=%s",
-            connection_id,
-            payload["service_ready"],
-            payload["gateway_session_ready"],
-            payload["session_authenticated"],
-            payload["authenticated"],
-            payload["bridge_ready"],
-            payload["ready_to_connect"],
-            payload["gateway_started"],
-            payload["connection_status"],
-            bool(payload["launch_url"]),
-            payload["message"],
-        )
-        return payload
-
     async def begin_tws_auth(self, connection_id: int, *, user_id: int) -> dict[str, Any]:
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
@@ -2565,6 +1714,8 @@ class ConnectionManager:
                 "service_ready": False,
                 "authenticated": False,
                 "ready_to_connect": False,
+                "gateway_started": False,
+                "connection_status": ConnectionStatus.ERROR.value,
                 "launch_url": None,
                 "message": message,
             }
@@ -2578,23 +1729,17 @@ class ConnectionManager:
                 conn.updated_at = datetime.now(timezone.utc)
                 session.commit()
 
-        launch_url = await create_client_portal_launch_url(
+        launch_url = await create_tws_launch_url(
             connection_id=connection_id,
             user_id=user_id,
             config=config,
             force_new=True,
             path_prefix=_tws_path_prefix(connection_id),
         )
-        ready = False
         return {
             "service_ready": True,
-            "gateway_session_ready": ready,
-            "connected": ready,
-            "session_authenticated": ready,
-            "authenticated": ready,
-            "established": ready,
-            "bridge_ready": ready,
-            "ready_to_connect": ready,
+            "authenticated": False,
+            "ready_to_connect": False,
             "gateway_started": True,
             "connection_status": ConnectionStatus.AWAITING_AUTH.value,
             "launch_url": launch_url,
@@ -2614,7 +1759,7 @@ class ConnectionManager:
         config = await self._ensure_tws_runtime(connection_id, config, allow_recreate=False)
         launch_url = None
         if user_id is not None and status_value == ConnectionStatus.AWAITING_AUTH.value:
-            launch_url = await create_client_portal_launch_url(
+            launch_url = await create_tws_launch_url(
                 connection_id=connection_id,
                 user_id=user_id,
                 config=config,
@@ -2630,13 +1775,7 @@ class ConnectionManager:
         ready = gateway_started and bool(probe.get("ready"))
         return {
             "service_ready": gateway_started,
-            "gateway_session_ready": ready,
-            "connected": ready,
-            "session_authenticated": ready,
             "authenticated": ready,
-            "established": ready,
-            "competing": False,
-            "bridge_ready": ready,
             "ready_to_connect": ready,
             "gateway_started": gateway_started,
             "connection_status": status_value,
@@ -2683,7 +1822,7 @@ class ConnectionManager:
 
             result = await self.connect(connection_id)
             if result.success:
-                await clear_client_portal_launch_session(connection_id=connection_id, user_id=user_id)
+                await clear_tws_launch_session(connection_id=connection_id, user_id=user_id)
             return result
 
     async def _try_autocomplete_tws_connection(
@@ -2737,15 +1876,6 @@ class ConnectionManager:
 
             broker_type = conn.broker_type
             config = dict(conn.config or {})
-
-            if broker_type == "ibkr":
-                legacy_loopback_error = _ibkr_legacy_loopback_error(config)
-                if legacy_loopback_error:
-                    conn.status = ConnectionStatus.ERROR.value
-                    conn.status_message = legacy_loopback_error
-                    conn.updated_at = datetime.now(timezone.utc)
-                    session.commit()
-                    return ConnectorResult(success=False, message=legacy_loopback_error)
 
             if broker_type == "ctrader":
                 ctrader_config_error = _ctrader_config_error(config)
@@ -2847,15 +1977,11 @@ class ConnectionManager:
 
     async def disconnect(self, connection_id: int) -> ConnectorResult:
         """Disconnect by destroying the gateway container."""
-        self._clear_client_portal_dispatcher_grace(connection_id)
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
             if conn is None:
                 return ConnectorResult(success=False, message="Connection not found")
             broker_type = conn.broker_type
-            conn.config = _with_client_portal_dispatcher_received_at(conn.config, None)
-            config = dict(conn.config or {})
-            session.commit()
 
         # Gracefully tell the gateway to disconnect first
         try:
@@ -2864,15 +1990,7 @@ class ConnectionManager:
         except Exception:
             pass  # Container may already be gone
 
-        if is_client_portal_transport(config):
-            if _has_client_portal_runtime_state(config):
-                try:
-                    await logout_client_portal_session(config)
-                except Exception:
-                    pass
-                self._destroy_client_portal_gateway(connection_id)
-
-        if is_tws_interactive_transport(config) and _has_tws_runtime_state(config):
+        if broker_type == "ibkr":
             self._destroy_tws_gateway(connection_id)
 
         # Destroy the container
@@ -2882,7 +2000,7 @@ class ConnectionManager:
             _update_connection_status(session, connection_id, ConnectionStatus.DISCONNECTED, "Disconnected")
             conn = session.get(Connection, connection_id)
             if conn is not None:
-                conn.config = _clear_tws_runtime_state(_clear_client_portal_runtime_state(conn.config))
+                conn.config = _clear_tws_runtime_state(conn.config)
                 conn.updated_at = datetime.now(timezone.utc)
                 session.commit()
 
@@ -2898,18 +2016,14 @@ class ConnectionManager:
                 return ConnectionStatus.DISCONNECTED.value
             stored_status = conn.status
             broker_type = conn.broker_type
-            config = dict(conn.config or {})
 
-        # Interactive logins (IB Gateway/TWS, Client Portal) are driven to
-        # completion by the dedicated reconcile loop, not here. The health loop
-        # only monitors already-established connections.
-        if (
-            (is_client_portal_transport(config) or is_tws_interactive_transport(config))
-            and stored_status == ConnectionStatus.AWAITING_AUTH.value
-        ):
+        # Interactive IB Gateway logins are driven to completion by the
+        # dedicated reconcile loop, not here. The health loop only monitors
+        # already-established connections.
+        if broker_type == "ibkr" and stored_status == ConnectionStatus.AWAITING_AUTH.value:
             return stored_status
 
-        # For an interactive IB Gateway/TWS connection that is not actively
+        # For an interactive IB Gateway connection that is not actively
         # connected, the data gateway (gw-N) is absent BY DESIGN — it is only
         # spawned after login completes. The TWS login runtime (twsgw-N) is owned
         # by the auth flow (begin/complete) and the idle-cleanup loop, so the
@@ -2917,7 +2031,7 @@ class ConnectionManager:
         # with begin_tws_auth respawning it and surfaces to the user as
         # "container twsgw-N not found".
         if (
-            is_tws_interactive_transport(config)
+            broker_type == "ibkr"
             and stored_status not in {
                 ConnectionStatus.CONNECTED.value,
                 ConnectionStatus.CONNECTING.value,
@@ -2931,11 +2045,7 @@ class ConnectionManager:
         container = self._get_container(connection_id, broker_type)
         if not container or container.status != "running":
             actual = ConnectionStatus.DISCONNECTED
-            if is_client_portal_transport(config):
-                actual_message = "Gateway container terminated; Client Portal runtime stopped"
-                self._destroy_gateway(connection_id, broker_type)
-                self._destroy_client_portal_gateway(connection_id)
-            if is_tws_interactive_transport(config):
+            if broker_type == "ibkr":
                 actual_message = "Gateway container terminated; IB Gateway runtime stopped"
                 self._destroy_gateway(connection_id, broker_type)
                 self._destroy_tws_gateway(connection_id)
@@ -3074,17 +2184,13 @@ class ConnectionManager:
             stmt = select(Connection).where(
                 Connection.is_active == True,  # noqa: E712
                 Connection.status == ConnectionStatus.AWAITING_AUTH.value,
+                Connection.broker_type == "ibkr",
             )
             candidates = [
                 (c.id, dict(c.config or {}))
                 for c in session.exec(stmt).all()
             ]
 
-        candidates = [
-            (cid, config)
-            for cid, config in candidates
-            if is_tws_interactive_transport(config)
-        ]
         if not candidates:
             return
 
@@ -3189,8 +2295,8 @@ class ConnectionManager:
         if BROKER_ACCOUNT_SYNC_ENABLED:
             self._tasks.append(asyncio.create_task(self._run_broker_account_sync_consumer()))
 
-        if CLIENT_PORTAL_RUNTIME_IDLE_TIMEOUT_SECONDS > 0:
-            self._tasks.append(asyncio.create_task(self._run_client_portal_runtime_cleanup()))
+        if TWS_RUNTIME_IDLE_TIMEOUT_SECONDS > 0:
+            self._tasks.append(asyncio.create_task(self._run_tws_runtime_cleanup()))
 
         # On (re)start, no broker connections can be alive
         self._reset_connected_on_startup()

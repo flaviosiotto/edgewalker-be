@@ -50,7 +50,6 @@ from app.services.connection_service import (
     list_connections,
     update_connection,
 )
-from app.services.client_portal_service import is_client_portal_transport, is_tws_interactive_transport
 from app.services.connection_manager import get_connection_manager
 from app.services.connection_manager import resolve_order_history_lookback_days
 from app.services.ctrader_accounts import CTraderAccountsError, fetch_ctrader_accounts
@@ -296,24 +295,14 @@ class ConnectDisconnectResponse(BaseModel):
     launch_url: str | None = None
 
 
-class ClientPortalAuthStatusResponse(BaseModel):
+class InteractiveAuthStatusResponse(BaseModel):
+    """Status of an interactive IB Gateway (TWS) login flow."""
     service_ready: bool
-    gateway_session_ready: bool = False
-    connected: bool = False
-    session_authenticated: bool = False
     authenticated: bool
-    established: bool = False
-    competing: bool = False
-    bridge_ready: bool = False
     ready_to_connect: bool = False
     gateway_started: bool
     connection_status: str
     launch_url: str | None = None
-    message: str | None = None
-
-
-class ClientPortalFlowSignalResponse(BaseModel):
-    success: bool
     message: str | None = None
 
 
@@ -344,27 +333,7 @@ async def connect_endpoint(
 
     manager = get_connection_manager()
 
-    if conn.broker_type == "ibkr" and is_client_portal_transport(conn.config or {}):
-        auth = await manager.begin_client_portal_auth(
-            connection_id,
-            user_id=current_user.id,
-        )
-        if auth["ready_to_connect"]:
-            result = await manager.complete_client_portal_connect(connection_id)
-            return ConnectDisconnectResponse(
-                success=result.success,
-                message=result.message,
-                accounts_discovered=len(result.accounts) if result.accounts else 0,
-            )
-
-        return ConnectDisconnectResponse(
-            success=auth["service_ready"],
-            message=auth["message"],
-            auth_required=auth["service_ready"],
-            launch_url=auth.get("launch_url"),
-        )
-
-    if conn.broker_type == "ibkr" and is_tws_interactive_transport(conn.config or {}):
+    if conn.broker_type == "ibkr":
         auth = await manager.begin_tws_auth(
             connection_id,
             user_id=current_user.id,
@@ -393,62 +362,7 @@ async def connect_endpoint(
     )
 
 
-@router.get("/{connection_id}/client-portal/auth-status", response_model=ClientPortalAuthStatusResponse)
-async def client_portal_auth_status_endpoint(
-    connection_id: int,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
-):
-    conn = get_connection(session, connection_id, current_user.id)
-    if conn is None:
-        raise HTTPException(status_code=404, detail="Connection not found")
-    if conn.broker_type != "ibkr" or not is_client_portal_transport(conn.config or {}):
-        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR Client Portal")
-
-    manager = get_connection_manager()
-    payload = await manager.client_portal_auth_status(connection_id, user_id=current_user.id)
-    return ClientPortalAuthStatusResponse(**payload)
-
-
-@router.post("/{connection_id}/client-portal/dispatcher-received", response_model=ClientPortalFlowSignalResponse)
-async def client_portal_dispatcher_received_endpoint(
-    connection_id: int,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
-):
-    conn = get_connection(session, connection_id, current_user.id)
-    if conn is None:
-        raise HTTPException(status_code=404, detail="Connection not found")
-    if conn.broker_type != "ibkr" or not is_client_portal_transport(conn.config or {}):
-        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR Client Portal")
-
-    manager = get_connection_manager()
-    payload = await manager.mark_client_portal_dispatcher_received(connection_id)
-    return ClientPortalFlowSignalResponse(**payload)
-
-
-@router.post("/{connection_id}/client-portal/connect", response_model=ConnectDisconnectResponse)
-async def complete_client_portal_connect_endpoint(
-    connection_id: int,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
-):
-    conn = get_connection(session, connection_id, current_user.id)
-    if conn is None:
-        raise HTTPException(status_code=404, detail="Connection not found")
-    if conn.broker_type != "ibkr" or not is_client_portal_transport(conn.config or {}):
-        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR Client Portal")
-
-    manager = get_connection_manager()
-    result = await manager.complete_client_portal_connect(connection_id)
-    return ConnectDisconnectResponse(
-        success=result.success,
-        message=result.message,
-        accounts_discovered=len(result.accounts) if result.accounts else 0,
-    )
-
-
-@router.get("/{connection_id}/tws/auth-status", response_model=ClientPortalAuthStatusResponse)
+@router.get("/{connection_id}/tws/auth-status", response_model=InteractiveAuthStatusResponse)
 async def tws_auth_status_endpoint(
     connection_id: int,
     session: Session = Depends(get_session),
@@ -457,12 +371,12 @@ async def tws_auth_status_endpoint(
     conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
-    if conn.broker_type != "ibkr" or not is_tws_interactive_transport(conn.config or {}):
-        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR TWS interactive mode")
+    if conn.broker_type != "ibkr":
+        raise HTTPException(status_code=400, detail="Connection is not an IBKR connection")
 
     manager = get_connection_manager()
     payload = await manager.tws_auth_status(connection_id, user_id=current_user.id)
-    return ClientPortalAuthStatusResponse(**payload)
+    return InteractiveAuthStatusResponse(**payload)
 
 
 @router.post("/{connection_id}/tws/connect", response_model=ConnectDisconnectResponse)
@@ -474,8 +388,8 @@ async def complete_tws_connect_endpoint(
     conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
-    if conn.broker_type != "ibkr" or not is_tws_interactive_transport(conn.config or {}):
-        raise HTTPException(status_code=400, detail="Connection is not configured for IBKR TWS interactive mode")
+    if conn.broker_type != "ibkr":
+        raise HTTPException(status_code=400, detail="Connection is not an IBKR connection")
 
     manager = get_connection_manager()
     result = await manager.complete_tws_connect(connection_id)

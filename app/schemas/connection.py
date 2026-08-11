@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -24,12 +24,11 @@ CONNECTION_STALE_TTL_SECONDS = max(
 
 class ConnectionConfig(BaseModel):
     """Connection configuration (broker-specific)."""
-    # IBKR
-    transport: str | None = None
-    host: str | None = None
-    port: int | None = None
+    # IBKR (interactive IB Gateway/TWS runtime)
+    username: str | None = None
+    password: str | None = None
+    trading_mode: str | None = None
     client_id: int | str | None = None
-    client_portal_enabled: bool | None = None
     order_history_lookback_days: int | None = None
     order_history_lookback_hours: int | None = None
     # Generic

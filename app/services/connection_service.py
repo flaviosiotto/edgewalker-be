@@ -11,9 +11,40 @@ from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
 from app.models.connection import Connection, Account
-from app.services.client_portal_service import sanitize_connection_config
 
 logger = logging.getLogger(__name__)
+
+
+# Legacy IBKR config keys from the removed Client Portal / direct-TWS
+# transports, stripped on create/update so old rows converge to the single
+# interactive IB Gateway mode.
+_LEGACY_IBKR_CONFIG_KEYS = frozenset(
+    {
+        "transport",
+        "host",
+        "port",
+        "tws_interactive",
+        "client_portal_enabled",
+        "client_portal_base_url",
+        "client_portal_browser_url",
+        "client_portal_verify_ssl",
+        "client_portal_spawn_mode",
+        "_client_portal_runtime_base_url",
+        "_client_portal_runtime_verify_ssl",
+        "_client_portal_runtime_container_name",
+        "_client_portal_runtime_session_id",
+        "_client_portal_dispatcher_received_at",
+    }
+)
+
+
+def sanitize_connection_config(broker_type: str, config: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(config or {})
+    if str(broker_type).strip().lower() != "ibkr":
+        return normalized
+    for key in _LEGACY_IBKR_CONFIG_KEYS:
+        normalized.pop(key, None)
+    return normalized
 
 
 # =============================================================================
@@ -52,7 +83,7 @@ def create_connection(
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connection name already exists")
 
-    safe_config = sanitize_connection_config(broker_type, config, strict=True)
+    safe_config = sanitize_connection_config(broker_type, config)
 
     conn = Connection(
         user_id=user_id,
@@ -88,7 +119,7 @@ def update_connection(session: Session, connection_id: int, user_id: int | None 
     if new_config is not None:
         merged_config = dict(conn.config or {})
         merged_config.update(new_config)
-        fields["config"] = sanitize_connection_config(conn.broker_type, merged_config, strict=True)
+        fields["config"] = sanitize_connection_config(conn.broker_type, merged_config)
 
     for key, value in fields.items():
         if value is not None:
