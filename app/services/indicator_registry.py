@@ -293,21 +293,21 @@ CUSTOM_INDICATORS = {
         "default_anchor": "session",
         "output_groups": [
             {
-                "name": "histogram", "label": "Volume Profile", "render_type": "price_histogram",
+                "name": "histogram", "label": "Volume Profile", "render_type": "independent",
                 "series": [
-                    {"field": "volume", "label": "Volume",
+                    {"field": "volume", "label": "Volume", "encoding": "y",
                      "style": {"type": "histogram", "color": "#2196F3", "line_width": 1, "opacity": 0.4, "visible": True}},
                 ],
             },
             {
-                "name": "markers", "label": "Levels", "render_type": "levels",
+                "name": "markers", "label": "Levels", "render_type": "independent",
                 "series": [
-                    {"field": "poc", "label": "Point of Control",
+                    {"field": "poc", "label": "Point of Control", "encoding": "y",
                      "style": {"type": "line", "color": "#FF9800", "line_width": 2, "opacity": 1.0, "visible": True}},
-                    {"field": "vah", "label": "Value Area High",
-                     "style": {"type": "dashed_line", "color": "#9C27B0", "line_width": 1, "opacity": 1.0, "visible": True}},
-                    {"field": "val", "label": "Value Area Low",
-                     "style": {"type": "dashed_line", "color": "#9C27B0", "line_width": 1, "opacity": 1.0, "visible": True}},
+                    {"field": "vah", "label": "Value Area High", "encoding": "y",
+                     "style": {"type": "line", "line_style": "dashed", "color": "#9C27B0", "line_width": 1, "opacity": 1.0, "visible": True}},
+                    {"field": "val", "label": "Value Area Low", "encoding": "y",
+                     "style": {"type": "line", "line_style": "dashed", "color": "#9C27B0", "line_width": 1, "opacity": 1.0, "visible": True}},
                 ],
             },
         ],
