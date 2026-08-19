@@ -69,9 +69,15 @@ def _resolve_simulated_account_read(session: Session, account, base: AccountRead
 
     active = bt.status in {BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value}
     if active:
+        bt_id = bt.id
+        # Release the pooled DB connection before the blocking HTTP call: this
+        # runs on every account read and holding the connection across httpx
+        # exhausts the pool under FE polling (same convention as strategies.py
+        # runtime endpoints).
+        session.close()
         try:
             with httpx.Client(timeout=3.0) as client:
-                resp = client.get(f"{_BACKTEST_SERVICE_URL}/backtests/{bt.id}/status")
+                resp = client.get(f"{_BACKTEST_SERVICE_URL}/backtests/{bt_id}/status")
                 resp.raise_for_status()
                 pos = (resp.json() or {}).get("position") or {}
             cash = pos.get("cash")
@@ -284,9 +290,11 @@ def list_account_orders_endpoint(
 
     bt = _backtest_for_simulated_account(session, account)
     if bt is not None:
-        payload = _fetch_backtest_json(f"/backtests/{bt.id}/orders")
+        bt_id, resolved_account_id = bt.id, account.id
+        session.close()  # release the pooled DB connection before the blocking HTTP call
+        payload = _fetch_backtest_json(f"/backtests/{bt_id}/orders")
         raw = (payload or {}).get("orders") or []
-        orders = [_coordinator_order_to_read(o, account.id) for o in raw]
+        orders = [_coordinator_order_to_read(o, resolved_account_id) for o in raw]
         if symbol:
             wanted = symbol.upper()
             orders = [o for o in orders if o.symbol.upper() == wanted]
@@ -524,9 +532,11 @@ def list_account_positions_endpoint(
 
     bt = _backtest_for_simulated_account(session, account)
     if bt is not None:
-        payload = _fetch_backtest_json(f"/backtests/{bt.id}/positions")
+        bt_id, resolved_account_id = bt.id, account.id
+        session.close()  # release the pooled DB connection before the blocking HTTP call
+        payload = _fetch_backtest_json(f"/backtests/{bt_id}/positions")
         raw = (payload or {}).get("positions") or []
-        positions = [_coordinator_position_to_read(p, account.id) for p in raw]
+        positions = [_coordinator_position_to_read(p, resolved_account_id) for p in raw]
         if symbol:
             wanted = symbol.upper()
             positions = [p for p in positions if p.symbol.upper() == wanted]
