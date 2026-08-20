@@ -1,7 +1,8 @@
 from contextlib import contextmanager
 from typing import Generator
 
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import SQLModel, Session
+from edgewalker_platform.db import create_db_engine, session_scope
 from app.core.config import settings
 
 
@@ -13,14 +14,12 @@ if DATABASE_URL.startswith("sqlite"):
         "types such as JSONB. Set DATABASE_URL to a PostgreSQL connection string before startup."
     )
 
-connect_args = {}
-if DATABASE_URL.startswith("sqlite"):
-    connect_args = {"check_same_thread": False}
-
-engine = create_engine(
+# Pool policy (sizing, fail-fast checkout, server-side idle-in-transaction
+# kill, application_name, held-connection watchdog) is centralised in the
+# platform kit — see edgewalker_platform/db.py.
+engine = create_db_engine(
     DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True,
+    service_name="backend",
     pool_size=settings.DB_POOL_SIZE,
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_timeout=settings.DB_POOL_TIMEOUT,
@@ -57,16 +56,25 @@ def create_db_and_tables():
 
 
 def get_session():
-    """Dependency for FastAPI endpoints."""
-    with Session(engine) as session:
-        yield session
+    """Dependency for FastAPI endpoints.
+
+    Commits on clean exit / rolls back on exception, so a request can never
+    leave its connection "idle in transaction" past its own lifetime.
+    ``expire_on_commit=False`` keeps ORM objects readable after a mid-request
+    ``session.commit()`` releases the connection early (the auth dependency
+    relies on this).
+    """
+    with Session(engine, expire_on_commit=False) as session:
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
 
 
 @contextmanager
 def get_session_context() -> Generator[Session, None, None]:
     """Context manager for background tasks and non-FastAPI code."""
-    session = Session(engine)
-    try:
+    with session_scope(engine) as session:
         yield session
-    finally:
-        session.close()

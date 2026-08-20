@@ -474,11 +474,16 @@ def send_chat_message(
     )
 
     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
+    resolved_chat_id = chat.id or chat_id
+    webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+    # Highest-traffic multi-user path: the webhook can take up to 120s, so the
+    # pooled DB connection must go back before the call (19/08 incident).
+    session.close()
 
     try:
         with httpx.Client(timeout=DEFAULT_SEND_TIMEOUT) as client:
             response = client.post(
-                _rewrite_webhook_for_docker(agent.n8n_webhook),
+                webhook_url,
                 json=webhook_payload,
                 headers=headers,
             )
@@ -502,7 +507,7 @@ def send_chat_message(
 
     return ChatSendMessageResponse(
         status="ok",
-        chat_id=chat.id or chat_id,
+        chat_id=resolved_chat_id,
         session_id=session_id,
         request_id=request_id,
     )
@@ -669,6 +674,12 @@ async def stream_chat_message(
     )
     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
     headers["Accept"] = "text/plain"
+    resolved_chat_id = chat.id
+    webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+    # The generator outlives the request's DB session (it streams for the whole
+    # agent turn, with no read timeout): release the pooled connection now and
+    # reference only the plain locals captured above — never ORM state.
+    session.close()
 
     async def event_stream() -> AsyncIterator[str]:
         decoder = codecs.getincrementaldecoder("utf-8")()
@@ -679,7 +690,7 @@ async def stream_chat_message(
             "message_start",
             {
                 "request_id": request_id,
-                "chat_id": chat.id,
+                "chat_id": resolved_chat_id,
                 "session_id": session_id,
             },
         )
@@ -688,7 +699,7 @@ async def stream_chat_message(
             async with httpx.AsyncClient(timeout=DEFAULT_STREAM_TIMEOUT) as client:
                 async with client.stream(
                     "POST",
-                    _rewrite_webhook_for_docker(agent.n8n_webhook),
+                    webhook_url,
                     json=webhook_payload,
                     headers=headers,
                 ) as response:
@@ -750,7 +761,7 @@ async def stream_chat_message(
                 "message_end",
                 {
                     "request_id": request_id,
-                    "chat_id": chat.id,
+                    "chat_id": resolved_chat_id,
                     "session_id": session_id,
                     "full_text": full_text,
                 },

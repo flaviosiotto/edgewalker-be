@@ -40,7 +40,9 @@ class Settings(BaseSettings):
     # the hard ceiling of connections opened toward Postgres per worker process.
     DB_POOL_SIZE: int = 20
     DB_MAX_OVERFLOW: int = 20
-    DB_POOL_TIMEOUT: int = 30
+    # Fail fast on pool exhaustion: a 30s wait freezes async endpoints' event
+    # loop and hides saturation; 5s surfaces it as an error to fix.
+    DB_POOL_TIMEOUT: int = 5
     DB_POOL_RECYCLE: int = 1800
 
     SECRET_KEY: str = "change-me"

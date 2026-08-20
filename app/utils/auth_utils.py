@@ -247,6 +247,20 @@ def authenticate_user(username_or_email: str, password: str, session: Session) -
     return user
 
 
+def _release_auth_connection(session: Session) -> None:
+    """End the auth lookup's read-only transaction.
+
+    Auth runs first in every request and only reads; without this, the
+    transaction it opens keeps the pooled connection checked out for the
+    entire request — including endpoints that then block on HTTP/docker for
+    minutes (the 19/08 pool-saturation incident). Sessions run with
+    ``expire_on_commit=False``, so the resolved principal stays readable and
+    the endpoint's own queries lazily re-acquire a connection.
+    """
+    if session.in_transaction():
+        session.commit()
+
+
 async def get_current_user(
     request: Request,
     token: str = Depends(oauth2_scheme),
@@ -256,6 +270,7 @@ async def get_current_user(
 
     pat_principal = _try_pat_principal(request, token, session)
     if pat_principal is not None:
+        _release_auth_connection(session)
         return pat_principal.user
 
     payload = decode_token_for_audiences(
@@ -265,12 +280,14 @@ async def get_current_user(
     if payload is None:
         raise credentials_exception
 
-    return _load_principal_from_payload(
+    user = _load_principal_from_payload(
         payload,
         session,
         allowed_token_types={"access"},
         credentials_exception=credentials_exception,
     ).user
+    _release_auth_connection(session)
+    return user
 
 
 async def get_current_active_user(
@@ -299,6 +316,7 @@ async def get_current_active_principal(
     if pat_principal is not None:
         if not pat_principal.user.is_active:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        _release_auth_connection(session)
         return pat_principal
 
     payload = decode_token_for_audiences(
@@ -316,6 +334,7 @@ async def get_current_active_principal(
     )
     if not principal.user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    _release_auth_connection(session)
     return principal
 
 
@@ -359,6 +378,7 @@ async def get_current_runner_principal(
         if runner_strategy_id is not None and str(runner_strategy_id) != str(strategy_live.strategy_id):
             raise _credentials_exception("Runner token does not match this strategy")
 
+        _release_auth_connection(session)
         return principal
 
     if runner_backtest_id is None:
@@ -378,6 +398,7 @@ async def get_current_runner_principal(
     if runner_strategy_id is not None and str(runner_strategy_id) != str(backtest.strategy_id):
         raise _credentials_exception("Runner token does not match this strategy")
 
+    _release_auth_connection(session)
     return principal
 
 
@@ -418,6 +439,7 @@ async def get_current_consultative_principal(
         if backtest is None:
             raise _credentials_exception("Consultative token backtest not found")
 
+    _release_auth_connection(session)
     return principal
 
 
@@ -430,6 +452,7 @@ async def get_current_active_or_runner_user(
     if pat_principal is not None:
         if not pat_principal.user.is_active:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        _release_auth_connection(session)
         return pat_principal.user
 
     access_payload = decode_token(token, audience=settings.ACCESS_TOKEN_AUDIENCE)
@@ -442,6 +465,7 @@ async def get_current_active_or_runner_user(
         ).user
         if not user.is_active:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        _release_auth_connection(session)
         return user
 
     runner_principal = await get_current_runner_principal(token=token, session=session)
@@ -459,6 +483,7 @@ async def get_current_active_or_consultative_user(
     if pat_principal is not None:
         if not pat_principal.user.is_active:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        _release_auth_connection(session)
         return pat_principal.user
 
     access_payload = decode_token(token, audience=settings.ACCESS_TOKEN_AUDIENCE)
@@ -471,6 +496,7 @@ async def get_current_active_or_consultative_user(
         ).user
         if not user.is_active:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        _release_auth_connection(session)
         return user
 
     consultative_principal = await get_current_consultative_principal(token=token, session=session)
