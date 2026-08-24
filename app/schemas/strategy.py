@@ -146,6 +146,9 @@ class BacktestRead(BaseModel):
     strategy_id: int
     chat_id: Optional[int] = None
     agent_id: Optional[int] = None
+    # Data connection the run used (the owning strategy's); charts of a
+    # finished run need it to subscribe history-only on the same dataset.
+    connection_id: Optional[int] = None
 
     # Input parameters
     symbol: str
@@ -266,6 +269,7 @@ class BacktestSummary(BaseModel):
     id: int
     strategy_id: int
     strategy_name: Optional[str] = None
+    connection_id: Optional[int] = None
     chat_id: Optional[int] = None
     agent_id: Optional[int] = None
     symbol: str

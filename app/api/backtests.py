@@ -45,6 +45,19 @@ router = APIRouter(prefix="/backtests", tags=["Backtests"])
 _ACTIVE_STATUSES = {BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value}
 
 
+def _ledger_from_metrics(backtest, key: str) -> list:
+    """Persisted ledger section (orders / fills / equity_snapshots) of a finished run.
+
+    The coordinator keeps a run in memory only while its container lives; the
+    same ledger is embedded in ``strategy_backtests.metrics`` at finalize, so a
+    completed backtest can still serve its equity curve and order log.
+    """
+    metrics = backtest.metrics if isinstance(backtest.metrics, dict) else {}
+    ledger = metrics.get("ledger") if isinstance(metrics.get("ledger"), dict) else {}
+    rows = ledger.get(key) or []
+    return list(rows) if isinstance(rows, list) else []
+
+
 @router.get("/", response_model=BacktestListPage)
 def list_all_backtests_endpoint(
     status_filter: str | None = Query(default=None, alias="status"),
@@ -79,9 +92,10 @@ def list_all_backtests_endpoint(
         offset=offset,
     )
     items = []
-    for backtest, strategy_name in rows:
+    for backtest, strategy_name, connection_id in rows:
         item = BacktestSummary.model_validate(backtest, from_attributes=True)
         item.strategy_name = strategy_name
+        item.connection_id = connection_id
         items.append(item)
     # Release the pooled DB connection before the per-row HTTP probes.
     session.close()
@@ -118,7 +132,11 @@ def get_backtest_endpoint(
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Get backtest details including status and results if completed."""
-    return get_backtest(session, backtest_id, current_user.id)
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    read = BacktestRead.model_validate(backtest, from_attributes=True)
+    strategy = get_strategy(session, backtest.strategy_id, current_user.id)
+    read.connection_id = strategy.connection_id
+    return read
 
 
 @router.delete("/{backtest_id}")
@@ -127,8 +145,12 @@ def delete_backtest_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
-    """Delete a backtest and all its trades."""
+    """Delete a backtest, its trades and its persisted chart dataset."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
     delete_backtest(session, backtest_id, current_user.id)
+    session.close()  # release the pooled DB connection before the blocking HTTP call
+    backtest_runner_service.delete_backtest_dataset(backtest_id)
     return {"status": "ok"}
 
 
@@ -237,16 +259,28 @@ def get_backtest_runtime_orders_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
-    """List source-of-truth simulated orders recorded by strategy-backtest."""
+    """Simulated orders: live from the coordinator, persisted ledger once finished."""
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
     bt_id = backtest.id
+    active = backtest.status in _ACTIVE_STATUSES
+    ledger_orders = [] if active else _ledger_from_metrics(backtest, "orders")
     session.close()  # release the pooled DB connection before the blocking HTTP call
+    if not active and ledger_orders:
+        # Finished run: the coordinator has forgotten it, serve the persisted ledger.
+        if active_only:
+            ledger_orders = [
+                o for o in ledger_orders
+                if str(o.get("status") or "") in {"pending", "submitted", "partially_filled"}
+            ]
+        return {"orders": ledger_orders, "source": "ledger"}
     try:
-        return backtest_runner_service.list_backtest_orders(bt_id, active_only=active_only)
+        payload = backtest_runner_service.list_backtest_orders(bt_id, active_only=active_only)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    payload.setdefault("source", "coordinator")
+    return payload
 
 
 @router.post("/{backtest_id}/runtime/orders")
@@ -372,16 +406,53 @@ def get_backtest_runtime_equity_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
-    """List runtime equity snapshots recorded by strategy-backtest."""
+    """Equity curve: live from the coordinator, persisted ledger once finished."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    bt_id = backtest.id
+    active = backtest.status in _ACTIVE_STATUSES
+    ledger_equity = [] if active else _ledger_from_metrics(backtest, "equity_snapshots")
+    session.close()  # release the pooled DB connection before the blocking HTTP call
+    if not active and ledger_equity:
+        # Finished run: the coordinator has forgotten it, serve the persisted curve.
+        return {"equity": ledger_equity, "source": "ledger"}
+    try:
+        payload = backtest_runner_service.list_backtest_equity(bt_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    payload.setdefault("source", "coordinator")
+    return payload
+
+
+@router.get("/{backtest_id}/ohlc-history")
+def get_backtest_ohlc_history_endpoint(
+    backtest_id: int,
+    chart_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Chart dataset persisted by the coordinator at materialisation (parquet).
+
+    Same JSON shape as ``/marketdata/ohlc-history`` (candles, indicators,
+    indicator_meta, frames); ``chart_id`` selects a secondary chart. 404 when
+    the run predates dataset persistence.
+    """
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
     bt_id = backtest.id
     session.close()  # release the pooled DB connection before the blocking HTTP call
     try:
-        return backtest_runner_service.list_backtest_equity(bt_id)
+        payload = backtest_runner_service.get_backtest_ohlc_history(bt_id, chart_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dati del backtest non disponibili: run precedente alla persistenza dei dataset",
+        )
+    return payload
 
 
 @router.get("/{backtest_id}/runtime/alerts")

@@ -464,16 +464,16 @@ def list_all_backtests(
     symbol: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> tuple[list[tuple[BacktestResult, str]], int]:
+) -> tuple[list[tuple[BacktestResult, str, int | None]], int]:
     """List backtests across every strategy owned by the user.
 
-    Returns ``([(backtest, strategy_name), ...], total)`` where ``total`` is the
-    filtered count before pagination.
+    Returns ``([(backtest, strategy_name, connection_id), ...], total)`` where
+    ``total`` is the filtered count before pagination.
     """
     from sqlalchemy import func
 
     query = (
-        select(BacktestResult, Strategy.name)
+        select(BacktestResult, Strategy.name, Strategy.connection_id)
         .join(Strategy, Strategy.id == BacktestResult.strategy_id)
         .where(Strategy.user_id == user_id)
     )

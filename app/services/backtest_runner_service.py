@@ -530,6 +530,36 @@ class BacktestRunnerService:
             raw_trades = []
         return {"trades": list(raw_trades)}
 
+    def get_backtest_ohlc_history(self, backtest_id: int, chart_id: str | None = None) -> dict[str, Any] | None:
+        """Persisted chart dataset of a finished run (parquet on the data volume).
+
+        Served by the coordinator in the ``/marketdata/ohlc-history`` shape.
+        Returns None when the run has no persisted dataset (404).
+        """
+        params = {"chart_id": chart_id} if chart_id else None
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/ohlc-history", params=params)
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"Backtest service error {exc.response.status_code}: {exc.response.text[:200]}") from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Backtest service unreachable: {exc}") from exc
+        return data if isinstance(data, dict) else None
+
+    def delete_backtest_dataset(self, backtest_id: int) -> bool:
+        """Best-effort removal of the persisted dataset (backtest deletion)."""
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.delete(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/dataset")
+                return resp.status_code == 200 and bool(resp.json().get("removed"))
+        except Exception as exc:
+            logger.warning("Backtest %s dataset cleanup failed: %s", backtest_id, exc)
+            return False
+
     def list_backtest_equity(self, backtest_id: int) -> dict[str, Any]:
         try:
             with httpx.Client(timeout=5.0) as client:
