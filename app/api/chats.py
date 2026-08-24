@@ -113,6 +113,11 @@ async def chat_events_endpoint(
     Redis being unavailable degrades to new_message-only behaviour.
     """
     session_id = get_chat_session_id(session, chat_id=chat_id, user_id=current_user.id)
+    # Release the pooled DB connection before streaming: the get_session
+    # dependency is torn down only when the response completes, and an SSE
+    # response lives for minutes — a held session sits idle in transaction
+    # until the Postgres guardrail kills it after 60s.
+    session.close()
     queue = subscribe(session_id)
 
     async def event_stream() -> AsyncIterator[str]:

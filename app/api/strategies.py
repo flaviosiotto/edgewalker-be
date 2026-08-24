@@ -141,6 +141,11 @@ async def strategy_events_endpoint(
     """
     # Ownership check (404/403 like the other strategy endpoints).
     get_strategy(session, strategy_id, current_user.id)
+    # Release the pooled DB connection before streaming: the get_session
+    # dependency is torn down only when the response completes, and an SSE
+    # response lives for minutes — a held session sits idle in transaction
+    # until the Postgres guardrail kills it after 60s.
+    session.close()
 
     async def event_stream() -> AsyncIterator[str]:
         pubsub = None
