@@ -30,13 +30,16 @@ from app.services.strategy_service import (
     run_backtest,
     update_backtest_layout,
 )
-from app.utils.auth_utils import get_current_active_user
+from app.utils.auth_utils import get_current_active_or_consultative_user
 
 logger = logging.getLogger(__name__)
 
 # The single backtest API: every backtest is addressed by its own id, the
 # owning strategy is resolved (and ownership-checked) server side. The old
 # /strategies/{sid}/backtests/* routes were removed in favour of this router.
+# Auth mirrors /accounts: user JWT, PAT, delegated n8n token, or the agent's
+# consultative token — the in-backtest manager agent reads and trades through
+# the /runtime/* endpoints with its agent_backend_consult token.
 router = APIRouter(prefix="/backtests", tags=["Backtests"])
 
 _ACTIVE_STATUSES = {BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value}
@@ -51,7 +54,7 @@ def list_all_backtests_endpoint(
     offset: int = Query(default=0, ge=0),
     with_progress: bool = Query(default=True),
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """List backtests across all the user's strategies, newest first.
 
@@ -102,7 +105,7 @@ def list_all_backtests_endpoint(
 def create_backtest_endpoint(
     payload: BacktestCreateRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Create a new backtest with status=pending. Call /run to execute."""
     return create_backtest(session, payload.strategy_id, payload, current_user.id)
@@ -112,7 +115,7 @@ def create_backtest_endpoint(
 def get_backtest_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Get backtest details including status and results if completed."""
     return get_backtest(session, backtest_id, current_user.id)
@@ -122,7 +125,7 @@ def get_backtest_endpoint(
 def delete_backtest_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Delete a backtest and all its trades."""
     delete_backtest(session, backtest_id, current_user.id)
@@ -133,7 +136,7 @@ def delete_backtest_endpoint(
 def get_backtest_chat_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Get or create the dedicated chat for a backtest instance."""
     _ = get_backtest(session, backtest_id, current_user.id)
@@ -144,7 +147,7 @@ def get_backtest_chat_endpoint(
 def run_backtest_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Start backtest execution.
 
@@ -159,7 +162,7 @@ def control_backtest_playback_endpoint(
     backtest_id: int,
     payload: BacktestPlaybackControl,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Control runtime backtest playback: pause, resume, speed, or step."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -178,7 +181,7 @@ def control_backtest_playback_endpoint(
 def stop_backtest_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Stop a running backtest runner and request replay cancellation."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -201,7 +204,7 @@ def stop_backtest_endpoint(
 def get_backtest_runtime_status_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Get runner container and replay-service progress for a backtest."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -232,7 +235,7 @@ def get_backtest_runtime_orders_endpoint(
     backtest_id: int,
     active_only: bool = Query(default=False),
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """List source-of-truth simulated orders recorded by strategy-backtest."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -251,7 +254,7 @@ def submit_backtest_runtime_order_endpoint(
     backtest_id: int,
     payload: BacktestRuntimeOrderRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Submit a manual order to the source-of-truth strategy-backtest ledger."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -280,7 +283,7 @@ def cancel_backtest_runtime_order_endpoint(
     backtest_id: int,
     order_id: str,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Cancel an order recorded by strategy-backtest when it is still cancellable."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -300,7 +303,7 @@ def cancel_backtest_runtime_order_endpoint(
 def get_backtest_runtime_positions_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Get source-of-truth simulated position recorded by strategy-backtest."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -320,7 +323,7 @@ def close_backtest_runtime_position_endpoint(
     position_id: str,
     payload: BacktestRuntimePositionCloseRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Close one simulated position through the strategy-backtest ledger."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -349,7 +352,7 @@ def close_backtest_runtime_position_endpoint(
 def get_backtest_runtime_trades_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """List source-of-truth closed trades computed from the runtime backtest ledger."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -367,7 +370,7 @@ def get_backtest_runtime_trades_endpoint(
 def get_backtest_runtime_equity_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """List runtime equity snapshots recorded by strategy-backtest."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -386,7 +389,7 @@ def get_backtest_runtime_alerts_endpoint(
     backtest_id: int,
     active_only: bool = Query(default=False),
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """List structured alerts tracked by the active backtest runner."""
     from app.services.backtest_runner_service import backtest_runner_service
@@ -404,7 +407,7 @@ def get_backtest_runtime_alerts_endpoint(
 def get_backtest_agent_calls_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """List manager-agent invocations recorded by the runner for this backtest.
 
@@ -430,7 +433,7 @@ def update_backtest_layout_endpoint(
     backtest_id: int,
     payload: LayoutConfigUpdate,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Update only the UI layout configuration for a backtest."""
     return update_backtest_layout(session, backtest_id, payload, current_user.id)
@@ -440,7 +443,7 @@ def update_backtest_layout_endpoint(
 def list_trades_endpoint(
     backtest_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """List all trades for a backtest."""
     return list_trades(session, backtest_id, current_user.id)

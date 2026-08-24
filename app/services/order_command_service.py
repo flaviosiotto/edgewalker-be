@@ -23,8 +23,7 @@ from sqlmodel import Session, select
 
 from app.models.connection import Connection
 from app.models.live_trading import LiveOrder
-from app.models.strategy import BacktestResult, StrategyLive
-from app.services.connection_service import SIMULATED_ACCOUNT_TYPE
+from app.models.strategy import StrategyLive
 from app.services.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
@@ -49,20 +48,6 @@ def build_order_ref(strategy_id: Any, strategy_live_id: Any) -> str:
     safe_strategy = str(strategy_id or "unknown").replace(":", "_")
     safe_live = str(strategy_live_id or "unknown").replace(":", "_")
     prefix = f"strategy-{safe_strategy}:live-{safe_live}:"
-    token_len = max(1, MAX_ORDER_REF_LEN - len(prefix))
-    return f"{prefix}{uuid.uuid4().hex[:token_len]}"[:MAX_ORDER_REF_LEN]
-
-
-def build_backtest_order_ref(strategy_id: Any, backtest_id: Any) -> str:
-    """Run-ref for backtest orders: ``strategy-{id}:bt-{id}:{token}``.
-
-    Same contract as the live ref: it attributes the order — and, through the
-    coordinator's position book, the position and its eventual close — to the
-    run that placed it, regardless of who decided it (rule engine or agent).
-    """
-    safe_strategy = str(strategy_id or "unknown").replace(":", "_")
-    safe_backtest = str(backtest_id or "unknown").replace(":", "_")
-    prefix = f"strategy-{safe_strategy}:bt-{safe_backtest}:"
     token_len = max(1, MAX_ORDER_REF_LEN - len(prefix))
     return f"{prefix}{uuid.uuid4().hex[:token_len]}"[:MAX_ORDER_REF_LEN]
 
@@ -94,15 +79,6 @@ def _validate(side: str, order_type: str, quantity: float, limit_price: float | 
     return normalised_side, normalised_type
 
 
-def _backtest_for_account(session: Session, account: Any) -> BacktestResult:
-    backtest = session.exec(
-        select(BacktestResult).where(BacktestResult.account_id == account.id)
-    ).first()
-    if backtest is None:
-        raise ValueError("No backtest backs this simulated account")
-    return backtest
-
-
 async def place_account_order(
     session: Session,
     account: Any,
@@ -132,29 +108,6 @@ async def place_account_order(
             raise ValueError(f"{label} must be > 0")
 
     command_extra = {"source": "backend_account_api", **(extra or {})}
-
-    if account.account_type == SIMULATED_ACCOUNT_TYPE:
-        backtest = _backtest_for_account(session, account)
-        from app.services.backtest_runner_service import backtest_runner_service
-
-        payload: dict[str, Any] = {
-            "symbol": symbol,
-            "side": normalised_side,
-            "order_type": normalised_type,
-            "quantity": quantity,
-            "order_ref": build_backtest_order_ref(backtest.strategy_id, backtest.id),
-            "extra": command_extra,
-        }
-        for key, value in (
-            ("limit_price", limit_price),
-            ("stop_price", stop_price),
-            ("take_profit_price", take_profit_price),
-            ("stop_loss_price", stop_loss_price),
-        ):
-            if value is not None:
-                payload[key] = value
-        result = backtest_runner_service.place_backtest_order(backtest.id, payload)
-        return {"venue": "backtest", "backtest_id": backtest.id, "result": result}
 
     connection = session.get(Connection, account.connection_id)
     if connection is None:
@@ -211,15 +164,6 @@ async def cancel_account_order(
     order_id: str,
 ) -> dict[str, Any]:
     """Cancel a working order of this account."""
-    if account.account_type == SIMULATED_ACCOUNT_TYPE:
-        backtest = _backtest_for_account(session, account)
-        from app.services.backtest_runner_service import backtest_runner_service
-
-        result = backtest_runner_service.cancel_backtest_order(
-            backtest.id, str(order_id), status_message="cancelled_via_account_api"
-        )
-        return {"venue": "backtest", "backtest_id": backtest.id, "result": result}
-
     # The gateway speaks broker order ids; the UI and the agent both address
     # orders by the projection row id, so translate whenever the row is known.
     row = find_account_order(session, account.id, order_id)

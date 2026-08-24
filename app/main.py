@@ -143,7 +143,10 @@ app.include_router(system_router)
 app.include_router(agents_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(chats_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(strategies_router, dependencies=[Depends(get_current_active_user)])
-app.include_router(backtests_router, dependencies=[Depends(get_current_active_user)])
+# No router-level auth: like /accounts, each endpoint accepts the agent's
+# consultative token besides user JWT/PAT (a router-level
+# get_current_active_user would reject it).
+app.include_router(backtests_router)
 app.include_router(marketdata_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(live_router)
 app.include_router(runners_router)

@@ -25,8 +25,6 @@ from sqlmodel import Session, select
 
 from app.models.connection import Connection
 from app.models.live_trading import LivePosition
-from app.models.strategy import BacktestResult
-from app.services.connection_service import SIMULATED_ACCOUNT_TYPE
 from app.services.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
@@ -149,21 +147,6 @@ async def close_account_position(
         **(extra or {}),
     }
 
-    # Simulated account -> the backtest ledger owns execution.
-    if account.account_type == SIMULATED_ACCOUNT_TYPE:
-        backtest = session.exec(
-            select(BacktestResult).where(BacktestResult.account_id == account.id)
-        ).first()
-        if backtest is None:
-            raise ValueError("No backtest backs this simulated account")
-        from app.services.backtest_runner_service import backtest_runner_service
-
-        payload: dict[str, Any] = {"quantity": quantity, "extra": command_extra}
-        if symbol:
-            payload["symbol"] = symbol
-        result = backtest_runner_service.close_backtest_position(backtest.id, position_id, payload)
-        return {"venue": "backtest", "backtest_id": backtest.id, "result": result}
-
     # Callers address a position by any of its ids (the row id included), but the
     # gateway only understands the broker's own id: translate once we have the row.
     row = find_open_position(session, account.id, position_id)
@@ -221,13 +204,6 @@ async def amend_account_position_protection(
         and not clear_stop_loss
     ):
         raise ValueError("nothing to amend: pass a price or a clear_* flag")
-
-    if account.account_type == SIMULATED_ACCOUNT_TYPE:
-        # The backtest ledger evaluates TP/SL it was given at entry; it has no
-        # amend path. Say so rather than pretend the change landed.
-        raise ProtectionUnsupportedError(
-            "Backtest positions do not support amending TP/SL after entry"
-        )
 
     row = find_open_position(session, account.id, position_id)
     resolved_position_id = str(position_id)
