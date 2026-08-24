@@ -67,7 +67,7 @@ Key settings in `core/config.py` (Pydantic BaseSettings):
 ## API Structure
 - `POST /auth/token` – OAuth2 password flow
 - `GET/POST /strategies/` – CRUD strategies
-- `POST /strategies/{id}/backtests/{bid}/run` – Trigger backtest via n8n
+- `POST /backtests/{bid}/run` – Start backtest execution (flat /backtests router)
 - `GET /datasources/` – List available market data
 - `WS /ws/marketdata` – ~~Real-time streaming~~ (migrated to `datasource-realtime` service)
 

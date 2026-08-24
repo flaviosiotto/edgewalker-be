@@ -251,6 +251,63 @@ class BacktestRuntimeOrderRequest(BaseModel):
     extra: Optional[dict[str, Any]] = None
 
 
+class BacktestCreateRequest(BacktestCreate):
+    """BacktestCreate plus the owning strategy, for the flat /backtests router."""
+    strategy_id: int
+
+
+class BacktestRuntimePositionCloseRequest(BaseModel):
+    """Manual close command for a simulated position of a runtime backtest."""
+    quantity: float = Field(gt=0)
+    symbol: Optional[str] = None
+    reason: Optional[str] = None
+    extra: Optional[dict[str, Any]] = None
+
+
+class BacktestSummary(BaseModel):
+    """Row of the global backtests listing: scalar fields only, no JSONB blobs."""
+    id: int
+    strategy_id: int
+    strategy_name: Optional[str] = None
+    chat_id: Optional[int] = None
+    agent_id: Optional[int] = None
+    symbol: str
+    start_date: date
+    end_date: date
+    source: Optional[str] = None
+    timeframe: Optional[str] = None
+    asset: Optional[str] = None
+    initial_capital: Optional[float] = None
+    commission: Optional[float] = None
+    status: str
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    return_pct: Optional[float] = None
+    sharpe_ratio: Optional[float] = None
+    max_drawdown_pct: Optional[float] = None
+    win_rate_pct: Optional[float] = None
+    profit_factor: Optional[float] = None
+    total_trades: Optional[int] = None
+    equity_final: Optional[float] = None
+    equity_peak: Optional[float] = None
+    created_at: datetime
+
+    # Live-run enrichment (pending/running rows only, when requested):
+    # phase/progress come from the coordinator; stale means the DB says
+    # running but neither the coordinator nor the runner container exists.
+    phase: Optional[str] = None
+    progress: Optional[float] = None
+    stale: Optional[bool] = None
+
+
+class BacktestListPage(BaseModel):
+    items: list[BacktestSummary]
+    total: int
+    limit: int
+    offset: int
+
+
 
 # ─── LAYOUT CONFIG SCHEMAS ───
 

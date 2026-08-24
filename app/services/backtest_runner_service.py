@@ -347,6 +347,36 @@ class BacktestRunnerService:
             "runner": runner_status,
         }
 
+    def get_backtest_progress(self, backtest_id: int) -> dict[str, Any] | None:
+        """Cheap per-row progress probe for the global backtests listing.
+
+        One short HTTP call to the coordinator, no docker/redis diagnostics.
+        Returns None when the coordinator has no state for this backtest
+        (finished long ago, or the service is unreachable).
+        """
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/status")
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return {
+            "status": data.get("status"),
+            "phase": data.get("phase"),
+            "progress": data.get("progress"),
+        }
+
+    def is_backtest_container_running(self, backtest_id: int) -> bool:
+        try:
+            container = self._get_container(backtest_id)
+        except Exception:
+            return False
+        return bool(container and container.status == "running")
+
     def control_backtest_playback(self, backtest_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             with httpx.Client(timeout=5.0) as client:

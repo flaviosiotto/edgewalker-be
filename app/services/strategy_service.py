@@ -456,6 +456,42 @@ def list_backtests(session: Session, strategy_id: int, user_id: int | None = Non
     )
 
 
+def list_all_backtests(
+    session: Session,
+    user_id: int,
+    *,
+    statuses: list[str] | None = None,
+    strategy_id: int | None = None,
+    symbol: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[tuple[BacktestResult, str]], int]:
+    """List backtests across every strategy owned by the user.
+
+    Returns ``([(backtest, strategy_name), ...], total)`` where ``total`` is the
+    filtered count before pagination.
+    """
+    from sqlalchemy import func
+
+    query = (
+        select(BacktestResult, Strategy.name)
+        .join(Strategy, Strategy.id == BacktestResult.strategy_id)
+        .where(Strategy.user_id == user_id)
+    )
+    if statuses:
+        query = query.where(BacktestResult.status.in_(statuses))
+    if strategy_id is not None:
+        query = query.where(BacktestResult.strategy_id == strategy_id)
+    if symbol:
+        query = query.where(BacktestResult.symbol.ilike(f"%{symbol.strip()}%"))
+
+    total = session.exec(select(func.count()).select_from(query.subquery())).one()
+    rows = session.exec(
+        query.order_by(BacktestResult.id.desc()).limit(limit).offset(offset)
+    ).all()
+    return list(rows), int(total)
+
+
 def get_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> BacktestResult:
     backtest = session.get(BacktestResult, backtest_id)
     if not backtest:

@@ -18,6 +18,7 @@ from app.api.healthcheck import router as system_router
 from app.api.agents import router as agents_router
 from app.api.chats import router as chats_router
 from app.api.strategies import router as strategies_router
+from app.api.backtests import router as backtests_router
 from app.api.marketdata import router as marketdata_router
 from app.api.live import router as live_router
 from app.api.runners import router as runners_router
@@ -142,6 +143,7 @@ app.include_router(system_router)
 app.include_router(agents_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(chats_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(strategies_router, dependencies=[Depends(get_current_active_user)])
+app.include_router(backtests_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(marketdata_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(live_router)
 app.include_router(runners_router)
