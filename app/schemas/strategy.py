@@ -47,6 +47,27 @@ class StrategyCreate(BaseModel):
     connection_id: Optional[int] = None
 
 
+class StrategyPerformanceSummary(BaseModel):
+    """Strategy-scoped ledger totals (performance_service scope=strategy)."""
+    total_pnl: float | None = None      # net realized (gross + swap − costs)
+    realized_gross: float = 0.0
+    commission: float = 0.0
+    swap: float = 0.0
+    net_pnl: float = 0.0
+    net_pnl_account_ccy: float | None = None
+    currency: str | None = None
+    mixed_currency: bool = False
+    total_trades: int = 0
+    unreconciled_trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    win_rate: float | None = None
+    sessions: int = 0
+    active_live_id: int | None = None
+    first_exit_at: datetime | None = None
+    last_exit_at: datetime | None = None
+
+
 class StrategyRead(BaseModel):
     id: int
     name: str
@@ -67,9 +88,16 @@ class StrategyRead(BaseModel):
     # Current live session (if any)
     live: Optional[StrategyLiveRead] = None
 
-    # Runtime summary of the current live session (performance + container/sync state).
-    # Populated only when a live session exists; null otherwise.
+    # Runtime summary of the current live session (container/sync state and
+    # the session-scoped ledger figures). Populated only when a live session
+    # exists; null otherwise.
     live_summary: Optional[LiveStrategySummaryRead] = None
+
+    # Strategy-scoped performance from the trades ledger: every live session
+    # of the strategy, lifetime. Always populated (zeros when never traded), so
+    # cards and the Performance tab show the same figures whether or not the
+    # strategy is live.
+    performance_summary: Optional[StrategyPerformanceSummary] = None
 
     # UI layout persistence
     layout_config: Optional[dict[str, Any]] = None

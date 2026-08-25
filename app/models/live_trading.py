@@ -312,17 +312,6 @@ class LivePosition(SQLModel, table=True):
             return None
         return float(self.avg_price) * float(self.quantity or 0.0)
 
-    @property
-    def realized_pnl(self) -> float:
-        return 0.0
-
-    @property
-    def unrealized_pnl(self) -> float | None:
-        return None
-
-    @property
-    def closed_at(self) -> datetime | None:
-        return None
 
 
 class LiveTrade(SQLModel, table=True):
@@ -364,6 +353,14 @@ class LiveTrade(SQLModel, table=True):
     commission: Optional[float] = Field(default=0.0, sa_column=Column(Float, nullable=True))
     net_pnl: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
     trusted: bool = Field(default=True, sa_column=Column(Boolean, nullable=False))
+    # Ledger columns (migration 044): realized_pnl is GROSS, commission is the
+    # total cost, swap is financing, net_pnl = realized + swap - commission,
+    # net_pnl_account_ccy = net_pnl * fx_to_account, gap_reason explains NULLs.
+    swap: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    currency: Optional[str] = Field(default=None, sa_column=Column(String(16), nullable=True))
+    fx_to_account: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    net_pnl_account_ccy: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    gap_reason: Optional[str] = Field(default=None, sa_column=Column(String(64), nullable=True))
     entry_fill_id: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True, index=True))
     exit_fill_id: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True, index=True))
     entry_time: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True, index=True))

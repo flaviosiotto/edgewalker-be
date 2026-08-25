@@ -27,12 +27,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 import docker
-import redis.asyncio as aioredis
 from docker.errors import NotFound, APIError, ContainerError
 from sqlmodel import Session, select
 
 from app.db.database import get_session_context
-from app.models.connection import Account, Connection, ConnectionStatus
+from app.models.connection import Account, Connection, ConnectionStatus, AccountSnapshot
 from app.services.broker_connectors.base import ConnectorResult, DiscoveredAccount
 from app.services.tws_launch_service import (
     clear_tws_launch_session,
@@ -320,11 +319,8 @@ REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 BROKER_SYNC_STREAM = os.getenv("BROKER_SYNC_STREAM", "events:broker-sync")
-BROKER_ACCOUNT_SYNC_EVENT = "broker.account.sync"
-BROKER_ACCOUNT_SYNC_GROUP = os.getenv("BROKER_ACCOUNT_SYNC_GROUP", "backend-account-sync")
-BROKER_ACCOUNT_SYNC_ENABLED = os.getenv("BROKER_ACCOUNT_SYNC_ENABLED", "true").lower() == "true"
-BROKER_ACCOUNT_SYNC_BLOCK_MS = max(100, int(os.getenv("BROKER_ACCOUNT_SYNC_BLOCK_MS", "1000")))
-BROKER_ACCOUNT_SYNC_COUNT = max(1, int(os.getenv("BROKER_ACCOUNT_SYNC_COUNT", "50")))
+# Broker account state is projected by order-aggregator (broker.account.sync
+# -> accounts/account_snapshots); the backend only discovers accounts at connect.
 TWS_RUNTIME_HOST_KEY = "_tws_runtime_host"
 TWS_RUNTIME_PORT_KEY = "_tws_runtime_port"
 TWS_RUNTIME_CONTAINER_NAME_KEY = "_tws_runtime_container_name"
@@ -641,6 +637,7 @@ def _upsert_account_snapshot(
         .where(Account.account_id == discovered.account_id)
     )
     acct = session.exec(stmt).first()
+    before = (acct.cash_balance, acct.equity, acct.unrealized_pnl) if acct is not None else (None, None, None)
 
     if acct is None:
         acct = Account(
@@ -667,6 +664,7 @@ def _upsert_account_snapshot(
             discovered.account_id,
             connection_id,
         )
+        _append_account_history(session, acct, discovered, before=before, now=now)
         return acct
 
     acct.is_active = True
@@ -697,7 +695,41 @@ def _upsert_account_snapshot(
     if discovered.extra is not None:
         acct.extra = discovered.extra
     acct.updated_at = now
+    _append_account_history(session, acct, discovered, before=before, now=now)
     return acct
+
+
+def _append_account_history(
+    session: Session,
+    acct: Account,
+    discovered: DiscoveredAccount,
+    *,
+    before: tuple[float | None, float | None, float | None],
+    now: datetime,
+) -> None:
+    """Append an account_snapshots row when the broker state actually changed.
+
+    The history feeds the real equity curve and the ledger reconciliation
+    (performance_service). Only observed changes are recorded so an idle
+    account does not grow the table at poll cadence.
+    """
+    after = (acct.cash_balance, acct.equity, acct.unrealized_pnl)
+    if after == before or all(value is None for value in after):
+        return
+    if acct.id is None:
+        session.flush()
+    session.add(
+        AccountSnapshot(
+            account_id=acct.id,
+            observed_at=discovered.snapshot_at or now,
+            currency=acct.currency,
+            cash_balance=acct.cash_balance,
+            equity=acct.equity,
+            unrealized_pnl=acct.unrealized_pnl,
+            margin_used=acct.margin_used,
+            source="broker_sync",
+        )
+    )
 
 
 def _sync_accounts(session: Session, connection_id: int, discovered: list[DiscoveredAccount]) -> None:
@@ -797,9 +829,6 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._running = False
         self._tasks: list[asyncio.Task] = []
-        self._broker_account_sync_consumer = (
-            f"{BROKER_ACCOUNT_SYNC_GROUP}-{socket.gethostname()}-{os.getpid()}"
-        )
         self._tws_api_probe_cache: dict[int, tuple[float, dict[str, Any]]] = {}
         # Serialize interactive TWS completion per connection so the frontend
         # polling loop and the background health loop can't both run connect()
@@ -814,156 +843,6 @@ class ConnectionManager:
                 _docker_runtime_requirements(),
             )
             self._docker = None
-
-    def _create_async_redis_client(self) -> aioredis.Redis:
-        if REDIS_URL:
-            return aioredis.from_url(REDIS_URL, decode_responses=True)
-        return aioredis.Redis(
-            host=REDIS_HOST,
-            port=int(REDIS_PORT),
-            username=REDIS_USERNAME or None,
-            password=REDIS_PASSWORD or None,
-            decode_responses=True,
-        )
-
-    async def _ensure_broker_account_sync_group(
-        self,
-        redis: aioredis.Redis,
-    ) -> None:
-        try:
-            await redis.xgroup_create(
-                BROKER_SYNC_STREAM,
-                BROKER_ACCOUNT_SYNC_GROUP,
-                id="$",
-                mkstream=True,
-            )
-            logger.info(
-                "Created broker account-sync consumer group '%s' on %s",
-                BROKER_ACCOUNT_SYNC_GROUP,
-                BROKER_SYNC_STREAM,
-            )
-        except aioredis.ResponseError as exc:
-            if "BUSYGROUP" not in str(exc):
-                raise
-
-    @staticmethod
-    def _build_discovered_account_from_sync_payload(
-        payload: dict[str, Any],
-    ) -> DiscoveredAccount | None:
-        account_id = str(payload.get("account") or payload.get("account_id") or "").strip()
-        if not account_id:
-            return None
-        return DiscoveredAccount(
-            account_id=account_id,
-            display_name=str(payload.get("display_name") or account_id),
-            account_type=str(payload.get("account_type") or "unknown"),
-            currency=str(payload.get("currency") or "USD"),
-            cash_balance=_safe_float(payload.get("cash_balance")),
-            equity=_safe_float(payload.get("equity")),
-            buying_power=_safe_float(payload.get("buying_power")),
-            available_funds=_safe_float(payload.get("available_funds")),
-            unrealized_pnl=_safe_float(payload.get("unrealized_pnl")),
-            margin_used=_safe_float(payload.get("margin_used")),
-            maintenance_margin=_safe_float(payload.get("maintenance_margin")),
-            init_margin=_safe_float(payload.get("init_margin")),
-            snapshot_at=_parse_snapshot_at(payload.get("snapshot_at")),
-            extra=payload.get("extra") if isinstance(payload.get("extra"), dict) else None,
-        )
-
-    async def _handle_broker_account_sync_payload(
-        self,
-        *,
-        connection_id: int,
-        payload: dict[str, Any],
-    ) -> None:
-        discovered = self._build_discovered_account_from_sync_payload(payload)
-        if discovered is None:
-            return
-
-        with get_session_context() as session:
-            conn = session.get(Connection, connection_id)
-            if conn is None:
-                logger.debug(
-                    "Ignoring broker account sync for unknown connection_id=%s account=%s",
-                    connection_id,
-                    discovered.account_id,
-                )
-                return
-
-            _upsert_account_snapshot(session, connection_id, discovered)
-            session.commit()
-
-    async def _run_broker_account_sync_consumer(self) -> None:
-        redis = self._create_async_redis_client()
-        try:
-            await self._ensure_broker_account_sync_group(redis)
-            logger.info(
-                "Broker account-sync consumer started (group=%s consumer=%s)",
-                BROKER_ACCOUNT_SYNC_GROUP,
-                self._broker_account_sync_consumer,
-            )
-            while self._running:
-                try:
-                    results = await redis.xreadgroup(
-                        BROKER_ACCOUNT_SYNC_GROUP,
-                        self._broker_account_sync_consumer,
-                        {BROKER_SYNC_STREAM: ">"},
-                        count=BROKER_ACCOUNT_SYNC_COUNT,
-                        block=BROKER_ACCOUNT_SYNC_BLOCK_MS,
-                    )
-                    if not results:
-                        continue
-
-                    ack_ids: list[str] = []
-                    for _stream_name, messages in results:
-                        for msg_id, fields in messages:
-                            ack_ids.append(str(msg_id))
-                            if str(fields.get("event_type") or "") != BROKER_ACCOUNT_SYNC_EVENT:
-                                continue
-                            payload_raw = str(fields.get("payload") or "{}")
-                            try:
-                                payload = json.loads(payload_raw)
-                            except json.JSONDecodeError:
-                                logger.warning(
-                                    "Invalid broker account-sync payload JSON: connection_id=%s payload=%s",
-                                    fields.get("connection_id"),
-                                    payload_raw,
-                                )
-                                continue
-
-                            raw_connection_id = fields.get("connection_id") or payload.get("connection_id")
-                            try:
-                                connection_id = int(str(raw_connection_id))
-                            except (TypeError, ValueError):
-                                logger.warning(
-                                    "Ignoring broker account sync with invalid connection_id=%s",
-                                    raw_connection_id,
-                                )
-                                continue
-
-                            await self._handle_broker_account_sync_payload(
-                                connection_id=connection_id,
-                                payload=payload if isinstance(payload, dict) else {},
-                            )
-
-                    if ack_ids:
-                        await redis.xack(
-                            BROKER_SYNC_STREAM,
-                            BROKER_ACCOUNT_SYNC_GROUP,
-                            *ack_ids,
-                        )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "Broker account-sync consumer iteration failed: %s",
-                        exc,
-                        exc_info=True,
-                    )
-                    await asyncio.sleep(1.0)
-        finally:
-            await redis.aclose()
-            logger.info("Broker account-sync consumer stopped")
 
     def _tws_container_name(self, connection_id: int) -> str:
         return f"{TWS_GATEWAY_PREFIX}{connection_id}"
@@ -2118,21 +1997,9 @@ class ConnectionManager:
                         conn.last_ok_at = now
                     session.commit()
 
-        # Always re-sync accounts when connection is alive so that any
-        # stale is_active=False accounts (left over from a previous
-        # disconnect cycle) are re-activated.
-        if actual == ConnectionStatus.CONNECTED:
-            try:
-                client = self.get_gateway_client(connection_id, broker_type)
-                accounts = await client.get_accounts()
-                if accounts:
-                    with get_session_context() as session:
-                        _sync_accounts_from_gateway(session, connection_id, accounts)
-            except Exception as e:
-                logger.warning(
-                    "Could not re-sync accounts for connection %s: %s",
-                    connection_id, e,
-                )
+        # Account state (balances, is_active re-activation) is kept fresh by
+        # the order-aggregator projection of broker.account.sync; the health
+        # loop only tracks the connection status.
 
         return actual.value
 
@@ -2310,9 +2177,6 @@ class ConnectionManager:
         if self._running:
             return
         self._running = True
-
-        if BROKER_ACCOUNT_SYNC_ENABLED:
-            self._tasks.append(asyncio.create_task(self._run_broker_account_sync_consumer()))
 
         if TWS_RUNTIME_IDLE_TIMEOUT_SECONDS > 0:
             self._tasks.append(asyncio.create_task(self._run_tws_runtime_cleanup()))

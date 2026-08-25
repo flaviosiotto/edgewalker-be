@@ -135,6 +135,11 @@ class LiveTradeRead(BaseModel):
     realized_pnl: float | None = None
     commission: float | None = None
     net_pnl: float | None = None
+    swap: float | None = None
+    currency: str | None = None
+    fx_to_account: float | None = None
+    net_pnl_account_ccy: float | None = None
+    gap_reason: str | None = None
     trusted: bool = True
     entry_fill_id: int | None = None
     exit_fill_id: int | None = None

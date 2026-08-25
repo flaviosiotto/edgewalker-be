@@ -2,13 +2,16 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from fastapi import APIRouter, Depends, Header, Request, status
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
 from app.db.database import get_session
 from app.models.user import User
 from app.schemas.strategy import (
+    StrategyPerformanceSummary,
     StrategyCreate,
     StrategyRead,
     StrategyUpdate,
@@ -18,6 +21,8 @@ from app.schemas.strategy import (
 )
 from app.schemas.chat import ChatCreate, ChatRead
 from app.services.live_summary_service import build_live_summary
+from app.services.performance_service import compute_strategy_performance, strategy_live_session_count
+from app.schemas.performance import PerformanceStats
 from app.services.strategy_service import (
     create_strategy,
     delete_strategy,
@@ -73,12 +78,55 @@ def _publish_strategy_updated(strategy, *, origin: str, request_id: str | None) 
 
 
 def _serialize_strategy_with_live(session: Session, strategy) -> StrategyRead:
-    """Build a StrategyRead and attach `live_summary` if a live session exists."""
+    """Build a StrategyRead with the strategy-scoped ledger summary and, when a
+    live session exists, its runtime `live_summary`."""
     payload = StrategyRead.model_validate(strategy)
     sl = strategy.live
     if sl is not None:
         payload.live_summary = build_live_summary(session, sl)
+    payload.performance_summary = _strategy_performance_summary(session, strategy, active_live_id=sl.id if sl else None)
     return payload
+
+
+def _strategy_performance_summary(session: Session, strategy, *, active_live_id: int | None) -> StrategyPerformanceSummary:
+    stats = compute_strategy_performance(session, strategy_id=strategy.id, daily=False, breakdown=False)
+    totals = stats.totals
+    return StrategyPerformanceSummary(
+        total_pnl=totals.net if (totals.trades or not totals.unreconciled_trades) else None,
+        realized_gross=totals.realized_gross,
+        commission=totals.commission,
+        swap=totals.swap,
+        net_pnl=totals.net,
+        net_pnl_account_ccy=totals.net_account_ccy,
+        currency=totals.currency,
+        mixed_currency=totals.mixed_currency,
+        total_trades=totals.trades,
+        unreconciled_trades=totals.unreconciled_trades,
+        wins=totals.wins,
+        losses=totals.losses,
+        win_rate=totals.win_rate,
+        sessions=strategy_live_session_count(session, strategy.id),
+        active_live_id=active_live_id,
+        first_exit_at=totals.first_exit_at,
+        last_exit_at=totals.last_exit_at,
+    )
+
+
+@router.get("/{strategy_id}/performance", response_model=PerformanceStats)
+def get_strategy_performance_endpoint(
+    strategy_id: int,
+    start: datetime | None = Query(None, description="Window start (default: whole history)"),
+    end: datetime | None = Query(None, description="Window end, exclusive"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Strategy performance from the single trades ledger: every live session
+    of the strategy, with daily series and per-session breakdown. Same figures
+    as the strategy card, available whether or not the strategy is live."""
+    strategy = get_strategy(session, strategy_id, current_user.id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return compute_strategy_performance(session, strategy_id=strategy_id, start=start, end=end)
 
 
 @router.post("/", response_model=StrategyRead)

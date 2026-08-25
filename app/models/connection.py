@@ -236,3 +236,30 @@ class Account(SQLModel, table=True):
     connection: Connection | None = Relationship(
         sa_relationship=relationship("Connection", back_populates="accounts")
     )
+
+
+class AccountSnapshot(SQLModel, table=True):
+    """Append-only history of the broker account state (migration 045).
+
+    One row per observed change of equity/cash/unrealized, written by the
+    account-sync consumer. Feeds the real equity curve and the ledger
+    reconciliation in performance_service. ``accounts`` keeps only the latest
+    value; this table keeps the history.
+    """
+    __tablename__ = "account_snapshots"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    account_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True),
+    )
+    observed_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False, index=True))
+    currency: str = Field(sa_column=Column(String(10), nullable=False))
+    cash_balance: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    equity: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    unrealized_pnl: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    margin_used: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    source: str = Field(default="broker_sync", sa_column=Column(String(32), nullable=False))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )

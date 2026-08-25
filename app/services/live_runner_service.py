@@ -12,6 +12,7 @@ The containers:
 """
 from __future__ import annotations
 
+import time
 import json
 import logging
 import os
@@ -479,6 +480,7 @@ class LiveRunnerService:
             raise RuntimeError(f"Failed to start strategy runner (image={image_name}): {e}")
 
     def stop_live_instance(self, live_id: int, remove: bool = True) -> dict[str, Any]:
+        self.invalidate_status_cache(live_id)
         """
         Stop a live strategy runner container.
         
@@ -510,12 +512,37 @@ class LiveRunnerService:
             logger.error(f"Failed to stop container: {e}")
             raise RuntimeError(f"Failed to stop strategy runner: {e}")
     
+    _STATUS_CACHE_TTL_S = 5.0
+
     def get_live_instance_status(self, live_id: int) -> dict[str, Any]:
         """
         Get status of a strategy runner container.
         
-        Returns container state, health, and runtime info.
+        Returns container state, health, and runtime info. Cached for a few
+        seconds: GET /strategies/ builds a live summary per strategy and each
+        one used to cost a Docker inspect round-trip.
         """
+        cache = getattr(self, "_status_cache", None)
+        if cache is None:
+            cache = self._status_cache = {}
+        now = time.monotonic()
+        cached = cache.get(live_id)
+        if cached is not None and now - cached[0] < self._STATUS_CACHE_TTL_S:
+            return dict(cached[1])
+        result = self._get_live_instance_status_uncached(live_id)
+        cache[live_id] = (now, dict(result))
+        return result
+
+    def invalidate_status_cache(self, live_id: int | None = None) -> None:
+        cache = getattr(self, "_status_cache", None)
+        if not cache:
+            return
+        if live_id is None:
+            cache.clear()
+        else:
+            cache.pop(live_id, None)
+
+    def _get_live_instance_status_uncached(self, live_id: int) -> dict[str, Any]:
         container = self._get_container(live_id) or self._find_container_by_live_id(live_id)
         
         if not container:

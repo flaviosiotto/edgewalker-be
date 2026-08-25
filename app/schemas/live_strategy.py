@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from app.schemas.performance import AccountReconciliation, PerformanceBreakdownItem
+
 
 LiveStatus = Literal["stopped", "starting", "running", "stopping", "error"]
 LiveSyncState = Literal["aligned", "stale", "missing_container", "unknown"]
@@ -12,9 +14,22 @@ PositionSide = Literal["long", "short", "flat"]
 
 
 class LivePerformanceSummary(BaseModel):
+    """Ledger summary of a live session (performance_service, scope strategy_live).
+
+    ``total_pnl`` is the net realized (gross + swap − costs) of the trades
+    attributed to the session. ``unrealized_pnl`` is always ``None`` here: the
+    mark-to-market comes from the realtime portfolio plane only.
+    """
     total_pnl: float | None = None
+    realized_gross: float = 0.0
+    commission: float = 0.0
+    swap: float = 0.0
+    net_pnl: float = 0.0
+    net_pnl_account_ccy: float | None = None
+    currency: str | None = None
     unrealized_pnl: float | None = None
     total_trades: int = 0
+    unreconciled_trades: int = 0
     win_rate: float | None = None
     position_side: PositionSide = "flat"
     has_open_position: bool = False
@@ -99,9 +114,13 @@ class LiveDashboardSummaryRead(BaseModel):
     buying_power: float | None = None
     available_funds: float | None = None
     realized_pnl: float = 0.0
-    unrealized_pnl: float = 0.0
+    unrealized_pnl: float | None = None
     net_pnl: float = 0.0
+    commission: float = 0.0
+    swap: float = 0.0
+    net_pnl_account_ccy: float | None = None
     total_trades: int = 0
+    unreconciled_trades: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
     win_rate: float | None = None
@@ -144,13 +163,19 @@ class LiveDashboardAccountBreakdownRead(BaseModel):
     running_session_count: int = 0
     open_positions: int = 0
     realized_pnl: float = 0.0
-    unrealized_pnl: float = 0.0
+    unrealized_pnl: float | None = None
     net_pnl: float = 0.0
+    commission: float = 0.0
+    swap: float = 0.0
+    net_pnl_account_ccy: float | None = None
     total_trades: int = 0
+    unreconciled_trades: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
     win_rate: float | None = None
     last_activity_at: datetime | None = None
+    reconciliation_status: str = "unknown"
+    reconciliation_gap: float | None = None
 
 
 class LiveDashboardOverviewRead(BaseModel):
@@ -160,3 +185,7 @@ class LiveDashboardOverviewRead(BaseModel):
     equity_curve: list[LiveDashboardEquityPointRead]
     daily_results: list[LiveDashboardDailyResultRead]
     accounts: list[LiveDashboardAccountBreakdownRead]
+    # Ledger vs broker account over the window (performance_service).
+    reconciliation: list[AccountReconciliation] = []
+    # Per-live attribution inside the selected accounts, unattributed bucket last.
+    breakdown: list[PerformanceBreakdownItem] = []

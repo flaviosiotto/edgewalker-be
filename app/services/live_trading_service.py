@@ -24,6 +24,7 @@ from app.models.live_trading import (
     OrderStatus,
     PositionStatus,
 )
+from app.services.performance_service import compute_account_performance
 from app.models.strategy import LiveStatus, Strategy, StrategyLive
 from app.schemas.live_trading import (
     LiveOrderCreate,
@@ -544,17 +545,6 @@ def get_live_dashboard_overview(
     )
     live_sessions = list(session.exec(base_session_stmt.order_by(StrategyLive.started_at.desc(), StrategyLive.id.desc())).all())
 
-    # Dashboard PnL/trade metrics are account-scoped and read directly from the
-    # materialized trades projection (no per-request recomputation from fills).
-    trades_stmt = (
-        select(LiveTrade)
-        .where(LiveTrade.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
-        .where(LiveTrade.exit_time >= range_start)
-        .where(LiveTrade.exit_time < range_end)
-        .order_by(LiveTrade.exit_time.asc())  # type: ignore[union-attr]
-    )
-    trades = list(session.exec(trades_stmt).all())
-
     open_positions_stmt = (
         select(LivePosition)
         .where(LivePosition.account_id.in_(scoped_account_ids))  # type: ignore[union-attr]
@@ -564,40 +554,36 @@ def get_live_dashboard_overview(
     )
     open_positions = list(session.exec(open_positions_stmt).all())
 
-    daily_buckets: dict[date, dict[str, float | int]] = {}
-    account_breakdown: dict[int, dict[str, Any]] = {}
+    # Every PnL number comes from the single ledger aggregation: one call for
+    # the selected accounts (daily series, per-live breakdown, reconciliation)
+    # and one per account for the breakdown cards. Unrealized is never derived
+    # from the DB (the FE overlays the realtime portfolio plane).
+    overall = compute_account_performance(
+        session,
+        account_ids=scoped_account_ids,
+        start=range_start,
+        end=range_end,
+        include_breakdown=True,
+        include_reconciliation=True,
+    )
+    per_account = {
+        account_id: compute_account_performance(
+            session,
+            account_ids=[account_id],
+            start=range_start,
+            end=range_end,
+            include_breakdown=False,
+            include_reconciliation=False,
+        )
+        for account_id in scoped_account_ids
+    }
+    reconciliation_by_account = {item.account_id: item for item in overall.reconciliation}
 
-    for account, connection in account_rows:
-        if account.id is None:
-            continue
-        account_breakdown[account.id] = {
-            "account_id": account.id,
-            "account_code": account.account_id,
-            "account_display": account.display_name or account.account_id,
-            "connection_id": connection.id,
-            "connection_name": connection.name,
-            "currency": account.currency,
-            "cash_balance": float(account.cash_balance) if account.cash_balance is not None else None,
-            "equity": float(account.equity) if account.equity is not None else None,
-            "buying_power": float(account.buying_power) if account.buying_power is not None else None,
-            "available_funds": float(account.available_funds) if account.available_funds is not None else None,
-            "snapshot_at": account.snapshot_at,
-            "session_count": 0,
-            "running_session_count": 0,
-            "open_positions": 0,
-            "realized_pnl": 0.0,
-            "unrealized_pnl": 0.0,
-            "net_pnl": 0.0,
-            "total_trades": 0,
-            "winning_trades": 0,
-            "losing_trades": 0,
-            "last_activity_at": None,
-        }
-
+    session_counts: dict[int, dict[str, Any]] = {}
     for live_session in live_sessions:
-        if live_session.account_id is None or live_session.account_id not in account_breakdown:
+        if live_session.account_id is None:
             continue
-        item = account_breakdown[live_session.account_id]
+        item = session_counts.setdefault(live_session.account_id, {"session_count": 0, "running_session_count": 0, "last_activity_at": None})
         item["session_count"] += 1
         if live_session.status in {
             LiveStatus.RUNNING.value,
@@ -605,133 +591,83 @@ def get_live_dashboard_overview(
             LiveStatus.STOPPING.value,
         }:
             item["running_session_count"] += 1
-        session_activity = max(
-            ts for ts in [live_session.started_at, live_session.updated_at, live_session.stopped_at] if ts is not None
-        ) if any(ts is not None for ts in [live_session.started_at, live_session.updated_at, live_session.stopped_at]) else None
-        if session_activity and (item["last_activity_at"] is None or session_activity > item["last_activity_at"]):
-            item["last_activity_at"] = session_activity
+        candidates = [ts for ts in [live_session.started_at, live_session.updated_at, live_session.stopped_at] if ts is not None]
+        if candidates:
+            session_activity = max(candidates)
+            if item["last_activity_at"] is None or session_activity > item["last_activity_at"]:
+                item["last_activity_at"] = session_activity
 
-    for trade in trades:
-        if trade.account_id is None or trade.account_id not in account_breakdown:
-            continue
-        bucket_date = trade.exit_time.astimezone(timezone.utc).date()
-        bucket = daily_buckets.setdefault(bucket_date, {
-            "realized_pnl": 0.0,
-            "commission": 0.0,
-            "net_pnl": 0.0,
-            "trade_count": 0,
-            "winning_trades": 0,
-            "losing_trades": 0,
-        })
-
-        realized_pnl = float(trade.realized_pnl or 0.0)
-        commission = float(trade.commission or 0.0)
-        net_pnl = float(trade.net_pnl) if trade.net_pnl is not None else 0.0
-        bucket["realized_pnl"] += realized_pnl
-        bucket["commission"] += commission
-        bucket["net_pnl"] += net_pnl
-        if trade.realized_pnl is not None:
-            bucket["trade_count"] += 1
-            if realized_pnl > 0:
-                bucket["winning_trades"] += 1
-            elif realized_pnl < 0:
-                bucket["losing_trades"] += 1
-
-        item = account_breakdown[trade.account_id]
-        item["realized_pnl"] += realized_pnl
-        item["net_pnl"] += net_pnl
-        if trade.realized_pnl is not None:
-            item["total_trades"] += 1
-            if realized_pnl > 0:
-                item["winning_trades"] += 1
-            elif realized_pnl < 0:
-                item["losing_trades"] += 1
-        if item["last_activity_at"] is None or trade.exit_time > item["last_activity_at"]:
-            item["last_activity_at"] = trade.exit_time
-
+    open_positions_by_account: dict[int, list[LivePosition]] = {}
     for position in open_positions:
-        if position.account_id is None or position.account_id not in account_breakdown:
-            continue
-        item = account_breakdown[position.account_id]
-        item["open_positions"] += 1
-        item["unrealized_pnl"] += float(position.unrealized_pnl or 0.0)
-        if item["last_activity_at"] is None or position.updated_at > item["last_activity_at"]:
-            item["last_activity_at"] = position.updated_at
-
-    daily_results: list[LiveDashboardDailyResultRead] = []
-    equity_curve: list[LiveDashboardEquityPointRead] = []
-    cumulative_pnl = 0.0
-    cursor = resolved_start
-    while cursor <= resolved_end:
-        bucket = daily_buckets.get(cursor, {
-            "realized_pnl": 0.0,
-            "commission": 0.0,
-            "net_pnl": 0.0,
-            "trade_count": 0,
-            "winning_trades": 0,
-            "losing_trades": 0,
-        })
-        trade_count = int(bucket["trade_count"])
-        winning_trades = int(bucket["winning_trades"])
-        losing_trades = int(bucket["losing_trades"])
-        net_pnl = float(bucket["net_pnl"])
-        cumulative_pnl += net_pnl
-
-        daily_results.append(LiveDashboardDailyResultRead(
-            date=cursor,
-            realized_pnl=float(bucket["realized_pnl"]),
-            commission=float(bucket["commission"]),
-            net_pnl=net_pnl,
-            trade_count=trade_count,
-            winning_trades=winning_trades,
-            losing_trades=losing_trades,
-            win_rate=(winning_trades / trade_count * 100.0) if trade_count else None,
-        ))
-        equity_curve.append(LiveDashboardEquityPointRead(
-            date=cursor,
-            realized_pnl=float(bucket["realized_pnl"]),
-            commission=float(bucket["commission"]),
-            net_pnl=net_pnl,
-            cumulative_pnl=cumulative_pnl,
-            trade_count=trade_count,
-        ))
-        cursor += timedelta(days=1)
+        if position.account_id is not None:
+            open_positions_by_account.setdefault(position.account_id, []).append(position)
 
     account_items: list[LiveDashboardAccountBreakdownRead] = []
-    for item in account_breakdown.values():
-        total_trades = int(item["total_trades"])
-        winning_trades = int(item["winning_trades"])
-        losing_trades = int(item["losing_trades"])
+    for account, connection in account_rows:
+        if account.id is None:
+            continue
+        totals = per_account[account.id].totals
+        counts = session_counts.get(account.id, {"session_count": 0, "running_session_count": 0, "last_activity_at": None})
+        positions_for_account = open_positions_by_account.get(account.id, [])
+        activity_candidates = [ts for ts in [counts["last_activity_at"], totals.last_exit_at] if ts is not None]
+        activity_candidates.extend(position.updated_at for position in positions_for_account)
+        reconciliation = reconciliation_by_account.get(account.id)
         account_items.append(LiveDashboardAccountBreakdownRead(
-            account_id=item["account_id"],
-            account_code=item["account_code"],
-            account_display=item["account_display"],
-            connection_id=item["connection_id"],
-            connection_name=item["connection_name"],
-            currency=item["currency"],
-            cash_balance=item["cash_balance"],
-            equity=item["equity"],
-            buying_power=item["buying_power"],
-            available_funds=item["available_funds"],
-            snapshot_at=item["snapshot_at"],
-            session_count=int(item["session_count"]),
-            running_session_count=int(item["running_session_count"]),
-            open_positions=int(item["open_positions"]),
-            realized_pnl=float(item["realized_pnl"]),
-            unrealized_pnl=float(item["unrealized_pnl"]),
-            net_pnl=float(item["net_pnl"]),
-            total_trades=total_trades,
-            winning_trades=winning_trades,
-            losing_trades=losing_trades,
-            win_rate=(winning_trades / total_trades * 100.0) if total_trades else None,
-            last_activity_at=item["last_activity_at"],
+            account_id=account.id,
+            account_code=account.account_id,
+            account_display=account.display_name or account.account_id,
+            connection_id=connection.id,
+            connection_name=connection.name,
+            currency=account.currency,
+            cash_balance=float(account.cash_balance) if account.cash_balance is not None else None,
+            equity=float(account.equity) if account.equity is not None else None,
+            buying_power=float(account.buying_power) if account.buying_power is not None else None,
+            available_funds=float(account.available_funds) if account.available_funds is not None else None,
+            snapshot_at=account.snapshot_at,
+            session_count=int(counts["session_count"]),
+            running_session_count=int(counts["running_session_count"]),
+            open_positions=len(positions_for_account),
+            realized_pnl=totals.realized_gross,
+            unrealized_pnl=None,
+            net_pnl=totals.net,
+            commission=totals.commission,
+            swap=totals.swap,
+            net_pnl_account_ccy=totals.net_account_ccy,
+            total_trades=totals.trades,
+            unreconciled_trades=totals.unreconciled_trades,
+            winning_trades=totals.wins,
+            losing_trades=totals.losses,
+            win_rate=totals.win_rate,
+            last_activity_at=max(activity_candidates) if activity_candidates else None,
+            reconciliation_status=reconciliation.status if reconciliation else "unknown",
+            reconciliation_gap=reconciliation.gap if reconciliation else None,
         ))
 
     account_items.sort(key=lambda item: (item.net_pnl, item.account_display), reverse=True)
 
-    summary_total_trades = sum(item.total_trades for item in account_items)
-    summary_winning_trades = sum(item.winning_trades for item in account_items)
-    summary_losing_trades = sum(item.losing_trades for item in account_items)
+    daily_results: list[LiveDashboardDailyResultRead] = []
+    equity_curve: list[LiveDashboardEquityPointRead] = []
+    for point in overall.daily:
+        daily_results.append(LiveDashboardDailyResultRead(
+            date=point.date,
+            realized_pnl=point.realized_gross,
+            commission=point.commission,
+            net_pnl=point.net,
+            trade_count=point.trades,
+            winning_trades=point.wins,
+            losing_trades=point.losses,
+            win_rate=point.win_rate,
+        ))
+        equity_curve.append(LiveDashboardEquityPointRead(
+            date=point.date,
+            realized_pnl=point.realized_gross,
+            commission=point.commission,
+            net_pnl=point.net,
+            cumulative_pnl=point.cumulative_net,
+            trade_count=point.trades,
+        ))
+
+    totals = overall.totals
     summary_last_activity_candidates = [
         item.last_activity_at for item in account_items if item.last_activity_at is not None
     ]
@@ -750,18 +686,24 @@ def get_live_dashboard_overview(
             equity=_aggregate_account_state([item.equity for item in account_items], summary_currencies),
             buying_power=_aggregate_account_state([item.buying_power for item in account_items], summary_currencies),
             available_funds=_aggregate_account_state([item.available_funds for item in account_items], summary_currencies),
-            realized_pnl=sum(item.realized_pnl for item in account_items),
-            unrealized_pnl=sum(item.unrealized_pnl for item in account_items),
-            net_pnl=sum(item.net_pnl for item in account_items),
-            total_trades=summary_total_trades,
-            winning_trades=summary_winning_trades,
-            losing_trades=summary_losing_trades,
-            win_rate=(summary_winning_trades / summary_total_trades * 100.0) if summary_total_trades else None,
+            realized_pnl=totals.realized_gross,
+            unrealized_pnl=None,
+            net_pnl=totals.net,
+            commission=totals.commission,
+            swap=totals.swap,
+            net_pnl_account_ccy=totals.net_account_ccy,
+            total_trades=totals.trades,
+            unreconciled_trades=totals.unreconciled_trades,
+            winning_trades=totals.wins,
+            losing_trades=totals.losses,
+            win_rate=totals.win_rate,
             last_activity_at=max(summary_last_activity_candidates) if summary_last_activity_candidates else None,
         ),
         equity_curve=equity_curve,
         daily_results=daily_results,
         accounts=account_items,
+        reconciliation=overall.reconciliation,
+        breakdown=overall.breakdown,
     )
 
 

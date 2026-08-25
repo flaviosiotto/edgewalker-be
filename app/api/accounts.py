@@ -7,7 +7,7 @@ APIs or connection-management routes.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +17,8 @@ from sqlmodel import Session
 from app.db.database import get_session
 from app.models.user import User
 from app.schemas.connection import AccountListResponse, AccountRead
+from app.schemas.performance import PerformanceStats
+from app.services.performance_service import compute_account_performance
 from app.schemas.live_trading import (
     LiveFillRead,
     LiveOrderRead,
@@ -92,6 +94,28 @@ def list_accounts_endpoint(
         accounts=[AccountRead.model_validate(account) for account in accounts],
         count=len(accounts),
     )
+
+
+@router.get("/{account_id}/performance", response_model=PerformanceStats)
+def get_account_performance_endpoint(
+    account_id: int,
+    start_date: date | None = Query(None, description="Window start (UTC day, inclusive)"),
+    end_date: date | None = Query(None, description="Window end (UTC day, inclusive)"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Account performance from the single trades ledger.
+
+    Totals, UTC daily series, per-live breakdown (with the unattributed bucket)
+    and the reconciliation against the broker equity history. No window =
+    whole ledger.
+    """
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    start = datetime.combine(start_date, time.min, tzinfo=timezone.utc) if start_date else None
+    end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc) if end_date else None
+    return compute_account_performance(session, account_ids=[account_id], start=start, end=end)
 
 
 @router.get("/{account_id}", response_model=AccountRead)

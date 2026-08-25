@@ -45,6 +45,8 @@ from app.schemas.live_trading import (
 import redis as _redis
 
 from app.services.live_runner_service import live_runner_service
+from app.services.performance_service import compute_live_performance
+from app.schemas.performance import PerformanceStats
 from app.services.live_summary_service import (
     build_live_summary_payload as _build_live_summary_payload,
     compute_live_performance_summary as _compute_live_performance_summary,
@@ -755,6 +757,24 @@ def get_live_instance_status(
     return _serialize_live_summary_from_payload(sl, payload)
 
 
+@router.get("/instances/{live_id}/performance", response_model=PerformanceStats)
+def get_live_instance_performance(
+    live_id: int,
+    start: datetime | None = Query(None, description="Window start (default: session start)"),
+    end: datetime | None = Query(None, description="Window end, exclusive (default: session stop / now)"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Performance of one live session from the single trades ledger.
+
+    Scope = trades attributed to the session; daily series in UTC; unrealized
+    is not included (realtime portfolio plane). Same numbers as the strategy
+    card and the dashboard breakdown.
+    """
+    sl = _get_live_or_404(session, live_id, current_user.id)
+    return compute_live_performance(session, live=sl, start=start, end=end, daily=True)
+
+
 @router.get("/instances/{live_id}/logs")
 def get_live_instance_logs(
     live_id: int,
@@ -1172,28 +1192,6 @@ def remove_alert(
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
     return {"status": "deleted", "id": alert_id}
-
-
-def _enrich_position(pos) -> LivePositionRead:
-    """Enrich a LivePosition DB model with computed PnL fields.
-
-    Computes:
-      - ``total_commission`` = sum of commissions from fills
-      - ``net_pnl``          = realized - commissions
-    """
-    data = LivePositionRead.model_validate(pos)
-
-    # Extract total commission from position extra
-    total_comm = (pos.extra or {}).get("total_commission", 0) or 0
-    data.total_commission = total_comm
-    if data.cost_basis is None and data.avg_price is not None:
-        data.cost_basis = float(data.avg_price) * float(data.quantity)
-    data.realized_pnl = 0.0
-    data.unrealized_pnl = None
-    data.computed_market_value = data.market_value
-    data.net_pnl = -total_comm if total_comm else 0.0
-
-    return data
 
 
 # ═════════════════════════════════════════════════════════════════════
