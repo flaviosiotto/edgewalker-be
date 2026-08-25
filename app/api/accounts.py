@@ -227,6 +227,47 @@ async def cancel_account_order_endpoint(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+class AccountFillsRereadRequest(BaseModel):
+    lookback_days: int | None = Field(default=None, ge=1, le=365)
+
+
+@router.post("/{account_id}/fills/reread")
+async def reread_account_fills_endpoint(
+    account_id: int,
+    payload: AccountFillsRereadRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Ask the gateway to re-publish the broker executions of the last N days.
+
+    Non-destructive: the projection upserts known fills by broker id and
+    rebuilds the ledger. This is how a closing execution recorded before its
+    commission report arrived (``trades.gap_reason = broker_report_missing``)
+    gets its broker realized P&L.
+    """
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    connection = get_connection(session, account.connection_id, current_user.id)
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    manager = get_connection_manager()
+    status_value = await manager.check_connection_status(connection.id)
+    if status_value != "connected":
+        raise HTTPException(status_code=409, detail="Connection must be connected to reread fills")
+
+    lookback_days = payload.lookback_days or resolve_order_history_lookback_days(connection.config)
+    since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    session.close()
+    try:
+        client = manager.get_gateway_client(connection.id, connection.broker_type)
+        result = await client.reread_fills(since.isoformat(), account=account.account_id, persist_checkpoint=False)
+    except Exception as exc:  # noqa: BLE001 - surface the gateway failure
+        raise HTTPException(status_code=502, detail=f"Gateway fill reread failed: {exc}") from exc
+    return {"status": "ok", "account_id": account.id, "fills_since": since.isoformat(), "gateway": result}
+
+
 @router.post("/{account_id}/orders/reset", response_model=AccountOrdersResetResponse)
 async def reset_account_orders_endpoint(
     account_id: int,
