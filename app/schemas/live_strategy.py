@@ -119,6 +119,13 @@ class LiveDashboardSummaryRead(BaseModel):
     commission: float = 0.0
     swap: float = 0.0
     net_pnl_account_ccy: float | None = None
+    # Currency of realized_pnl/net_pnl/commission/swap (the trades' contract currency);
+    # None when the scope mixes currencies (pnl_mixed_currency=True) or has no trades.
+    pnl_currency: str | None = None
+    pnl_mixed_currency: bool = False
+    # Currency of cash_balance/equity/buying_power/available_funds; None when the
+    # selected accounts have different base currencies (those fields are then None too).
+    account_currency: str | None = None
     total_trades: int = 0
     unreconciled_trades: int = 0
     winning_trades: int = 0
@@ -168,6 +175,10 @@ class LiveDashboardAccountBreakdownRead(BaseModel):
     commission: float = 0.0
     swap: float = 0.0
     net_pnl_account_ccy: float | None = None
+    # Currency of the pnl fields above (trades' contract currency), distinct from
+    # `currency` (account base currency) e.g. MNQ trades in USD on a EUR account.
+    pnl_currency: str | None = None
+    pnl_mixed_currency: bool = False
     total_trades: int = 0
     unreconciled_trades: int = 0
     winning_trades: int = 0
