@@ -206,6 +206,7 @@ def _try_pat_principal(
         "purpose": "pat_access",
         "scopes": pat.scopes,
         "pat_id": pat.id,
+        "pat_name": pat.name,
     }
     return AuthPrincipal(user=user, claims=claims)
 

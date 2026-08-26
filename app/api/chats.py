@@ -3,21 +3,35 @@ import json
 import logging
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
 from app.db.database import get_session
 from app.models.user import User
-from app.schemas.chat import ChatHistoryPage, ChatSendMessageRequest, ChatSendMessageResponse
+from app.schemas.chat import (
+    ChatHistoryAppendRequest,
+    ChatHistoryAppendResponse,
+    ChatHistoryPage,
+    ChatSendMessageRequest,
+    ChatSendMessageResponse,
+)
 from app.services.chat_realtime import subscribe, unsubscribe
 from app.services.chat_service import (
+    ASKER_KINDS,
     get_chat_session_id,
     list_chat_history,
+    persist_asker_message,
+    resolve_asker_from_claims,
     send_chat_message,
     stream_chat_message,
 )
-from app.utils.auth_utils import get_current_active_user
+from app.utils.auth_utils import (
+    AuthPrincipal,
+    get_current_active_or_runner_user,
+    get_current_active_principal,
+    get_current_active_user,
+)
 from app.utils.redis_async import close_pubsub, get_async_redis
 
 logger = logging.getLogger(__name__)
@@ -60,14 +74,50 @@ def send_chat_message_endpoint(
     chat_id: int,
     payload: ChatSendMessageRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    principal: AuthPrincipal = Depends(get_current_active_principal),
 ):
+    sender_kind, sender_label = resolve_asker_from_claims(principal.claims)
     return send_chat_message(
         session,
         chat_id=chat_id,
-        user_id=current_user.id,
+        user_id=principal.user.id,
         text=payload.text,
         metadata=payload.metadata,
+        sender_kind=sender_kind,
+        sender_label=sender_label,
+    )
+
+
+@router.post("/{chat_id}/history", response_model=ChatHistoryAppendResponse)
+def append_chat_history_endpoint(
+    chat_id: int,
+    payload: ChatHistoryAppendRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_runner_user),
+):
+    """Record an attributed message in the chat history WITHOUT calling the agent.
+
+    Called by the strategy-runner right before it dispatches a rule/alert/
+    lifecycle prompt to the n8n webhook, so the FE shows who is interrogating
+    the agent while the reply streams. Ownership is enforced through the
+    runner's delegated token (same user as the strategy owner).
+    """
+    session_id = get_chat_session_id(session, chat_id=chat_id, user_id=current_user.id)
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Message text is required")
+    sender_kind = payload.sender_kind if payload.sender_kind in ASKER_KINDS else "runner"
+    message_id = persist_asker_message(
+        session,
+        session_id=session_id,
+        text=text,
+        sender_kind=sender_kind,
+        sender_label=payload.sender_label,
+        metadata=payload.metadata,
+        message_type=payload.message_type,
+    )
+    return ChatHistoryAppendResponse(
+        status="ok", chat_id=chat_id, session_id=session_id, message_id=message_id
     )
 
 
@@ -76,14 +126,17 @@ async def stream_chat_message_endpoint(
     chat_id: int,
     payload: ChatSendMessageRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    principal: AuthPrincipal = Depends(get_current_active_principal),
 ):
+    sender_kind, sender_label = resolve_asker_from_claims(principal.claims)
     request_id, event_stream = await stream_chat_message(
         session,
         chat_id=chat_id,
-        user_id=current_user.id,
+        user_id=principal.user.id,
         text=payload.text,
         metadata=payload.metadata,
+        sender_kind=sender_kind,
+        sender_label=sender_label,
     )
     return StreamingResponse(
         event_stream,

@@ -394,6 +394,68 @@ def get_chat_session_id(session: Session, *, chat_id: int, user_id: int) -> str:
     return _chat_session_id(chat)
 
 
+# ---------------------------------------------------------------------------
+# "Who is asking" — the chat is a group: human, ask_agent rules, alerts and
+# external agents (MCP) all interrogate the same agent. The asker is persisted
+# as a ``human`` row carrying ``metadata.sender_kind``/``sender_label`` BEFORE
+# the n8n webhook is called, so the question is visible (and attributed)
+# while the agent is still streaming.
+#
+# WORKAROUND (n8n-specific, remove with n8n): n8n's Postgres Chat Memory also
+# writes its own copy of the human text at turn end; that duplicate is
+# swallowed by the ``n8n_chat_histories`` BEFORE INSERT trigger (migration
+# 046). The attributed write path here is the intended design and stays.
+# ---------------------------------------------------------------------------
+
+ASKER_KINDS = ("user", "external_agent", "rule", "alert", "runner", "system")
+
+
+def resolve_asker_from_claims(claims: dict[str, Any] | None) -> tuple[str, str | None]:
+    """Map the auth principal's claims onto (sender_kind, sender_label)."""
+    claims = claims or {}
+    if claims.get("type") == "pat" or claims.get("purpose") == "pat_access":
+        label = claims.get("pat_name")
+        return "external_agent", str(label) if label else None
+    return "user", None
+
+
+def persist_asker_message(
+    session: Session,
+    *,
+    session_id: str,
+    text: str,
+    sender_kind: str = "user",
+    sender_label: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    message_type: str = "human",
+) -> int:
+    """Insert one attributed row in ``n8n_chat_histories`` and commit.
+
+    The row mirrors the LangChain shape n8n writes (``additional_kwargs`` /
+    ``response_metadata``) so the agent memory keeps loading it as a plain
+    HumanMessage; ``metadata`` is ignored by LangChain and read back by
+    ``_serialize_history_message``.
+    """
+    row_metadata = {k: v for k, v in (metadata or {}).items() if k != "api_auth"}
+    row_metadata["sender_kind"] = sender_kind
+    if sender_label:
+        row_metadata["sender_label"] = sender_label
+    entry = N8nChatHistory(
+        session_id=session_id,
+        message={
+            "type": message_type,
+            "content": text,
+            "additional_kwargs": {},
+            "response_metadata": {},
+            "metadata": row_metadata,
+        },
+    )
+    session.add(entry)
+    session.commit()
+    session.refresh(entry)
+    return int(entry.id or 0)
+
+
 def list_chat_history(
     session: Session,
     *,
@@ -435,6 +497,8 @@ def send_chat_message(
     user_id: int,
     text: str,
     metadata: dict[str, Any] | None = None,
+    sender_kind: str = "user",
+    sender_label: str | None = None,
 ) -> ChatSendMessageResponse:
     normalized_text = text.strip()
     if not normalized_text:
@@ -476,6 +540,14 @@ def send_chat_message(
     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
     resolved_chat_id = chat.id or chat_id
     webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+    persist_asker_message(
+        session,
+        session_id=session_id,
+        text=normalized_text,
+        sender_kind=sender_kind,
+        sender_label=sender_label,
+        metadata={"request_id": request_id},
+    )
     # Highest-traffic multi-user path: the webhook can take up to 120s, so the
     # pooled DB connection must go back before the call (19/08 incident).
     session.close()
@@ -635,6 +707,8 @@ async def stream_chat_message(
     user_id: int,
     text: str,
     metadata: dict[str, Any] | None = None,
+    sender_kind: str = "user",
+    sender_label: str | None = None,
 ) -> tuple[str, AsyncIterator[str]]:
     normalized_text = text.strip()
     if not normalized_text:
@@ -676,6 +750,14 @@ async def stream_chat_message(
     headers["Accept"] = "text/plain"
     resolved_chat_id = chat.id
     webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+    persist_asker_message(
+        session,
+        session_id=session_id,
+        text=normalized_text,
+        sender_kind=sender_kind,
+        sender_label=sender_label,
+        metadata={"request_id": request_id},
+    )
     # The generator outlives the request's DB session (it streams for the whole
     # agent turn, with no read timeout): release the pooled connection now and
     # reference only the plain locals captured above — never ORM state.

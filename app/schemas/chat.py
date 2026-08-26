@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Optional
+from typing import Literal, Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -57,6 +57,30 @@ class ChatHistoryPage(BaseModel):
 class ChatSendMessageRequest(BaseModel):
     text: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatHistoryAppendRequest(BaseModel):
+    """Append one row to the chat history without invoking the agent.
+
+    Used by the strategy-runner to record WHO is interrogating the agent
+    (rule / alert / lifecycle event) before the n8n webhook is called: the
+    n8n memory persists the same human text only at turn end; its copy is
+    deduplicated by the ``n8n_chat_histories`` trigger (migration 046 —
+    n8n-specific WORKAROUND, to be dropped when n8n is dismissed).
+    """
+
+    text: str
+    message_type: Literal["human", "ai", "system"] = "human"
+    sender_kind: Optional[str] = None
+    sender_label: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatHistoryAppendResponse(BaseModel):
+    status: str
+    chat_id: int
+    session_id: str
+    message_id: int
 
 
 class ChatSendMessageResponse(BaseModel):
