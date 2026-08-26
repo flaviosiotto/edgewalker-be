@@ -51,6 +51,12 @@ _AGENT_TURN_EVENT_MAP = {
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
+# Runner-facing routes live on a separate router: ``router`` is mounted in
+# main.py with a router-level ``get_current_active_user`` dependency that
+# rejects runner-delegated tokens before any endpoint dependency runs, so an
+# endpoint declared there can never be reached by the strategy-runner.
+runner_router = APIRouter(prefix="/chats", tags=["chats"])
+
 
 @router.get("/{chat_id}/messages", response_model=ChatHistoryPage)
 def list_chat_messages_endpoint(
@@ -88,7 +94,7 @@ def send_chat_message_endpoint(
     )
 
 
-@router.post("/{chat_id}/history", response_model=ChatHistoryAppendResponse)
+@runner_router.post("/{chat_id}/history", response_model=ChatHistoryAppendResponse)
 def append_chat_history_endpoint(
     chat_id: int,
     payload: ChatHistoryAppendRequest,

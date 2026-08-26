@@ -17,6 +17,7 @@ from app.api.admin_users import router as admin_users_router
 from app.api.healthcheck import router as system_router
 from app.api.agents import router as agents_router
 from app.api.chats import router as chats_router
+from app.api.chats import runner_router as chats_runner_router
 from app.api.strategies import router as strategies_router
 from app.api.backtests import router as backtests_router
 from app.api.marketdata import router as marketdata_router
@@ -142,6 +143,8 @@ app.include_router(admin_users_router)
 app.include_router(system_router)
 app.include_router(agents_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(chats_router, dependencies=[Depends(get_current_active_user)])
+# No router-level gate: the endpoint authenticates user OR runner token itself.
+app.include_router(chats_runner_router)
 app.include_router(strategies_router, dependencies=[Depends(get_current_active_user)])
 # No router-level auth: like /accounts, each endpoint accepts the agent's
 # consultative token besides user JWT/PAT (a router-level
