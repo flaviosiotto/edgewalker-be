@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 
 from app.models.agent import Agent, Chat
 from app.models.n8n_chat_history import N8nChatHistory
+from app.models.strategy import LiveStatus, StrategyLive
 from app.schemas.chat import ChatHistoryMessageRead, ChatHistoryPage, ChatSendMessageResponse
 from app.services.live_runner_service import _rewrite_webhook_for_docker
 from app.services.n8n_auth import (
@@ -410,6 +411,44 @@ def get_chat_session_id(session: Session, *, chat_id: int, user_id: int) -> str:
 ASKER_KINDS = ("user", "external_agent", "rule", "alert", "runner", "system")
 
 
+def _ensure_chat_accepts_messages(session: Session, chat: Chat) -> None:
+    """Refuse new questions on the chat of a live session that is no longer alive.
+
+    Live chats are per-session. An external agent (MCP) holding a stale chat id
+    would otherwise talk to a stopped session — n8n still answers, with that
+    session's context — and the human watching the current live sees nothing.
+    The 409 detail names the current chat so the caller can redirect.
+    """
+    if not chat.live_id:
+        return
+    live = session.get(StrategyLive, chat.live_id)
+    if live is None or live.status in LiveStatus.active_values():
+        return
+    current = session.exec(
+        select(StrategyLive)
+        .where(StrategyLive.strategy_id == live.strategy_id)
+        .where(StrategyLive.status != LiveStatus.STOPPED.value)
+        .order_by(StrategyLive.id.desc())
+    ).first()
+    current_chat = (
+        session.exec(select(Chat).where(Chat.live_id == current.id)).first()
+        if current is not None
+        else None
+    )
+    hint = (
+        f" The current live session is {current.id}; use chat {current_chat.id}."
+        if current is not None and current_chat is not None
+        else " The strategy has no active live session."
+    )
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"Chat {chat.id} belongs to live session {live.id} which is {live.status}."
+            + hint
+        ),
+    )
+
+
 def resolve_asker_from_claims(claims: dict[str, Any] | None) -> tuple[str, str | None]:
     """Map the auth principal's claims onto (sender_kind, sender_label)."""
     claims = claims or {}
@@ -508,6 +547,7 @@ def send_chat_message(
         )
 
     chat = _get_owned_chat(session, chat_id, user_id)
+    _ensure_chat_accepts_messages(session, chat)
     agent = _resolve_chat_agent(session, chat)
     request_id = str(uuid.uuid4())
     session_id = _chat_session_id(chat)
@@ -718,6 +758,7 @@ async def stream_chat_message(
         )
 
     chat = _get_owned_chat(session, chat_id, user_id)
+    _ensure_chat_accepts_messages(session, chat)
     agent = _resolve_chat_agent(session, chat)
     request_id = str(uuid.uuid4())
     session_id = _chat_session_id(chat)
