@@ -92,16 +92,34 @@ class Strategy(SQLModel, table=True):
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
 
-    # ── DATAFEED BINDING ──
-    # Connection used for market data (not for live trading account)
-    connection_id: Optional[int] = Field(
-        default=None,
+    # ── ACCOUNT BINDING (single source of truth, mandatory from birth) ──
+    # The trading account this strategy belongs to. Live sessions inherit it;
+    # the datafeed connection below is derived from it.
+    account_id: int = Field(
         sa_column=Column(
             Integer,
-            ForeignKey("connections.id", ondelete="SET NULL"),
-            nullable=True,
+            ForeignKey("accounts.id", ondelete="RESTRICT"),
+            nullable=False,
             index=True,
         ),
+    )
+
+    # ── DATAFEED BINDING (denormalized: == account.connection_id) ──
+    # Written by the backend from the bound account, never by the client.
+    connection_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("connections.id", ondelete="RESTRICT"),
+            nullable=False,
+            index=True,
+        ),
+    )
+
+    account: Optional["Account"] = Relationship(
+        sa_relationship=relationship(
+            "Account",
+            foreign_keys="[Strategy.account_id]",
+        )
     )
 
     # AI Agent Manager – the agent overseeing this strategy's live execution
@@ -581,3 +599,4 @@ class BacktestTrade(SQLModel, table=True):
 
 # Import at end to avoid circular imports
 from app.models.agent import Agent  # noqa: E402, F401
+from app.models.connection import Account  # noqa: E402, F401

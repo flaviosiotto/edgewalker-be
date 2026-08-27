@@ -150,7 +150,8 @@ class LiveStartRequest(BaseModel):
     timeframe: str = "5s"  # Bar aggregation interval
     eval_in_progress: bool = True  # Evaluate rules on in-progress bars
     debug_rules: bool = False  # Log per-condition evaluation detail
-    account_id: int | None = None  # Trading account to send orders to
+    # Ignored: the trading account is bound to the strategy at creation.
+    account_id: int | None = None
 
 
 class LiveStartResponse(BaseModel):
@@ -360,7 +361,6 @@ async def _start_live_instance_internal(
     timeframe: str,
     eval_in_progress: bool,
     debug_rules: bool,
-    account_id: int,
     user_id: int,
     user_email: str | None,
     legacy_strategy_route: bool = False,
@@ -378,6 +378,9 @@ async def _start_live_instance_internal(
         if owned_agent is None or owned_agent.user_id != user_id:
             raise ValueError(f"Agent {manager_agent_id} not found")
 
+    # The trading account is a property of the strategy (bound at creation):
+    # live sessions inherit it, they never choose it.
+    account_id = strategy.account_id
     account, connection = validate_account_for_live(session, account_id, user_id)
     account_config = {
         **(connection.config or {}),
@@ -694,7 +697,6 @@ async def create_live_instance(
             timeframe=payload.timeframe,
             eval_in_progress=payload.eval_in_progress,
             debug_rules=payload.debug_rules,
-            account_id=payload.account_id,
             user_id=current_user.id,
             user_email=current_user.email,
             legacy_strategy_route=False,
@@ -827,12 +829,6 @@ async def start_live_strategy(
     current_user: User = Depends(get_current_active_user),
 ):
     """Legacy start endpoint kept as a shim over the live-instance API."""
-    if request.account_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="account_id è obbligatorio per il live trading",
-        )
-
     try:
         sl, result = await _start_live_instance_internal(
             session,
@@ -841,7 +837,6 @@ async def start_live_strategy(
             timeframe=request.timeframe,
             eval_in_progress=request.eval_in_progress,
             debug_rules=request.debug_rules,
-            account_id=request.account_id,
             user_id=current_user.id,
             user_email=current_user.email,
             legacy_strategy_route=True,

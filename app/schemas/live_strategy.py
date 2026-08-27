@@ -75,7 +75,9 @@ class LiveStrategyCreate(BaseModel):
     timeframe: str = "5s"
     eval_in_progress: bool = True
     debug_rules: bool = False
-    account_id: int
+    # Ignored: the trading account is bound to the strategy at creation and
+    # inherited by every live session. Kept optional for old clients.
+    account_id: int | None = None
     # Manager agent per QUESTA sessione; None = manager della strategia.
     manager_agent_id: int | None = None
 

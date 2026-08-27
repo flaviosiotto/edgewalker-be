@@ -44,7 +44,9 @@ class StrategyCreate(BaseModel):
     description: Optional[str] = None
     definition: Any
     manager_agent_id: Optional[int] = None
-    connection_id: Optional[int] = None
+    # Trading account the strategy belongs to (mandatory from birth). The
+    # datafeed connection is derived from it server-side.
+    account_id: int
 
 
 class StrategyPerformanceSummary(BaseModel):
@@ -82,8 +84,13 @@ class StrategyRead(BaseModel):
     # AI Agent Manager
     manager_agent_id: Optional[int] = None
 
-    # Datafeed connection binding
-    connection_id: Optional[int] = None
+    # Account binding (single source of truth) + display labels for grouping
+    account_id: int
+    account_display: Optional[str] = None
+    connection_name: Optional[str] = None
+
+    # Datafeed connection (derived from the account)
+    connection_id: int
 
     # Current live session (if any)
     live: Optional[StrategyLiveRead] = None
@@ -112,7 +119,8 @@ class StrategyUpdate(BaseModel):
     definition: Optional[Any] = None
     layout_config: Optional[dict[str, Any]] = None
     manager_agent_id: Optional[int] = None
-    connection_id: Optional[int] = None
+    # account_id / connection_id are NOT updatable: the account is fixed at
+    # creation (live history, orders and performance hang off it).
 
 
 # ─── BACKTEST SCHEMAS ───

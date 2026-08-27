@@ -13,7 +13,7 @@ from sqlmodel import Session, select
 
 from app.core.config import settings
 from app.models.agent import Agent, Chat
-from app.models.connection import Connection
+from app.models.connection import Account, Connection
 from app.models.n8n_chat_history import N8nChatHistory
 from app.models.strategy import Strategy, StrategyLive, BacktestResult, BacktestTrade, BacktestStatus, LiveStatus
 from app.schemas.strategy import (
@@ -164,6 +164,18 @@ def _get_owned_connection(session: Session, connection_id: int, user_id: int | N
     return connection
 
 
+def _get_owned_account(session: Session, account_id: int, user_id: int | None = None) -> Account:
+    """Account ownership is resolved through its connection (accounts have no user_id)."""
+    account = session.get(Account, account_id)
+    connection = session.get(Connection, account.connection_id) if account else None
+    if not account or not connection or (user_id is not None and connection.user_id != user_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Account with id {account_id} not found",
+        )
+    return account
+
+
 def _chat_session_id(chat: Chat) -> str:
     if chat.n8n_session_id:
         return chat.n8n_session_id
@@ -243,8 +255,7 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
     if payload.manager_agent_id is not None:
         _get_owned_agent(session, payload.manager_agent_id, user_id)
 
-    if payload.connection_id is not None:
-        _get_owned_connection(session, payload.connection_id, user_id)
+    account = _get_owned_account(session, payload.account_id, user_id)
 
     now = datetime.now(timezone.utc)
     strategy = Strategy(
@@ -255,7 +266,8 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
             _normalize_strategy_indicator_field_references(payload.definition)
         ),
         manager_agent_id=payload.manager_agent_id,
-        connection_id=payload.connection_id,
+        account_id=account.id,
+        connection_id=account.connection_id,
         created_at=now,
         updated_at=now,
     )
@@ -269,6 +281,7 @@ def list_strategies(session: Session, user_id: int) -> list[Strategy]:
     stmt = select(Strategy).options(
         selectinload(Strategy.chats),
         selectinload(Strategy.live_sessions),
+        selectinload(Strategy.account).selectinload(Account.connection),
     ).where(Strategy.user_id == user_id).order_by(Strategy.id.desc())
     return list(session.exec(stmt).all())
 
@@ -277,6 +290,7 @@ def get_strategy(session: Session, strategy_id: int, user_id: int | None = None)
     stmt = select(Strategy).options(
         selectinload(Strategy.chats),
         selectinload(Strategy.live_sessions),
+        selectinload(Strategy.account).selectinload(Account.connection),
     ).where(Strategy.id == strategy_id)
     if user_id is not None:
         stmt = stmt.where(Strategy.user_id == user_id)
@@ -328,13 +342,6 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
             strategy.manager_agent_id = payload.manager_agent_id
         else:
             strategy.manager_agent_id = None
-
-    if payload.connection_id is not None:
-        if payload.connection_id == 0:
-            strategy.connection_id = None
-        else:
-            _get_owned_connection(session, payload.connection_id, strategy.user_id)
-            strategy.connection_id = payload.connection_id
 
     strategy.updated_at = datetime.now(timezone.utc)
 
