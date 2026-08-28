@@ -73,23 +73,13 @@ class AccountOrdersResetResponse(BaseModel):
 @router.get("/", response_model=AccountListResponse)
 def list_accounts_endpoint(
     connection_id: int | None = Query(default=None),
-    active_only: bool = False,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     if connection_id is not None:
-        accounts = list_accounts(
-            session,
-            connection_id,
-            user_id=current_user.id,
-            active_only=active_only,
-        )
+        accounts = list_accounts(session, connection_id, user_id=current_user.id)
     else:
-        accounts = list_all_accounts(
-            session,
-            current_user.id,
-            active_only=active_only,
-        )
+        accounts = list_all_accounts(session, current_user.id)
     return AccountListResponse(
         accounts=[AccountRead.model_validate(account) for account in accounts],
         count=len(accounts),
