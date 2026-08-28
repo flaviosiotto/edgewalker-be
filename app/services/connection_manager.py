@@ -655,7 +655,6 @@ def _upsert_account_snapshot(
             maintenance_margin=discovered.maintenance_margin,
             init_margin=discovered.init_margin,
             snapshot_at=discovered.snapshot_at,
-            is_active=True,
             extra=discovered.extra,
         )
         session.add(acct)
@@ -667,7 +666,6 @@ def _upsert_account_snapshot(
         _append_account_history(session, acct, discovered, before=before, now=now)
         return acct
 
-    acct.is_active = True
     if discovered.display_name:
         acct.display_name = discovered.display_name
     if discovered.account_type:
@@ -733,7 +731,7 @@ def _append_account_history(
 
 
 def _sync_accounts(session: Session, connection_id: int, discovered: list[DiscoveredAccount]) -> None:
-    """Upsert discovered accounts and deactivate stale ones."""
+    """Upsert the accounts discovered on the gateway."""
     now = datetime.now(timezone.utc)
 
     existing_stmt = select(Account).where(Account.connection_id == connection_id)
@@ -752,14 +750,6 @@ def _sync_accounts(session: Session, connection_id: int, discovered: list[Discov
         )
         existing_map[d.account_id] = acct
 
-    # Deactivate accounts no longer present (skip already-inactive ones: the
-    # health loop resyncs every ~20s and would otherwise rewrite/log each tick)
-    for acct_id, acct in existing_map.items():
-        if acct_id not in discovered_ids and acct.is_active:
-            acct.is_active = False
-            acct.updated_at = now
-            logger.info("Deactivated stale account %s for connection %s", acct_id, connection_id)
-
     session.commit()
 
 
@@ -769,12 +759,7 @@ def _update_connection_status(
     status: ConnectionStatus,
     message: str | None = None,
 ) -> None:
-    """Persist connection status in DB.
-
-    When transitioning away from *connected*, all associated accounts
-    are deactivated.  They will be re-activated on the next successful
-    connect via ``_sync_accounts``.
-    """
+    """Persist connection status in DB."""
     conn = session.get(Connection, connection_id)
     if conn is None:
         return
@@ -786,12 +771,6 @@ def _update_connection_status(
     if status == ConnectionStatus.CONNECTED:
         conn.last_connected_at = now
         conn.last_ok_at = now
-    else:
-        # Deactivate accounts when connection is no longer alive
-        acct_stmt = select(Account).where(Account.connection_id == connection_id, Account.is_active == True)  # noqa: E712
-        for acct in session.exec(acct_stmt).all():
-            acct.is_active = False
-            acct.updated_at = now
     session.commit()
 
 
@@ -1997,9 +1976,9 @@ class ConnectionManager:
                         conn.last_ok_at = now
                     session.commit()
 
-        # Account state (balances, is_active re-activation) is kept fresh by
-        # the order-aggregator projection of broker.account.sync; the health
-        # loop only tracks the connection status.
+        # Account state (balances) is kept fresh by the order-aggregator
+        # projection of broker.account.sync; the health loop only tracks
+        # the connection status.
 
         return actual.value
 
@@ -2107,7 +2086,7 @@ class ConnectionManager:
         with get_session_context() as session:
             now = datetime.now(timezone.utc)
 
-            # 1) Reset stale "connected" connections
+            # Reset stale "connected" connections
             stmt = select(Connection).where(
                 Connection.status == ConnectionStatus.CONNECTED.value
             )
@@ -2116,35 +2095,12 @@ class ConnectionManager:
                 conn.status = ConnectionStatus.DISCONNECTED.value
                 conn.status_message = "Reset on server restart"
                 conn.updated_at = now
-                for acct in conn.accounts:
-                    if acct.is_active:
-                        acct.is_active = False
-                        acct.updated_at = now
                 logger.info(
                     "Reset stale connection %s (%s) from 'connected' to 'disconnected'",
                     conn.id, conn.name,
                 )
 
-            # 2) Deactivate orphan active accounts on non-connected connections
-            orphan_stmt = (
-                select(Account)
-                .join(Connection, Account.connection_id == Connection.id)
-                .where(
-                    Account.is_active == True,  # noqa: E712
-                    Connection.status != ConnectionStatus.CONNECTED.value,
-                )
-            )
-            orphans = list(session.exec(orphan_stmt).all())
-            for acct in orphans:
-                acct.is_active = False
-                acct.updated_at = now
-            if orphans:
-                logger.info(
-                    "Deactivated %d orphan active account(s) on disconnected connections",
-                    len(orphans),
-                )
-
-            if stale or orphans:
+            if stale:
                 session.commit()
 
         # NOTE: We do NOT clean up gateway containers here — they are

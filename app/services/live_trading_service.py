@@ -723,8 +723,8 @@ def validate_account_for_live(
     user_id: int | None = None,
 ) -> tuple[Account, Connection]:
     """
-    Validate that an account exists, is active, and its connection is
-    in a connected state.  Raises ValueError if validation fails.
+    Validate that an account exists and its connection is in a
+    connected state.  Raises ValueError if validation fails.
 
     Returns:
         (Account, Connection) tuple
@@ -732,9 +732,6 @@ def validate_account_for_live(
     account = session.get(Account, account_id)
     if account is None:
         raise ValueError(f"Account {account_id} not found")
-
-    if not account.is_active:
-        raise ValueError(f"Account {account.account_id} is not active")
 
     connection = session.get(Connection, account.connection_id)
     if connection is None:

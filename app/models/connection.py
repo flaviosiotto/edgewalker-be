@@ -214,8 +214,6 @@ class Account(SQLModel, table=True):
         description="Timestamp of the last normalized account-state snapshot",
     )
 
-    is_active: bool = Field(default=True)
-
     # Broker-specific extra data
     extra: Optional[Any] = Field(
         default=None,

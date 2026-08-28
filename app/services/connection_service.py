@@ -150,24 +150,19 @@ def list_accounts(
     connection_id: int,
     *,
     user_id: int | None = None,
-    active_only: bool = False,
 ) -> list[Account]:
     conn = get_connection(session, connection_id, user_id)
     if conn is None:
         return []
 
     stmt = select(Account).where(Account.connection_id == conn.id)
-    if active_only:
-        stmt = stmt.where(Account.is_active == True)  # noqa: E712
     stmt = stmt.order_by(Account.account_id)
     return list(session.exec(stmt).all())
 
 
-def list_all_accounts(session: Session, user_id: int, *, active_only: bool = False) -> list[Account]:
+def list_all_accounts(session: Session, user_id: int) -> list[Account]:
     """List accounts across all connections."""
     stmt = select(Account).join(Connection, Account.connection_id == Connection.id).where(Connection.user_id == user_id)
-    if active_only:
-        stmt = stmt.where(Account.is_active == True)  # noqa: E712
     stmt = stmt.order_by(Account.account_id)
     return list(session.exec(stmt).all())
 
@@ -189,7 +184,6 @@ def create_account(
     display_name: str | None = None,
     account_type: str | None = None,
     currency: str = "USD",
-    is_active: bool = True,
     extra: dict | None = None,
 ) -> Account:
     account = Account(
@@ -198,7 +192,6 @@ def create_account(
         display_name=display_name,
         account_type=account_type,
         currency=currency,
-        is_active=is_active,
         extra=extra,
     )
     session.add(account)

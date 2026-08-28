@@ -486,7 +486,6 @@ async def reread_orders_endpoint(
 @router.get("/{connection_id}/accounts", response_model=AccountListResponse)
 def list_accounts_endpoint(
     connection_id: int,
-    active_only: bool = False,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -494,7 +493,7 @@ def list_accounts_endpoint(
     conn = get_connection(session, connection_id, current_user.id)
     if conn is None:
         raise HTTPException(status_code=404, detail="Connection not found")
-    accts = list_accounts(session, connection_id, user_id=current_user.id, active_only=active_only)
+    accts = list_accounts(session, connection_id, user_id=current_user.id)
     return AccountListResponse(
         accounts=[AccountRead.model_validate(a) for a in accts],
         count=len(accts),
@@ -503,12 +502,11 @@ def list_accounts_endpoint(
 
 @router.get("/accounts/all", response_model=AccountListResponse)
 def list_all_accounts_endpoint(
-    active_only: bool = False,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
     """List all accounts across all connections."""
-    accts = list_all_accounts(session, current_user.id, active_only=active_only)
+    accts = list_all_accounts(session, current_user.id)
     return AccountListResponse(
         accounts=[AccountRead.model_validate(a) for a in accts],
         count=len(accts),

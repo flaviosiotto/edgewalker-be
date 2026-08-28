@@ -77,7 +77,6 @@ class AccountRead(BaseModel):
     maintenance_margin: float | None = None
     init_margin: float | None = None
     snapshot_at: datetime | None = None
-    is_active: bool
     extra: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
@@ -184,7 +183,6 @@ class AccountCreate(BaseModel):
     buying_power: float | None = None
     available_funds: float | None = None
     snapshot_at: datetime | None = None
-    is_active: bool = True
     extra: dict[str, Any] | None = None
 
 
@@ -198,7 +196,6 @@ class AccountUpdate(BaseModel):
     buying_power: float | None = None
     available_funds: float | None = None
     snapshot_at: datetime | None = None
-    is_active: bool | None = None
     extra: dict[str, Any] | None = None
 
 

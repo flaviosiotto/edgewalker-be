@@ -21,6 +21,10 @@ ALTER TABLE strategies
     ADD COLUMN IF NOT EXISTS account_id INTEGER
         REFERENCES accounts(id) ON DELETE RESTRICT;
 
+-- 0. manual assignment (prod, 27/08/2026): GOLD_STRAT never went live, bound
+--    to 113/17171553 like the other FTMO strategies. No-op elsewhere.
+UPDATE strategies SET account_id = 113 WHERE id = 8 AND account_id IS NULL;
+
 -- 1. last live session with an account
 UPDATE strategies s
 SET account_id = ll.account_id
