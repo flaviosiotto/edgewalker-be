@@ -28,6 +28,7 @@ from app.api.agent_lessons import router as agent_lessons_router
 from app.api.connections import router as connections_router
 from app.api.tws_launch import router as tws_launch_router
 from app.api.pats import router as pats_router
+from app.services.connection_events import install_connection_event_listeners
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
 from app.services.backtest_runner_monitor import start_backtest_runner_monitor, stop_backtest_runner_monitor
@@ -49,6 +50,10 @@ async def lifespan(app: FastAPI):
 
     with get_session_context() as session:
         ensure_bootstrap_admin(session)
+
+    # Must precede the connection manager: its startup reset is the first
+    # status write we want relayed to connected clients.
+    install_connection_event_listeners()
 
     # Start connection manager (broker connect/disconnect lifecycle)
     await start_connection_manager()

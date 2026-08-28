@@ -10,12 +10,15 @@ gateway container.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
@@ -53,7 +56,12 @@ from app.services.connection_service import (
 from app.services.connection_manager import get_connection_manager
 from app.services.connection_manager import resolve_order_history_lookback_days
 from app.services.ctrader_accounts import CTraderAccountsError, fetch_ctrader_accounts
+from app.services.connection_events import (
+    CONNECTION_EVENT_HEARTBEAT_SECONDS,
+    CONNECTION_EVENTS_CHANNEL_PREFIX,
+)
 from app.utils.auth_utils import get_current_active_user
+from app.utils.redis_async import close_pubsub, get_async_redis
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +197,79 @@ async def list_ctrader_accounts(
 
     options = [CTraderAccountOption(**account) for account in accounts]
     return CTraderAccountsResponse(accounts=options, count=len(options))
+
+
+# Declared before the "/{connection_id}" routes: FastAPI matches in order and
+# "/events" would otherwise be captured by the int path parameter (422).
+@router.get("/events")
+async def connection_events_endpoint(
+    request: Request,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """SSE stream of ``connections_changed`` events for the current user.
+
+    Relays the Redis channel ``connection-events:{user_id}`` published by the
+    ORM hooks in ``connection_events``; degrades to heartbeat-only when Redis
+    is unavailable. The payload only says *which* connections changed: the
+    client refetches the list, so this stream never serves stale snapshots.
+    """
+    user_id = current_user.id
+    # Release the pooled DB connection before streaming (see the strategy
+    # events endpoint): an SSE response lives for minutes.
+    session.close()
+
+    async def event_stream() -> AsyncIterator[str]:
+        pubsub = None
+        try:
+            redis_client = get_async_redis()
+            if redis_client is not None:
+                try:
+                    pubsub = redis_client.pubsub()
+                    await pubsub.subscribe(f"{CONNECTION_EVENTS_CHANNEL_PREFIX}{user_id}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("connection events relay unavailable for user %s: %s", user_id, exc)
+                    if pubsub is not None:
+                        await close_pubsub(pubsub)
+                        pubsub = None
+
+            yield f"event: ready\ndata: {json.dumps({'user_id': user_id})}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                if pubsub is None:
+                    await asyncio.sleep(CONNECTION_EVENT_HEARTBEAT_SECONDS)
+                    yield ": ping\n\n"
+                    continue
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True,
+                    timeout=CONNECTION_EVENT_HEARTBEAT_SECONDS,
+                )
+                if message is None:
+                    yield ": ping\n\n"
+                    continue
+                if message.get("type") != "message":
+                    continue
+                try:
+                    payload = json.loads(message.get("data") or "")
+                except (TypeError, ValueError):
+                    continue
+                if payload.get("type") != "connections_changed":
+                    continue
+                yield f"event: connections_changed\ndata: {json.dumps(payload)}\n\n"
+        finally:
+            if pubsub is not None:
+                await close_pubsub(pubsub)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/", response_model=ConnectionListResponse)
