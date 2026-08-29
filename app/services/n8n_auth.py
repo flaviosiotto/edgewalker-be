@@ -137,7 +137,14 @@ def build_n8n_api_auth_metadata(
     return metadata
 
 
-_DEFAULT_N8N_CONSULTATIVE_SCOPES = ["accounts:read", "account_orders:read"]
+# Mirror of `_DEFAULT_AGENT_CONSULTATIVE_SCOPES` in app/api/runners.py — the
+# two token issuers must grant the same surface.
+_DEFAULT_N8N_CONSULTATIVE_SCOPES = [
+    "accounts:read",
+    "account_orders:read",
+    "strategies:read",
+    "strategies:write",
+]
 _DEFAULT_N8N_RUNNER_SCOPES = [
     "runner:read",
     "runner:orders:write",
@@ -266,6 +273,9 @@ def _build_backend_api_metadata_for_live(
             "accounts": "/accounts",
             "account": f"/accounts/{live.account_id}" if live.account_id else None,
             "account_orders": f"/accounts/{live.account_id}/orders" if live.account_id else None,
+            # The agent both designs and trades: it reads/patches the very
+            # strategy it is running (scopes strategies:read/write).
+            "strategy": f"/strategies/{live.strategy_id}" if live.strategy_id else None,
         },
     }
 

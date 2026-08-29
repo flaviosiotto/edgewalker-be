@@ -150,7 +150,11 @@ app.include_router(agents_router, dependencies=[Depends(get_current_active_user)
 app.include_router(chats_router, dependencies=[Depends(get_current_active_user)])
 # No router-level gate: the endpoint authenticates user OR runner token itself.
 app.include_router(chats_runner_router)
-app.include_router(strategies_router, dependencies=[Depends(get_current_active_user)])
+# No router-level gate: GET/PATCH /strategies/{id} accept the agent's
+# consultative token too (one agent designs AND trades — redesign 29/08), and
+# a router-level get_current_active_user would reject it. Every other endpoint
+# declares get_current_active_user explicitly.
+app.include_router(strategies_router)
 # No router-level auth: like /accounts, each endpoint accepts the agent's
 # consultative token besides user JWT/PAT (a router-level
 # get_current_active_user would reject it).

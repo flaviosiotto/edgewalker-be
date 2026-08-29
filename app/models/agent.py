@@ -4,7 +4,18 @@ import enum
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, Column, Computed, Enum as SAEnum, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Computed,
+    Enum as SAEnum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -31,11 +42,40 @@ class Agent(SQLModel, table=True):
     agent_name: str = Field(sa_column=Column(String(255), nullable=False))
     n8n_webhook: str = Field(sa_column=Column(String(512), nullable=False))
     is_default: bool = Field(sa_column=Column(Boolean, nullable=False, server_default="false"))
-    # design = assiste il design della strategia; running = gestisce i run
-    # live/backtest (ask_agent, alert, review).
-    agent_kind: str = Field(
-        default="running",
-        sa_column=Column(String(16), nullable=False, server_default="running"),
+
+    # --- Persona (migr. 049) ---------------------------------------------
+    # There is no agent_kind any more: every agent can both design a strategy
+    # and trade it. What distinguishes agents is who they are, and that whole
+    # block travels to n8n as `metadata.agent` in the webhook payload.
+    #
+    # `avatar` is a key of the FE's inline SVG set, `accent_color` a #RRGGBB
+    # hex; `avatar_url` is an optional external image (we store no files).
+    avatar: str = Field(
+        default="robot",
+        sa_column=Column(String(64), nullable=False, server_default="robot"),
+    )
+    accent_color: str = Field(
+        default="#6f42c1",
+        sa_column=Column(String(16), nullable=False, server_default="#6f42c1"),
+    )
+    avatar_url: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(1024), nullable=True),
+    )
+    description: Optional[str] = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+    )
+    risk_profile: str = Field(
+        default="balanced",
+        sa_column=Column(String(16), nullable=False, server_default="balanced"),
+    )
+    # Extensible traits: {horizon, max_risk_per_trade_pct, style, notes}.
+    # default_factory (not default={}) so the empty dict is not shared between
+    # instances; server_default keeps the column NOT NULL for raw SQL inserts.
+    persona: dict = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default="{}"),
     )
 
 

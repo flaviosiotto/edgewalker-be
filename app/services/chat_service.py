@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 from app.models.agent import Agent, Chat
 from app.models.n8n_chat_history import N8nChatHistory
 from app.models.strategy import LiveStatus, StrategyLive
+from app.schemas.agent import build_agent_persona_block
 from app.schemas.chat import ChatHistoryMessageRead, ChatHistoryPage, ChatSendMessageResponse
 from app.services.live_runner_service import _rewrite_webhook_for_docker
 from app.services.n8n_auth import (
@@ -147,6 +148,7 @@ def _build_webhook_payload(
     metadata: dict[str, Any] | None,
     request_id: str,
     api_auth_metadata: dict[str, Any] | None = None,
+    agent: Agent | None = None,
 ) -> dict[str, Any]:
     session_id = _chat_session_id(chat)
     base_metadata = dict(metadata or {})
@@ -193,6 +195,11 @@ def _build_webhook_payload(
     base_metadata.pop("auth", None)
     if merged_api_auth_metadata is not None:
         base_metadata["api_auth"] = merged_api_auth_metadata
+    # Who the agent is (migr. 049). The n8n prompt renders this as
+    # `== CHI SEI ==`; an explicit block in `metadata` wins so a caller can
+    # override it (nobody does today).
+    if agent is not None and "agent" not in base_metadata:
+        base_metadata["agent"] = build_agent_persona_block(agent)
     return {
         "action": "sendMessage",
         "sessionId": session_id,
@@ -575,6 +582,7 @@ def send_chat_message(
         metadata=metadata,
         request_id=request_id,
         api_auth_metadata=api_auth_metadata,
+        agent=agent,
     )
 
     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
@@ -786,6 +794,7 @@ async def stream_chat_message(
         metadata=metadata,
         request_id=request_id,
         api_auth_metadata=api_auth_metadata,
+        agent=agent,
     )
     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
     headers["Accept"] = "text/plain"

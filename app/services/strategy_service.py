@@ -16,6 +16,7 @@ from app.models.agent import Agent, Chat
 from app.models.connection import Account, Connection
 from app.models.n8n_chat_history import N8nChatHistory
 from app.models.strategy import Strategy, StrategyLive, BacktestResult, BacktestTrade, BacktestStatus, LiveStatus
+from app.schemas.agent import build_agent_persona_block
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyUpdate,
@@ -1126,6 +1127,7 @@ def trigger_rule_agent(
             "message_type": "rule_trigger",
             "requested_action": "rule_trigger",
             "agent_id": agent_id,
+            "agent": build_agent_persona_block(agent),
             "rule_context": rule_context,
             "api_auth": api_auth_metadata,
         },
@@ -1353,6 +1355,7 @@ def notify_manager_live_start(
         "chatInput": chat_input,
         "metadata": {
             "chat_id": live_chat.n8n_session_id or "",
+            "agent": build_agent_persona_block(agent),
         },
     }
     try:
@@ -1476,6 +1479,7 @@ def post_manager_message(
                     "chatInput": message,
                     "metadata": {
                         "chat_id": live_chat.n8n_session_id or "",
+                        "agent": build_agent_persona_block(agent),
                     },
                 }
                 try:

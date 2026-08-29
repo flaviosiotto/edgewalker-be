@@ -41,9 +41,14 @@ _DEFAULT_AGENT_RUNNER_SCOPES = [
     "runner:alerts:write",
     "runner:decision:write",
 ]
+# The agent is one persona with both hats (redesign 29/08): it reads the
+# account AND reads/writes the strategy definition it is running. Keep this
+# list in sync with `_DEFAULT_N8N_CONSULTATIVE_SCOPES` in services/n8n_auth.py.
 _DEFAULT_AGENT_CONSULTATIVE_SCOPES = [
     "accounts:read",
     "account_orders:read",
+    "strategies:read",
+    "strategies:write",
 ]
 
 

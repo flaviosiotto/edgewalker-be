@@ -39,7 +39,8 @@ from app.services.strategy_service import (
 )
 from app.utils.auth_utils import (
     AuthPrincipal,
-    get_current_active_principal,
+    get_current_active_or_consultative_principal,
+    get_current_active_or_consultative_user,
     get_current_active_user,
 )
 from app.utils.redis_async import close_pubsub, get_async_redis
@@ -156,8 +157,16 @@ def list_strategies_endpoint(
 def get_strategy_endpoint(
     strategy_id: int,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
+    """Read one strategy.
+
+    Auth mirrors /backtests and /accounts: user JWT, PAT, delegated n8n token
+    or the agent's consultative token (scope ``strategies:read``) — the agent
+    running a strategy reads the definition it is trading. Ownership is
+    enforced by ``get_strategy`` against the principal's own user id, which
+    for the consultative token comes from the token claim.
+    """
     strategy = get_strategy(session, strategy_id, current_user.id)
     return _serialize_strategy_with_live(session, strategy)
 
@@ -167,9 +176,16 @@ def update_strategy_endpoint(
     strategy_id: int,
     payload: StrategyUpdate,
     session: Session = Depends(get_session),
-    principal: AuthPrincipal = Depends(get_current_active_principal),
+    principal: AuthPrincipal = Depends(get_current_active_or_consultative_principal),
     x_client_request_id: str | None = Header(default=None, alias="X-Client-Request-Id"),
 ):
+    """Update a strategy (definition, name, layout, manager agent...).
+
+    Accepts the agent's consultative token (scope ``strategies:write``)
+    besides user JWT/PAT: one agent both designs and trades. NOTE: a
+    definition changed mid-run is NOT hot-reloaded by the runner — it applies
+    from the next run.
+    """
     strategy = update_strategy(session, strategy_id, payload, principal.user.id)
     # FE tokens carry purpose=ui_auth; everything else (n8n_chat_api_access &
     # co.) is an agent-side writer. The FE uses `origin` to ignore its own

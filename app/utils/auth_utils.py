@@ -475,35 +475,54 @@ async def get_current_active_or_runner_user(
     return runner_principal.user
 
 
-async def get_current_active_or_consultative_user(
+async def get_current_active_or_consultative_principal(
     request: Request,
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session),
-) -> User:
+) -> AuthPrincipal:
+    """User JWT / PAT / delegated n8n token / agent consultative token.
+
+    Same chain as ``get_current_active_or_consultative_user`` but keeps the
+    claims, for endpoints that must tell WHO is calling — e.g. PATCH
+    /strategies/{id} derives ``origin=user|agent`` from ``purpose``. The
+    consultative token carries ``purpose=agent_backend_consult``, so it lands
+    on ``agent`` like the other n8n-issued tokens.
+    """
     pat_principal = _try_pat_principal(request, token, session)
     if pat_principal is not None:
         if not pat_principal.user.is_active:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
         _release_auth_connection(session)
-        return pat_principal.user
+        return pat_principal
 
     access_payload = decode_token(token, audience=settings.ACCESS_TOKEN_AUDIENCE)
     if access_payload is not None:
-        user = _load_principal_from_payload(
+        principal = _load_principal_from_payload(
             access_payload,
             session,
             allowed_token_types={"access"},
             credentials_exception=_credentials_exception(),
-        ).user
-        if not user.is_active:
+        )
+        if not principal.user.is_active:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
         _release_auth_connection(session)
-        return user
+        return principal
 
     consultative_principal = await get_current_consultative_principal(token=token, session=session)
     if not consultative_principal.user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
-    return consultative_principal.user
+    return consultative_principal
+
+
+async def get_current_active_or_consultative_user(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+) -> User:
+    principal = await get_current_active_or_consultative_principal(
+        request=request, token=token, session=session
+    )
+    return principal.user
 
 
 def create_user_delegated_token(

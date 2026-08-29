@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -31,11 +31,16 @@ def create_agent_endpoint(
 
 @router.get("/", response_model=list[AgentRead])
 def list_agents_endpoint(
-    kind: str | None = Query(default=None, pattern="^(design|running)$"),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    return list_agents(session, current_user.id, kind=kind)
+    """All the agents of the user.
+
+    The legacy ``?kind=`` filter is gone with migr. 049. An older client still
+    sending it gets the full list rather than a 422: FastAPI ignores query
+    params that no endpoint declares.
+    """
+    return list_agents(session, current_user.id)
 
 
 @router.get("/{agent_id}", response_model=AgentRead)

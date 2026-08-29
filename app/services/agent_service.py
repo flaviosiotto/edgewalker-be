@@ -29,7 +29,12 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
         agent_name=payload.agent_name,
         n8n_webhook=payload.n8n_webhook,
         is_default=payload.is_default,
-        agent_kind=payload.agent_kind,
+        avatar=payload.avatar,
+        accent_color=payload.accent_color,
+        avatar_url=payload.avatar_url,
+        description=payload.description,
+        risk_profile=payload.risk_profile,
+        persona=payload.persona or {},
     )
     session.add(agent)
     session.commit()
@@ -50,10 +55,13 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
     return agent, chat
 
 
-def list_agents(session: Session, user_id: int, kind: str | None = None) -> list[Agent]:
+def list_agents(session: Session, user_id: int) -> list[Agent]:
+    """Every agent of the user — there is no kind to filter on any more.
+
+    The design/running split was retired with migr. 049: all agents can both
+    design and trade, so the FE shows one list everywhere.
+    """
     statement = select(Agent).where(Agent.user_id == user_id)
-    if kind:
-        statement = statement.where(Agent.agent_kind == kind)
     return list(session.exec(statement).all())
 
 
@@ -88,8 +96,21 @@ def update_agent(session: Session, agent_id: int, payload: AgentUpdate, user_id:
         agent.n8n_webhook = payload.n8n_webhook
     if payload.is_default is not None:
         agent.is_default = payload.is_default
-    if payload.agent_kind is not None:
-        agent.agent_kind = payload.agent_kind
+    if payload.avatar is not None:
+        agent.avatar = payload.avatar
+    if payload.accent_color is not None:
+        agent.accent_color = payload.accent_color
+    # avatar_url and description are nullable: an explicit null clears them,
+    # so they are keyed off the fields actually present in the PATCH body.
+    fields_set = payload.model_fields_set
+    if "avatar_url" in fields_set:
+        agent.avatar_url = payload.avatar_url
+    if "description" in fields_set:
+        agent.description = payload.description
+    if payload.risk_profile is not None:
+        agent.risk_profile = payload.risk_profile
+    if payload.persona is not None:
+        agent.persona = payload.persona
 
     session.add(agent)
     session.commit()
