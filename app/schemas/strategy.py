@@ -40,7 +40,9 @@ class StrategyLiveRead(BaseModel):
 
 
 class StrategyCreate(BaseModel):
-    name: str
+    # Optional since 29/08/2026: the design agent names the strategy. When
+    # omitted the backend picks a unique placeholder ("Nuova strategia N").
+    name: Optional[str] = Field(default=None, max_length=60)
     description: Optional[str] = None
     definition: Any
     manager_agent_id: Optional[int] = None
@@ -114,7 +116,7 @@ class StrategyRead(BaseModel):
 
 
 class StrategyUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=60)
     description: Optional[str] = None
     definition: Optional[Any] = None
     layout_config: Optional[dict[str, Any]] = None

@@ -234,13 +234,35 @@ def resolve_strategy_manager_agent_id(
     return strategy.manager_agent_id
 
 
+DEFAULT_STRATEGY_NAME = "Nuova strategia"
+
+
+def _placeholder_strategy_name(session: Session, user_id: int) -> str:
+    """Unique placeholder for a strategy created without a name.
+
+    The design agent is expected to rename it as soon as it understands the
+    idea; until then the user sees "Nuova strategia", "Nuova strategia 2", ...
+    (unique per user because of uq_strategies_user_name).
+    """
+    taken = set(
+        session.exec(
+            select(Strategy.name)
+            .where(Strategy.user_id == user_id)
+            .where(Strategy.name.like(f"{DEFAULT_STRATEGY_NAME}%"))  # type: ignore[attr-defined]
+        ).all()
+    )
+    if DEFAULT_STRATEGY_NAME not in taken:
+        return DEFAULT_STRATEGY_NAME
+    n = 2
+    while f"{DEFAULT_STRATEGY_NAME} {n}" in taken:
+        n += 1
+    return f"{DEFAULT_STRATEGY_NAME} {n}"
+
+
 def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> Strategy:
     name = (payload.name or "").strip()
     if not name:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Strategy name is required",
-        )
+        name = _placeholder_strategy_name(session, user_id)
 
     existing = session.exec(
         select(Strategy)
