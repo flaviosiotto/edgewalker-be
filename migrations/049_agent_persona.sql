@@ -45,7 +45,7 @@ BEGIN
 END $$;
 
 COMMENT ON COLUMN agent.avatar IS
-'Chiave del set di avatar SVG del FE (robot, owl, fox, wolf, bull, bear, hawk, octopus, lion, shark, sage, rocket)';
+'Chiave del set di avatar SVG del FE (analyst, trader, veteran, rookie, strategist, mentor, curly, executive, braid, shades, elder, hooded)';
 COMMENT ON COLUMN agent.accent_color IS
 'Colore identitario dell''agent, hex #RRGGBB';
 COMMENT ON COLUMN agent.avatar_url IS

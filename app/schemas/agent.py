@@ -12,8 +12,8 @@ RiskProfile = Literal["conservative", "balanced", "aggressive"]
 # Keys of the FE's inline SVG avatar set (AgentAvatar.vue). Not validated as an
 # enum on purpose: the FE falls back to initials on an unknown key, and a new
 # avatar must not require a backend deploy.
-DEFAULT_AVATAR = "robot"
-DEFAULT_ACCENT_COLOR = "#6f42c1"
+DEFAULT_AVATAR = "analyst"
+DEFAULT_ACCENT_COLOR = "#6c757d"
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 

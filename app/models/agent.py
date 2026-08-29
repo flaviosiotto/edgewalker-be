@@ -51,12 +51,12 @@ class Agent(SQLModel, table=True):
     # `avatar` is a key of the FE's inline SVG set, `accent_color` a #RRGGBB
     # hex; `avatar_url` is an optional external image (we store no files).
     avatar: str = Field(
-        default="robot",
-        sa_column=Column(String(64), nullable=False, server_default="robot"),
+        default="analyst",
+        sa_column=Column(String(64), nullable=False, server_default="analyst"),
     )
     accent_color: str = Field(
-        default="#6f42c1",
-        sa_column=Column(String(16), nullable=False, server_default="#6f42c1"),
+        default="#6c757d",
+        sa_column=Column(String(16), nullable=False, server_default="#6c757d"),
     )
     avatar_url: Optional[str] = Field(
         default=None,
