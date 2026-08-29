@@ -18,6 +18,6 @@ UPDATE agent SET avatar = 'analyst'      WHERE avatar = 'robot';
 UPDATE agent SET accent_color = '#6c757d' WHERE accent_color = '#6f42c1';
 
 COMMENT ON COLUMN agent.avatar IS
-'Chiave del set di personaggi SVG del FE (analyst, trader, veteran, rookie, strategist, mentor, curly, executive, braid, shades, elder, hooded)';
+'Chiave del set di personaggi SVG del FE (analyst, quant, veteran, executive, strategist, portfolio_manager, risk_officer, senior_partner, macro, chartist, associate, advisor)';
 
 COMMIT;
