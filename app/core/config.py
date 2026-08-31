@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     LAB_TOKEN_AUDIENCE: str = "edgewalker-lab"
     LAB_PUBLIC_URL: str = "http://localhost:8081/lab-hub"
     LAB_LAUNCH_TOKEN_EXPIRE_MINUTES: int = 2
+    # Credenziale iniettata nel container Lab: accettata SOLO da studio-svc.
+    STUDIO_TOKEN_AUDIENCE: str = "edgewalker-studio"
+    LAB_STUDIO_TOKEN_EXPIRE_MINUTES: int = 720
+    # API interna dell'hub (per "riavvia sessione": stop del server utente,
+    # il respawn risincronizza gli Studi nel workspace). Token condiviso con
+    # il service edgewalker-backend registrato in jupyterhub_config
+    # (LAB_HUB_API_TOKEN, stesso valore su entrambe le app).
+    LAB_HUB_API_URL: str = "http://jupyterhub:8081/lab-hub"
+    LAB_HUB_API_TOKEN: Optional[str] = None
     DELEGATED_TOKEN_EXPIRE_MINUTES: int = 480
     AGENT_CALLBACK_TOKEN_EXPIRE_MINUTES: int = 15
     JWT_PRIVATE_KEY: Optional[str] = None
