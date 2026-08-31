@@ -37,7 +37,7 @@ _READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 #: Identity and administration surfaces are never reachable with a PAT: a
 #: leaked token must not be able to rotate credentials, mint further tokens or
 #: touch other accounts.
-_FORBIDDEN_PREFIXES = ("/auth", "/admin", "/pats")
+_FORBIDDEN_PREFIXES = ("/auth", "/admin", "/pats", "/lab")
 
 #: Mutations on these surfaces move real money (orders, positions, live
 #: sessions, runner callbacks) and require the explicit ``trade`` scope.

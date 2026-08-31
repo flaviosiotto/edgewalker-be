@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     N8N_WEBHOOK_JWT_EXPIRE_MINUTES: int = 15
     RUNNER_TOKEN_AUDIENCE: str = "edgewalker-runner"
     AGENT_TOKEN_AUDIENCE: str = "edgewalker-agent"
+    # Studio Lab (JupyterHub embed): launch-token audience + public base URL
+    # of the hub (prod: https://api.edgewalker.tech/lab-hub).
+    LAB_TOKEN_AUDIENCE: str = "edgewalker-lab"
+    LAB_PUBLIC_URL: str = "http://localhost:8081/lab-hub"
+    LAB_LAUNCH_TOKEN_EXPIRE_MINUTES: int = 2
     DELEGATED_TOKEN_EXPIRE_MINUTES: int = 480
     AGENT_CALLBACK_TOKEN_EXPIRE_MINUTES: int = 15
     JWT_PRIVATE_KEY: Optional[str] = None

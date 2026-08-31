@@ -28,6 +28,7 @@ from app.api.agent_lessons import router as agent_lessons_router
 from app.api.connections import router as connections_router
 from app.api.tws_launch import router as tws_launch_router
 from app.api.pats import router as pats_router
+from app.api.lab import router as lab_router
 from app.services.connection_events import install_connection_event_listeners
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
@@ -166,5 +167,7 @@ app.include_router(accounts_router)
 app.include_router(agent_lessons_router)
 app.include_router(connections_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(pats_router)
+# Studio Lab launch: interactive-session-only mint of the JupyterHub URL.
+app.include_router(lab_router)
 # Interactive IB Gateway launch + forwardAuth gate (cookie-scoped, no JWT).
 app.include_router(tws_launch_router)
