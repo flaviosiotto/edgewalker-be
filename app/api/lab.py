@@ -7,6 +7,7 @@ own session cookie takes over, so FE token rotation never matters here.
 """
 
 import asyncio
+import json
 import logging
 from datetime import timedelta
 from urllib.parse import urlencode, urlparse
@@ -15,7 +16,12 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.config import settings
-from app.schemas.lab import LabLaunch, LabLaunchRequest
+from app.schemas.lab import (
+    LabLaunch,
+    LabLaunchRequest,
+    LabThemeRequest,
+    LabWorkspaceFile,
+)
 from app.utils.auth_utils import (
     AuthPrincipal,
     create_delegated_token,
@@ -56,6 +62,86 @@ async def _stop_user_server(uid: int) -> None:
         logger.warning("lab fresh restart: hub API unreachable (%s)", exc)
 
 
+def _require_hub_token() -> None:
+    if not settings.LAB_HUB_API_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="LAB_HUB_API_TOKEN not configured",
+        )
+
+
+def _user_server_base(uid: int) -> str:
+    # Attraverso il proxy dell'hub (porta 8000): il token di service con
+    # scope access:servers viene validato dal server utente contro l'hub.
+    return f"{settings.LAB_HUB_PROXY_URL.rstrip('/')}/user/{uid}"
+
+
+def _hub_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"token {settings.LAB_HUB_API_TOKEN}"}
+
+
+@router.get("/workspace-file", response_model=LabWorkspaceFile)
+async def read_workspace_file(
+    path: str,
+    principal: AuthPrincipal = Depends(get_current_active_principal),
+):
+    """Read a file from the user's running Lab workspace (raw text).
+
+    Used by "Esegui ora" to snapshot the notebook being edited into a studio
+    version before running. 409 when the Lab session is not running.
+    """
+    if principal.claims.get("purpose") != "ui_auth":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="UI sessions only")
+    if path.startswith("/") or ".." in path or "?" in path or "#" in path:
+        raise HTTPException(status_code=422, detail="path must be a plain relative path")
+    _require_hub_token()
+    url = f"{_user_server_base(principal.user.id)}/api/contents/{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                url,
+                params={"content": "1", "type": "file", "format": "text"},
+                headers=_hub_auth_headers(),
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Lab session unreachable: {exc}") from None
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="File not found in the Lab workspace")
+    if response.status_code != 200:
+        # Server spento: l'hub risponde con la pagina 424/503, non col file.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="Lab session not running")
+    return LabWorkspaceFile(path=path, content=response.json().get("content") or "")
+
+
+@router.post("/theme", status_code=204)
+async def set_lab_theme(
+    payload: LabThemeRequest,
+    principal: AuthPrincipal = Depends(get_current_active_principal),
+):
+    """Align the running Jupyter session's theme with the app theme.
+
+    Best-effort by design: a stopped session simply returns 204 (the spawn
+    hook applies the theme claim at the next start).
+    """
+    if principal.claims.get("purpose") != "ui_auth":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="UI sessions only")
+    _require_hub_token()
+    jupyter_theme = "JupyterLab Light" if payload.theme == "light" else "JupyterLab Dark"
+    url = (f"{_user_server_base(principal.user.id)}"
+           "/lab/api/settings/@jupyterlab/apputils-extension:themes")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.put(
+                url,
+                json={"raw": json.dumps({"theme": jupyter_theme, "adaptive-theme": False})},
+                headers=_hub_auth_headers(),
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("lab theme update skipped (%s)", exc)
+
+
 @router.post("/launch", response_model=LabLaunch)
 async def launch_lab(
     payload: LabLaunchRequest | None = None,
@@ -88,6 +174,9 @@ async def launch_lab(
             "uid": principal.user.id,
             "role": principal.user.role,
             "studio_token": studio_token,
+            # Tema dell'app al lancio: l'hook di spawn imposta il tema
+            # Jupyter corrispondente.
+            "lab_theme": payload.theme if payload else None,
         },
         audience=settings.LAB_TOKEN_AUDIENCE,
         purpose="lab_launch",

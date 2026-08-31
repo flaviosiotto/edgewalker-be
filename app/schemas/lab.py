@@ -13,6 +13,16 @@ class LabLaunchRequest(BaseModel):
     # the workspace (needed when a studio was created after the session
     # started). No-op when the hub API token is not configured.
     fresh: bool = False
+    # App theme at launch time ("dark" | "light"): the spawn hook sets the
+    # matching Jupyter theme so the embedded notebook blends in.
+    theme: Optional[str] = None
+
+    @field_validator("theme")
+    @classmethod
+    def _known_theme(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and value not in ("dark", "light"):
+            raise ValueError("theme must be 'dark' or 'light'")
+        return value
 
     @field_validator("next_path")
     @classmethod
@@ -28,3 +38,23 @@ class LabLaunch(BaseModel):
     """One-shot launch URL for the embedded Studio Lab (JupyterHub)."""
 
     lab_url: str
+
+
+class LabThemeRequest(BaseModel):
+    """Switch the running Jupyter session's theme to match the app."""
+
+    theme: str
+
+    @field_validator("theme")
+    @classmethod
+    def _known_theme(cls, value: str) -> str:
+        if value not in ("dark", "light"):
+            raise ValueError("theme must be 'dark' or 'light'")
+        return value
+
+
+class LabWorkspaceFile(BaseModel):
+    """Raw text content of a file in the user's Lab workspace."""
+
+    path: str
+    content: str

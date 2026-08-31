@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     # (LAB_HUB_API_TOKEN, stesso valore su entrambe le app).
     LAB_HUB_API_URL: str = "http://jupyterhub:8081/lab-hub"
     LAB_HUB_API_TOKEN: Optional[str] = None
+    # Proxy pubblico dell'hub (porta 8000): il backend ci passa per parlare
+    # col server utente (contents API per "Esegui ora", settings API per il
+    # tema). Stesso token di LAB_HUB_API_TOKEN, serve scope access:servers.
+    LAB_HUB_PROXY_URL: str = "http://jupyterhub:8000/lab-hub"
     DELEGATED_TOKEN_EXPIRE_MINUTES: int = 480
     AGENT_CALLBACK_TOKEN_EXPIRE_MINUTES: int = 15
     JWT_PRIVATE_KEY: Optional[str] = None
