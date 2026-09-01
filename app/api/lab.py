@@ -112,7 +112,12 @@ async def read_workspace_file(
         # Server spento: l'hub risponde con la pagina 424/503, non col file.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail="Lab session not running")
-    return LabWorkspaceFile(path=path, content=response.json().get("content") or "")
+    data = response.json()
+    return LabWorkspaceFile(
+        path=path,
+        content=data.get("content") or "",
+        last_modified=data.get("last_modified"),
+    )
 
 
 @router.post("/theme", status_code=204)

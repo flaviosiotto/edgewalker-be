@@ -58,3 +58,6 @@ class LabWorkspaceFile(BaseModel):
 
     path: str
     content: str
+    # ISO timestamp dal contents API: il FE lo confronta con la versione
+    # corrente per non "fotografare" file mai toccati (stale del sync).
+    last_modified: Optional[str] = None
