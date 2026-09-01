@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # col server utente (contents API per "Esegui ora", settings API per il
     # tema). Stesso token di LAB_HUB_API_TOKEN, serve scope access:servers.
     LAB_HUB_PROXY_URL: str = "http://jupyterhub:8000/lab-hub"
+    # Cifratura at-rest dei secrets di piattaforma (user_secret): chiave
+    # Fernet CONDIVISA con i servizi che consegnano i valori ai runtime
+    # (studio-svc). Generare una volta e non cambiare mai.
+    SECRETS_ENCRYPTION_KEY: Optional[str] = None
     DELEGATED_TOKEN_EXPIRE_MINUTES: int = 480
     AGENT_CALLBACK_TOKEN_EXPIRE_MINUTES: int = 15
     JWT_PRIVATE_KEY: Optional[str] = None
