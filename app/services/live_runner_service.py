@@ -296,6 +296,10 @@ class LiveRunnerService:
             "AGENT_TOKEN_AUDIENCE": os.getenv("AGENT_TOKEN_AUDIENCE", "edgewalker-agent"),
             # Database URL for direct order/position persistence + config loading
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
+            # Studi legati alla strategia: il runner minta service token
+            # studios:read verso studio-svc (senza secret il feed è disattivo).
+            "INTERNAL_TOKEN_SECRET": os.getenv("INTERNAL_TOKEN_SECRET", ""),
+            "STUDIO_SVC_URL": os.getenv("STUDIO_SVC_URL", "http://studio-svc:8080"),
             # OpenTelemetry - send metrics/traces to the shared OTel Collector
             "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv(
                 "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"

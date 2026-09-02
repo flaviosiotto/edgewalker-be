@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import codecs
 import json
 import uuid
@@ -14,10 +15,14 @@ from sqlmodel import Session, select
 
 from app.models.agent import Agent, Chat
 from app.models.n8n_chat_history import N8nChatHistory
-from app.models.strategy import LiveStatus, StrategyLive
+from app.models.strategy import LiveStatus, Strategy, StrategyLive
 from app.schemas.agent import build_agent_persona_block
 from app.schemas.chat import ChatHistoryMessageRead, ChatHistoryPage, ChatSendMessageResponse
 from app.services.live_runner_service import _rewrite_webhook_for_docker
+from app.services.studio_document_service import (
+    fetch_latest_studio_documents,
+    strategy_studio_bindings,
+)
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
     build_n8n_backend_api_metadata,
@@ -206,6 +211,17 @@ def _build_webhook_payload(
         "chatInput": text,
         "metadata": base_metadata,
     }
+
+
+def _chat_studio_bindings(session: Session, chat: Chat) -> list[dict[str, Any]]:
+    """Binding Studi della strategia del chat (sola lettura DB: va chiamata
+    PRIMA del session.close() dei percorsi di invio)."""
+    if chat.strategy_id is None:
+        return []
+    strategy = session.get(Strategy, chat.strategy_id)
+    if strategy is None:
+        return []
+    return strategy_studio_bindings(strategy.definition)
 
 
 def _coerce_message_dict(raw_message: Any) -> dict[str, Any]:
@@ -596,9 +612,21 @@ def send_chat_message(
         sender_label=sender_label,
         metadata={"request_id": request_id},
     )
+    studio_bindings = _chat_studio_bindings(session, chat)
+    chat_user_id = chat.user_id
     # Highest-traffic multi-user path: the webhook can take up to 120s, so the
     # pooled DB connection must go back before the call (19/08 incident).
     session.close()
+
+    # Documenti degli Studi legati: stessi metadata dei turni ask_agent del
+    # runner, così l'agente li vede anche sui messaggi dell'utente. Dopo il
+    # close (è una chiamata HTTP, mai con la connessione del pool in mano).
+    if studio_bindings:
+        studio_docs = fetch_latest_studio_documents(
+            user_id=chat_user_id, bindings=studio_bindings
+        )
+        if studio_docs:
+            webhook_payload["metadata"].setdefault("studio_documents", studio_docs)
 
     try:
         with httpx.Client(timeout=DEFAULT_SEND_TIMEOUT) as client:
@@ -808,10 +836,23 @@ async def stream_chat_message(
         sender_label=sender_label,
         metadata={"request_id": request_id},
     )
+    studio_bindings = _chat_studio_bindings(session, chat)
+    chat_user_id = chat.user_id
     # The generator outlives the request's DB session (it streams for the whole
     # agent turn, with no read timeout): release the pooled connection now and
     # reference only the plain locals captured above — never ORM state.
     session.close()
+
+    # Come nel percorso non-stream: documenti degli Studi legati nei metadata
+    # (HTTP verso studio-svc in thread, il loop non si blocca).
+    if studio_bindings:
+        studio_docs = await asyncio.to_thread(
+            fetch_latest_studio_documents,
+            user_id=chat_user_id,
+            bindings=studio_bindings,
+        )
+        if studio_docs:
+            webhook_payload["metadata"].setdefault("studio_documents", studio_docs)
 
     async def event_stream() -> AsyncIterator[str]:
         decoder = codecs.getincrementaldecoder("utf-8")()

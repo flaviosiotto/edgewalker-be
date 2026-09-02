@@ -173,6 +173,10 @@ class BacktestRunnerService:
             "BACKEND_URL": backend_url,
             "RUNNER_AGENT_TOKEN_URL": f"{backend_url}/runners/agent-token",
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
+            # Studi legati alla strategia: replay as-of nel backtest richiede
+            # la lettura dei documenti da studio-svc (service token).
+            "INTERNAL_TOKEN_SECRET": os.getenv("INTERNAL_TOKEN_SECRET", ""),
+            "STUDIO_SVC_URL": os.getenv("STUDIO_SVC_URL", "http://studio-svc:8080"),
             "ALGORITHM": os.getenv("ALGORITHM", "RS256"),
             "JWT_ISSUER": os.getenv("JWT_ISSUER", "edgewalker-backend"),
             "JWT_PUBLIC_KEY_PATH": os.getenv("JWT_PUBLIC_KEY_PATH", "/run/secrets/edgewalker-jwt/public.pem"),
