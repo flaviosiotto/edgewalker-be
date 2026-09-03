@@ -15,7 +15,7 @@ from sqlmodel import Session, select
 
 from app.models.agent import Agent, Chat
 from app.models.n8n_chat_history import N8nChatHistory
-from app.models.strategy import LiveStatus, Strategy, StrategyLive
+from app.models.strategy import BacktestResult, LiveStatus, Strategy, StrategyLive
 from app.schemas.agent import build_agent_persona_block
 from app.schemas.chat import ChatHistoryMessageRead, ChatHistoryPage, ChatSendMessageResponse
 from app.services.live_runner_service import _rewrite_webhook_for_docker
@@ -215,13 +215,29 @@ def _build_webhook_payload(
 
 def _chat_studio_bindings(session: Session, chat: Chat) -> list[dict[str, Any]]:
     """Binding Studi della strategia del chat (sola lettura DB: va chiamata
-    PRIMA del session.close() dei percorsi di invio)."""
-    if chat.strategy_id is None:
+    PRIMA del session.close() dei percorsi di invio).
+
+    Solo le chat di design portano chat.strategy_id: quelle live/backtest
+    puntano al run (live_id/backtest_id) e la strategia va risolta da lì —
+    incidente 03/09: chat live senza documenti dello Studio appena legato.
+    Si legge la definition CORRENTE della strategia (è quella che l'utente
+    modifica legando uno Studio, anche a run in corso); lo snapshot del run
+    è il fallback se la strategia non esiste più."""
+    strategy_id = chat.strategy_id
+    snapshot: Any = None
+    if strategy_id is None and chat.live_id is not None:
+        live = session.get(StrategyLive, chat.live_id)
+        if live is not None:
+            strategy_id, snapshot = live.strategy_id, live.definition
+    elif strategy_id is None and chat.backtest_id is not None:
+        backtest = session.get(BacktestResult, chat.backtest_id)
+        if backtest is not None:
+            strategy_id, snapshot = backtest.strategy_id, backtest.config
+    if strategy_id is None:
         return []
-    strategy = session.get(Strategy, chat.strategy_id)
-    if strategy is None:
-        return []
-    return strategy_studio_bindings(strategy.definition)
+    strategy = session.get(Strategy, strategy_id)
+    definition = strategy.definition if strategy is not None else snapshot
+    return strategy_studio_bindings(definition)
 
 
 def _coerce_message_dict(raw_message: Any) -> dict[str, Any]:
