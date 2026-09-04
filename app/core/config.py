@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Credenziale iniettata nel container Lab: accettata SOLO da studio-svc.
     STUDIO_TOKEN_AUDIENCE: str = "edgewalker-studio"
     LAB_STUDIO_TOKEN_EXPIRE_MINUTES: int = 720
+    # Credenziale studio-svc scambiata da un PAT (MCP) o dalla UI via
+    # GET /users/me/studio-token: breve, il client la rinnova da solo.
+    STUDIO_ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     # API interna dell'hub (per "riavvia sessione": stop del server utente,
     # il respawn risincronizza gli Studi nel workspace). Token condiviso con
     # il service edgewalker-backend registrato in jupyterhub_config

@@ -61,3 +61,12 @@ class LabWorkspaceFile(BaseModel):
     # ISO timestamp dal contents API: il FE lo confronta con la versione
     # corrente per non "fotografare" file mai toccati (stale del sync).
     last_modified: Optional[str] = None
+
+
+class StudioAccessToken(BaseModel):
+    """Short-lived credential for studio-svc, exchanged from a PAT/UI session."""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    scopes: list[str]
