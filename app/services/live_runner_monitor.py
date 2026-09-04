@@ -37,13 +37,7 @@ class LiveRunnerMonitor:
             live_sessions = list(
                 session.exec(
                 select(StrategyLive).where(
-                    StrategyLive.status.in_(
-                        [
-                            LiveStatus.STARTING.value,
-                            LiveStatus.RUNNING.value,
-                            LiveStatus.STOPPING.value,
-                        ]
-                    )
+                    StrategyLive.status.in_(list(LiveStatus.active_values()))
                 )
                 ).all()
             )
@@ -55,7 +49,7 @@ class LiveRunnerMonitor:
             container_info = live_runner_service.get_live_instance_status(sl.id)
             container_status = container_info.get("status")
 
-            if sl.status == LiveStatus.RUNNING.value and container_status in {"not_found", "exited", "dead"}:
+            if sl.status in {LiveStatus.RUNNING.value, LiveStatus.PAUSED.value} and container_status in {"not_found", "exited", "dead"}:
                 sl.status = LiveStatus.ERROR.value
                 sl.container_id = None
                 sl.error_message = "Runner container terminated unexpectedly"

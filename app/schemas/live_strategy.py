@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from app.schemas.performance import AccountReconciliation, PerformanceBreakdownItem
 
 
-LiveStatus = Literal["stopped", "starting", "running", "stopping", "error"]
+LiveStatus = Literal["stopped", "starting", "running", "paused", "stopping", "error"]
 LiveSyncState = Literal["aligned", "stale", "missing_container", "unknown"]
 PositionSide = Literal["long", "short", "flat"]
 
@@ -97,6 +97,14 @@ class LiveStrategyStopResponse(BaseModel):
     live_id: int
     strategy_id: int
     status: str
+    message: str | None = None
+
+
+class LiveStrategyControlResponse(BaseModel):
+    """Outcome of a pause/resume request on a live session."""
+    live_id: int
+    strategy_id: int
+    status: LiveStatus
     message: str | None = None
 
 

@@ -40,12 +40,14 @@ class LiveStatus(str, Enum):
     - stopped: Initial state / after manual stop
     - starting: Container is being created
     - running: Container is running and processing events
+    - paused: Container is running but rule conditions/alerts are suspended
     - stopping: Container stop requested
     - error: Container failed or crashed
     """
     STOPPED = "stopped"
     STARTING = "starting"
     RUNNING = "running"
+    PAUSED = "paused"
     STOPPING = "stopping"
     ERROR = "error"
 
@@ -57,7 +59,7 @@ class LiveStatus(str, Enum):
         Explicitly excludes STOPPED (manually stopped) and ERROR (runner
         crashed): those must route the user back to the strategy design.
         """
-        return frozenset({cls.STARTING.value, cls.RUNNING.value, cls.STOPPING.value})
+        return frozenset({cls.STARTING.value, cls.RUNNING.value, cls.PAUSED.value, cls.STOPPING.value})
 
 
 class Strategy(SQLModel, table=True):

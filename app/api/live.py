@@ -26,6 +26,7 @@ from app.schemas.chat import ChatRead
 from app.schemas.live_strategy import (
     LiveDashboardOverviewRead,
     LivePerformanceSummary,
+    LiveStrategyControlResponse,
     LiveStrategyCreate,
     LiveStrategyDetailRead,
     LiveStrategyStartResponse,
@@ -44,7 +45,9 @@ from app.schemas.live_trading import (
 )
 import redis as _redis
 
-from app.services.live_runner_service import live_runner_service
+import httpx
+
+from app.services.live_runner_service import CONTAINER_PREFIX as LIVE_RUNNER_CONTAINER_PREFIX, live_runner_service
 from app.services.performance_service import compute_live_performance
 from app.schemas.performance import PerformanceStats
 from app.services.live_summary_service import (
@@ -556,6 +559,56 @@ async def _start_live_instance_internal(
     return sl, result
 
 
+LIVE_RUNNER_CONTROL_TIMEOUT_SECONDS = float(os.getenv("LIVE_RUNNER_CONTROL_TIMEOUT_SECONDS", "15"))
+
+
+def _runner_control_request(session: Session, sl: StrategyLive, user_id: int, action: str) -> dict[str, Any]:
+    """POST ``/strategy/{action}`` on the live runner container (pause/resume).
+
+    Unlike stop (a Docker SIGTERM), pause/resume are in-process commands: the
+    runner keeps consuming bars and only suspends rule/alert evaluation. The
+    call carries a short-lived backend token scoped ``runner:control`` and
+    bound to this live session, like the token minted at start.
+    The DB session is released before the blocking HTTP call (pool hygiene).
+    """
+    token = create_user_delegated_token(
+        session,
+        user_id=user_id,
+        audience=settings.RUNNER_TOKEN_AUDIENCE,
+        purpose="runner_backend",
+        extra_claims={"strategy_id": sl.strategy_id, "live_id": sl.id, "scopes": ["runner:control"]},
+        expires_delta=timedelta(minutes=5),
+    )
+    session.close()
+    url = f"http://{LIVE_RUNNER_CONTAINER_PREFIX}{sl.id}:8080/strategy/{action}"
+    try:
+        resp = httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=LIVE_RUNNER_CONTROL_TIMEOUT_SECONDS,
+        )
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Live runner not reachable") from exc
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Live runner request timed out") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Live runner request failed: {exc}") from exc
+    if resp.status_code >= 400:
+        detail: Any
+        try:
+            detail = resp.json().get("detail") or resp.text
+        except Exception:
+            detail = resp.text
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT if resp.status_code == 409 else status.HTTP_502_BAD_GATEWAY,
+            detail=f"Live runner refused {action}: {detail}",
+        )
+    try:
+        return resp.json()
+    except Exception:
+        return {"status": action}
+
+
 def _stop_live_instance_internal(
     session: Session,
     sl: StrategyLive,
@@ -745,6 +798,55 @@ def stop_live_instance(
         status=result.get("status", "stopped"),
         message=result.get("status") == "not_found" and "Live instance was not running (container not found)" or "Live instance stopped successfully",
     )
+
+
+@router.post("/instances/{live_id}/pause", response_model=LiveStrategyControlResponse)
+def pause_live_instance(
+    live_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Pause a live session: the runner stays up (feed, indicators, TP/SL
+    protection, manual orders) but rule conditions and alerts are suspended."""
+    sl = _get_live_or_404(session, live_id, current_user.id)
+    if sl.status == LiveStatus.PAUSED.value:
+        return LiveStrategyControlResponse(live_id=sl.id, strategy_id=sl.strategy_id, status=sl.status, message="Live instance is already paused")
+    if sl.status != LiveStatus.RUNNING.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Live instance is not running (status={sl.status})")
+
+    _runner_control_request(session, sl, current_user.id, "pause")
+
+    sl.status = LiveStatus.PAUSED.value
+    sl.updated_at = datetime.now(timezone.utc)
+    session.add(sl)
+    session.commit()
+    session.refresh(sl)
+    _append_live_checkpoint(session, sl.id, source="backend", kind="live_paused", message="Live paused: rule conditions and alerts suspended.")
+    return LiveStrategyControlResponse(live_id=sl.id, strategy_id=sl.strategy_id, status=sl.status, message="Live instance paused")
+
+
+@router.post("/instances/{live_id}/resume", response_model=LiveStrategyControlResponse)
+def resume_live_instance(
+    live_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Resume rule/alert evaluation on a paused live session."""
+    sl = _get_live_or_404(session, live_id, current_user.id)
+    if sl.status == LiveStatus.RUNNING.value:
+        return LiveStrategyControlResponse(live_id=sl.id, strategy_id=sl.strategy_id, status=sl.status, message="Live instance is already running")
+    if sl.status != LiveStatus.PAUSED.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Live instance is not paused (status={sl.status})")
+
+    _runner_control_request(session, sl, current_user.id, "resume")
+
+    sl.status = LiveStatus.RUNNING.value
+    sl.updated_at = datetime.now(timezone.utc)
+    session.add(sl)
+    session.commit()
+    session.refresh(sl)
+    _append_live_checkpoint(session, sl.id, source="backend", kind="live_resumed", message="Live resumed: rule conditions and alerts active again.")
+    return LiveStrategyControlResponse(live_id=sl.id, strategy_id=sl.strategy_id, status=sl.status, message="Live instance resumed")
 
 
 @router.get("/instances/{live_id}/status", response_model=LiveStrategySummaryRead)

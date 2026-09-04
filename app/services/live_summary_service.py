@@ -76,15 +76,11 @@ def load_container_info_for_live(sl: StrategyLive) -> dict[str, Any]:
 def derive_sync_state(sl: StrategyLive, container_info: dict[str, Any]) -> str:
     container_status = container_info.get("status")
     if container_status == "not_found":
-        if sl.status in {
-            LiveStatus.RUNNING.value,
-            LiveStatus.STARTING.value,
-            LiveStatus.STOPPING.value,
-        }:
+        if sl.status in LiveStatus.active_values():
             return "missing_container"
         return "aligned"
 
-    if sl.status == LiveStatus.RUNNING.value and container_status != "running":
+    if sl.status in {LiveStatus.RUNNING.value, LiveStatus.PAUSED.value} and container_status != "running":
         return "stale"
     if sl.status == LiveStatus.STARTING.value and container_status not in {"created", "running", "restarting"}:
         return "stale"

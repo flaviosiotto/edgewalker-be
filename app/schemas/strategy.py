@@ -8,7 +8,7 @@ from app.schemas.live_strategy import LiveStrategySummaryRead
 
 
 # Live status enum values
-LiveStatus = Literal["stopped", "starting", "running", "stopping", "error"]
+LiveStatus = Literal["stopped", "starting", "running", "paused", "stopping", "error"]
 
 
 # ─── STRATEGY LIVE (RUNTIME) SCHEMA ───
