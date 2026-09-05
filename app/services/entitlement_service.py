@@ -150,6 +150,12 @@ def ensure_current_subscription(session: Session, user_id: int) -> Optional[Subs
     return current
 
 
+def is_unlimited_user(session: Session, user_id: int) -> bool:
+    """Administrators are exempt from every plan limit (decision 05/09)."""
+    user = session.get(User, user_id)
+    return user is not None and user.role == "admin"
+
+
 def get_effective_limits(session: Session, user_id: int) -> EffectiveLimits:
     subscription = ensure_current_subscription(session, user_id)
     plan = session.get(Plan, subscription.plan_id) if subscription is not None else None
@@ -159,7 +165,9 @@ def get_effective_limits(session: Session, user_id: int) -> EffectiveLimits:
         # No plan configured at all (fresh database before the seed ran):
         # behave as unlimited rather than locking everyone out.
         plan = Plan(id=None, code="unlimited", name="Nessun piano", limits={})
-    return EffectiveLimits(plan=plan, subscription=subscription, limits=dict(plan.limits or {}))
+    # An empty mapping means "every key unlimited" (missing key -> None).
+    limits = {} if is_unlimited_user(session, user_id) else dict(plan.limits or {})
+    return EffectiveLimits(plan=plan, subscription=subscription, limits=limits)
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +650,7 @@ __all__ = [
     "get_default_plan",
     "get_effective_limits",
     "grant_ai_credits",
+    "is_unlimited_user",
     "over_limit_keys",
     "record_ai_usage",
     "usage_snapshot",

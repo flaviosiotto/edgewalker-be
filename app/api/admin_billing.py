@@ -425,9 +425,10 @@ def list_subscriptions_endpoint(
                 continue
         user_counters = counters.get(user.id, {})
         over: list[str] = []
+        effective_plan_limits = {} if user.role == "admin" else (plan.limits or {})
         for key in (LimitKey.STRATEGIES_MAX, LimitKey.LIVE_CONCURRENT_MAX,
                     LimitKey.BACKTEST_CONCURRENT_MAX, LimitKey.STUDIOS_MAX):
-            cap = limit_value(plan.limits, key)
+            cap = limit_value(effective_plan_limits, key)
             if cap is not None and user_counters.get(key.value, 0) > cap:
                 over.append(key.value)
         anchor = (sub.current_period_start or sub.created_at) if sub else now

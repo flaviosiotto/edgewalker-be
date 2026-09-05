@@ -42,6 +42,7 @@ from app.services.entitlement_service import (
     get_current_subscription,
     get_default_plan,
     get_effective_limits,
+    is_unlimited_user,
 )
 from app.services.limits import LimitKey, limit_value
 
@@ -240,7 +241,7 @@ def live_sessions_in_excess(session: Session, user_id: int, limits: dict[str, An
     """Active live sessions that exceed ``live_concurrent_max``: the N started
     first are kept, the rest are returned (newest last)."""
     cap = limit_value(limits, LimitKey.LIVE_CONCURRENT_MAX)
-    if cap is None:
+    if cap is None or is_unlimited_user(session, user_id):
         return []
     active = list(
         session.exec(
