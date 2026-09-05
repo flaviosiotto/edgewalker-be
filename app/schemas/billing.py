@@ -283,3 +283,43 @@ class CouponCreate(BaseModel):
     @classmethod
     def _upper(cls, value: str) -> str:
         return value.upper()
+
+
+# ---------------------------------------------------------------------------
+# Payments (provider adapter)
+# ---------------------------------------------------------------------------
+
+
+class BillingConfigRead(BaseModel):
+    enabled: bool
+    provider: str
+    automatic_tax: bool
+    allow_promotion_codes: bool
+
+
+class CheckoutRequest(BaseModel):
+    plan_price_id: int
+    coupon_code: Optional[str] = Field(default=None, max_length=40)
+
+
+class CheckoutResponse(BaseModel):
+    url: str
+
+
+class PortalResponse(BaseModel):
+    url: str
+
+
+class CouponValidateRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    plan_price_id: int
+
+
+class CouponValidateResponse(BaseModel):
+    valid: bool
+    code: Optional[str] = None
+    description: Optional[str] = None
+    discount_cents: Optional[int] = None
+    final_cents: Optional[int] = None
+    currency: Optional[str] = None
+    message: Optional[str] = None

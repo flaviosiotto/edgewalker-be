@@ -181,8 +181,23 @@ class Settings(BaseSettings):
     BILLING_ENDING_NOTICE_DAYS: int = 3
     # Optional copy to an operator on payment failures / live stopped by plan.
     BILLING_ADMIN_NOTIFY_EMAIL: Optional[str] = None
+    # Return URLs after the hosted checkout; empty = FRONTEND_BASE_URL defaults
+    # (/settings?tab=subscription&checkout=success, /pricing?checkout=cancel).
     BILLING_SUCCESS_URL: str = ""
     BILLING_CANCEL_URL: str = ""
+    # Stripe adapter (BILLING_PROVIDER=stripe). PayPal is enabled as a Stripe
+    # payment method from the dashboard, nothing to configure here.
+    STRIPE_SECRET_KEY: Optional[str] = None
+    STRIPE_WEBHOOK_SECRET: Optional[str] = None
+    STRIPE_PUBLISHABLE_KEY: Optional[str] = None
+    STRIPE_API_VERSION: Optional[str] = None
+    # Stripe Tax (IVA/OSS): asks for the billing address and VAT id at checkout.
+    STRIPE_AUTOMATIC_TAX: bool = False
+    # Let customers type promotion codes on the checkout page even when no
+    # coupon was pre-applied.
+    BILLING_ALLOW_PROMOTION_CODES: bool = True
+    # Daily provider reconciliation (drift between Stripe and the local DB).
+    BILLING_RECONCILE_INTERVAL_SECONDS: int = 24 * 3600
 
     BACKEND_CORS_ORIGINS: List[str] = []
 

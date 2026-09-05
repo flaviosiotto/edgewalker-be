@@ -11,17 +11,23 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from sqlmodel import Session
 
 from app.core.config import settings
 from app.db.database import get_session
-from app.models.billing import Plan, Subscription
+from app.models.billing import Plan, PlanPrice, Subscription
 from app.models.user import User
 from app.schemas.billing import (
     AiBudgetRead,
     AiUsageReportRequest,
     AiUsageReportResponse,
+    BillingConfigRead,
+    CheckoutRequest,
+    CheckoutResponse,
+    CouponValidateRequest,
+    CouponValidateResponse,
+    PortalResponse,
     PlanPriceRead,
     PlanRead,
     PublicPlanRead,
@@ -30,6 +36,14 @@ from app.schemas.billing import (
     TrialStartRequest,
     UsageItem,
 )
+from app.services.billing.checkout_service import (
+    apply_event,
+    coupon_preview,
+    create_checkout,
+    create_portal,
+    validate_coupon,
+)
+from app.services.billing.provider import get_billing_provider
 from app.services.billing.billing_service import (
     list_events,
     list_plan_prices,
@@ -264,3 +278,90 @@ def report_ai_usage(
 
 __all__ = ["router", "serialize_plan", "serialize_subscription"]
 
+
+
+# ---------------------------------------------------------------------------
+# Payments (hosted checkout, portal, coupons, provider webhook)
+# ---------------------------------------------------------------------------
+
+
+def _interactive_only(principal: AuthPrincipal) -> None:
+    if principal.claims.get("purpose") != "ui_auth":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operazione disponibile solo da una sessione interattiva",
+        )
+
+
+@router.get("/billing/config", response_model=BillingConfigRead)
+def billing_config_endpoint():
+    """Public: tells the pricing page whether paid plans can be bought."""
+    return BillingConfigRead(
+        enabled=settings.BILLING_ENABLED,
+        provider=settings.BILLING_PROVIDER if settings.BILLING_ENABLED else "none",
+        automatic_tax=settings.STRIPE_AUTOMATIC_TAX,
+        allow_promotion_codes=settings.BILLING_ALLOW_PROMOTION_CODES,
+    )
+
+
+@router.post("/billing/checkout", response_model=CheckoutResponse)
+def create_checkout_endpoint(
+    payload: CheckoutRequest,
+    session: Session = Depends(get_session),
+    principal: AuthPrincipal = Depends(get_current_active_principal),
+):
+    """Hosted checkout for a plan price; the browser is redirected to ``url``."""
+    _interactive_only(principal)
+    url = create_checkout(session, principal.user, payload.plan_price_id, payload.coupon_code)
+    return CheckoutResponse(url=url)
+
+
+@router.post("/billing/portal", response_model=PortalResponse)
+def create_portal_endpoint(
+    session: Session = Depends(get_session),
+    principal: AuthPrincipal = Depends(get_current_active_principal),
+):
+    """Provider customer portal: payment method, invoices, cancellation, plan change."""
+    _interactive_only(principal)
+    return PortalResponse(url=create_portal(session, principal.user))
+
+
+@router.post("/billing/coupons/validate", response_model=CouponValidateResponse)
+def validate_coupon_endpoint(
+    payload: CouponValidateRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Preview of a coupon on a plan price, from the local rules."""
+    price = session.get(PlanPrice, payload.plan_price_id)
+    plan = session.get(Plan, price.plan_id) if price is not None else None
+    if price is None or plan is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tariffa non trovata")
+    try:
+        coupon = validate_coupon(session, payload.code, plan, current_user.id)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+        return CouponValidateResponse(valid=False, message=detail.get("message"))
+    preview = coupon_preview(coupon, price)
+    return CouponValidateResponse(valid=True, code=coupon.code, **preview)
+
+
+@router.post("/billing/webhooks/{provider_name}", include_in_schema=False)
+async def billing_webhook_endpoint(
+    provider_name: str,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Provider webhook. Signature verified by the adapter, events deduplicated
+    on ``(provider, event_id)`` and applied synchronously: a failure returns
+    500 so the provider retries the delivery."""
+    provider = get_billing_provider()
+    if not settings.BILLING_ENABLED or provider.name != provider_name.lower():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown billing provider")
+    body = await request.body()
+    events = provider.parse_webhook(body=body, headers=dict(request.headers))
+    applied = 0
+    for event in events:
+        if apply_event(session, event):
+            applied += 1
+    return Response(content=f'{{"received": true, "applied": {applied}}}', media_type="application/json")

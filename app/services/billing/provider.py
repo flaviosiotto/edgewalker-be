@@ -8,8 +8,8 @@ canceled". Everything provider-specific stays inside an adapter implementing
 entities are stored in ``billing_external_ref`` (see
 ``app.models.billing.BillingExternalRef``), never on the domain tables.
 
-Phase 1 ships the :class:`NullProvider` (no payments: trials, free and
-manual plans work end to end). Phase 3 adds ``stripe_provider.py``.
+Adapters: :class:`NullProvider` (no payments: trials, free and manual plans
+work end to end) and ``stripe_provider.StripeProvider`` (phase 3).
 """
 
 from __future__ import annotations
@@ -23,12 +23,30 @@ from fastapi import HTTPException, status
 
 
 class BillingEventType(str, Enum):
+    #: hosted checkout finished: a provider subscription now exists for a user
+    CHECKOUT_COMPLETED = "checkout_completed"
+    #: first invoice of a subscription paid
     SUBSCRIPTION_ACTIVATED = "subscription_activated"
+    #: a renewal invoice paid
     SUBSCRIPTION_RENEWED = "subscription_renewed"
+    #: the provider changed status / period / price / cancel flag
+    SUBSCRIPTION_UPDATED = "subscription_updated"
     PAYMENT_FAILED = "payment_failed"
-    SUBSCRIPTION_CANCELED = "subscription_canceled"  # cancel scheduled at period end
+    #: cancellation scheduled at period end
+    SUBSCRIPTION_CANCELED = "subscription_canceled"
+    #: the provider subscription no longer exists
     SUBSCRIPTION_ENDED = "subscription_ended"
     TRIAL_WILL_END = "trial_will_end"
+
+
+class BillingSubscriptionStatus(str, Enum):
+    """Provider status normalized to our vocabulary."""
+
+    TRIALING = "trialing"
+    ACTIVE = "active"
+    PAST_DUE = "past_due"
+    CANCELED = "canceled"
+    EXPIRED = "expired"
 
 
 @dataclass
@@ -42,9 +60,14 @@ class BillingEvent:
     subscription_external_id: Optional[str] = None
     customer_external_id: Optional[str] = None
     price_external_id: Optional[str] = None
+    status: Optional[str] = None
     period_start: Optional[datetime] = None
     period_end: Optional[datetime] = None
     cancel_at_period_end: Optional[bool] = None
+    #: metadata we attached at checkout (user_id, plan_id, plan_price_id, coupon_id)
+    metadata: dict[str, str] = field(default_factory=dict)
+    #: e.g. invoice billing reason ("subscription_create" / "subscription_cycle")
+    reason: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -57,11 +80,12 @@ class CheckoutSession:
 @dataclass
 class ProviderSubscription:
     external_id: str
-    status: str  # normalized: trialing | active | past_due | canceled | expired
+    status: str  # BillingSubscriptionStatus value
     period_start: Optional[datetime]
     period_end: Optional[datetime]
     cancel_at_period_end: bool
     price_external_id: Optional[str] = None
+    customer_external_id: Optional[str] = None
 
 
 class BillingProvider(Protocol):
@@ -74,24 +98,47 @@ class BillingProvider(Protocol):
         *,
         customer_external_id: str,
         price_external_id: str,
-        coupon_external_id: Optional[str],
+        promotion_code_external_id: Optional[str],
         success_url: str,
         cancel_url: str,
         metadata: dict[str, str],
+        allow_promotion_codes: bool,
     ) -> CheckoutSession: ...
 
     def create_portal(self, *, customer_external_id: str, return_url: str) -> str: ...
 
     def sync_plan_price(
-        self, *, plan_code: str, plan_name: str, interval: str, amount_cents: int, currency: str,
-        existing_external_id: Optional[str],
-    ) -> str: ...
+        self,
+        *,
+        plan_code: str,
+        plan_name: str,
+        interval: str,
+        amount_cents: int,
+        currency: str,
+        existing_product_id: Optional[str],
+        existing_price_id: Optional[str],
+    ) -> tuple[str, str]:
+        """Returns ``(product_external_id, price_external_id)``; a changed
+        amount yields a new price (provider prices are immutable)."""
+        ...
 
-    def sync_coupon(self, *, code: str, kind: str, value: int, currency: Optional[str], duration: str,
-                    duration_months: Optional[int], max_redemptions: Optional[int],
-                    valid_until: Optional[datetime]) -> str: ...
+    def sync_coupon(
+        self,
+        *,
+        code: str,
+        kind: str,
+        value: int,
+        currency: Optional[str],
+        duration: str,
+        duration_months: Optional[int],
+        max_redemptions: Optional[int],
+        valid_until: Optional[datetime],
+        product_external_ids: Optional[list[str]],
+    ) -> dict[str, str]:
+        """Returns ``{"coupon": <id>, "promotion_code": <id>}``."""
+        ...
 
-    def deactivate_coupon(self, *, coupon_external_id: str) -> None: ...
+    def deactivate_coupon(self, *, promotion_code_external_id: str) -> None: ...
 
     def cancel_subscription(self, *, subscription_external_id: str, at_period_end: bool) -> None: ...
 
@@ -116,7 +163,7 @@ class NullProvider:
 
     name = "none"
 
-    def ensure_customer(self, *, user_id: int, email: str, display_name: str) -> str:
+    def ensure_customer(self, **kwargs: Any) -> str:
         raise _payments_disabled()
 
     def create_checkout(self, **kwargs: Any) -> CheckoutSession:
@@ -125,10 +172,10 @@ class NullProvider:
     def create_portal(self, **kwargs: Any) -> str:
         raise _payments_disabled()
 
-    def sync_plan_price(self, **kwargs: Any) -> str:
+    def sync_plan_price(self, **kwargs: Any) -> tuple[str, str]:
         raise _payments_disabled()
 
-    def sync_coupon(self, **kwargs: Any) -> str:
+    def sync_coupon(self, **kwargs: Any) -> dict[str, str]:
         raise _payments_disabled()
 
     def deactivate_coupon(self, **kwargs: Any) -> None:
@@ -159,8 +206,14 @@ def get_billing_provider() -> BillingProvider:
         return _provider
     name = (settings.BILLING_PROVIDER or "").strip().lower()
     if name == "stripe":
-        from app.services.billing.stripe_provider import StripeProvider  # phase 3
+        from app.services.billing.stripe_provider import StripeProvider
 
         _provider = StripeProvider()
         return _provider
     raise RuntimeError(f"Unknown BILLING_PROVIDER: {settings.BILLING_PROVIDER!r}")
+
+
+def billing_enabled() -> bool:
+    from app.core.config import settings
+
+    return bool(settings.BILLING_ENABLED)

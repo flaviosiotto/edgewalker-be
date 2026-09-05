@@ -33,7 +33,6 @@ from app.models.billing import (
 )
 from app.models.strategy import LiveStatus, Strategy, StrategyLive
 from app.models.user import User
-from app.services.billing.provider import BillingEvent, BillingEventType
 from app.services.email_service import queue_email
 from app.services import email_templates
 from app.services.entitlement_service import (
@@ -536,108 +535,17 @@ def cancel_subscription_by_admin(
     session: Session, user: User, *, actor: User, background_tasks: BackgroundTasks | None = None
 ) -> Subscription:
     current = get_current_subscription(session, user.id)
-    if current is not None and current.provider == "stripe":
+    if current is not None and settings.BILLING_ENABLED and current.provider not in {"none", "manual"}:
+        from app.services.billing.checkout_service import ENTITY_SUBSCRIPTION, get_external_ref
         from app.services.billing.provider import get_billing_provider
-        from app.models.billing import BillingExternalRef
 
-        ref = session.exec(
-            select(BillingExternalRef)
-            .where(BillingExternalRef.entity_type == "subscription")
-            .where(BillingExternalRef.entity_id == current.id)
-        ).first()
+        provider = get_billing_provider()
+        ref = get_external_ref(session, ENTITY_SUBSCRIPTION, current.id, provider.name)
         if ref is not None:
-            get_billing_provider().cancel_subscription(subscription_external_id=ref.external_id, at_period_end=False)
+            provider.cancel_subscription(subscription_external_id=ref.external_id, at_period_end=False)
     return move_to_default_plan(
         session, user, reason="admin_cancel", actor_user_id=actor.id, background_tasks=background_tasks
     )
-
-
-# ---------------------------------------------------------------------------
-# Provider events (phase 3 wires the Stripe adapter to this)
-# ---------------------------------------------------------------------------
-
-
-def apply_event(session: Session, event: BillingEvent, *, background_tasks: BackgroundTasks | None = None) -> bool:
-    """Apply one normalized provider event. Returns False when the event was
-    already processed (idempotent on ``(provider, event_id)``)."""
-    from app.models.billing import BillingExternalRef
-
-    duplicate = session.exec(
-        select(SubscriptionEvent.id)
-        .where(SubscriptionEvent.provider == event.provider)
-        .where(SubscriptionEvent.provider_event_id == event.event_id)
-    ).first()
-    if duplicate is not None:
-        return False
-
-    ref = None
-    if event.subscription_external_id:
-        ref = session.exec(
-            select(BillingExternalRef)
-            .where(BillingExternalRef.provider == event.provider)
-            .where(BillingExternalRef.entity_type == "subscription")
-            .where(BillingExternalRef.external_id == event.subscription_external_id)
-        ).first()
-    subscription = session.get(Subscription, ref.entity_id) if ref is not None else None
-    if subscription is None:
-        # user_id is NOT NULL on subscription_event: unmatched events are
-        # only logged (the provider retries; phase 3 reconciles daily).
-        logger.warning("Billing event %s/%s for unknown subscription %s", event.provider, event.event_id,
-                       event.subscription_external_id)
-        return False
-
-    user = session.get(User, subscription.user_id)
-    plan = session.get(Plan, subscription.plan_id)
-    now = _utcnow()
-    if event.type in {BillingEventType.SUBSCRIPTION_ACTIVATED, BillingEventType.SUBSCRIPTION_RENEWED}:
-        renewed = subscription.status == SubscriptionStatus.ACTIVE.value
-        subscription.status = SubscriptionStatus.ACTIVE.value
-        subscription.trial_end = None
-        if event.period_start:
-            subscription.current_period_start = event.period_start
-        if event.period_end:
-            subscription.current_period_end = event.period_end
-        if event.cancel_at_period_end is not None:
-            subscription.cancel_at_period_end = event.cancel_at_period_end
-        subscription.updated_at = now
-        session.add(subscription)
-        builder = email_templates.subscription_renewed_email if renewed else email_templates.subscription_activated_email
-    elif event.type == BillingEventType.PAYMENT_FAILED:
-        subscription.status = SubscriptionStatus.PAST_DUE.value
-        subscription.updated_at = now
-        session.add(subscription)
-        builder = email_templates.payment_failed_email
-    elif event.type == BillingEventType.SUBSCRIPTION_CANCELED:
-        subscription.cancel_at_period_end = True
-        if event.period_end:
-            subscription.current_period_end = event.period_end
-        subscription.updated_at = now
-        session.add(subscription)
-        builder = email_templates.cancel_scheduled_email
-    elif event.type == BillingEventType.SUBSCRIPTION_ENDED:
-        log_event(
-            session, user_id=subscription.user_id, subscription_id=subscription.id, type=event.type.value,
-            payload=event.raw, provider=event.provider, provider_event_id=event.event_id,
-        )
-        session.commit()
-        if user is not None:
-            move_to_default_plan(session, user, reason="provider_ended", background_tasks=background_tasks)
-        return True
-    else:  # TRIAL_WILL_END and anything informational
-        builder = None
-
-    log_event(
-        session, user_id=subscription.user_id, subscription_id=subscription.id, type=event.type.value,
-        payload=event.raw, provider=event.provider, provider_event_id=event.event_id,
-    )
-    session.commit()
-
-    if builder is not None and user is not None and plan is not None:
-        subject, text_body, html_body = builder(
-            display_name=user.display_name, plan_name=plan.name, period_end=subscription.current_period_end
-        )
-        queue_email(background_tasks, to_address=user.email, subject=subject, text_body=text_body, html_body=html_body)
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +563,7 @@ def sweep_expired_subscriptions(session: Session, *, now: datetime | None = None
         session.exec(
             select(Subscription)
             .where(Subscription.status.in_(list(SubscriptionStatus.current_values())))
-            .where(Subscription.provider != "stripe")
+            .where(Subscription.provider.in_(["none", "manual"]))
         ).all()
     )
     ended = 0
@@ -737,7 +645,6 @@ def next_period_end(subscription: Subscription) -> Optional[datetime]:
 
 
 __all__ = [
-    "apply_event",
     "assign_plan_manually",
     "cancel_subscription_by_admin",
     "ensure_billing_schema",

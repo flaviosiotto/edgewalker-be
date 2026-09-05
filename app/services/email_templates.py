@@ -491,3 +491,24 @@ def ai_credits_exhausted_email(*, display_name: str, used: int, granted: int, re
         + _BUTTON.format(url=escape(url, quote=True), label="Piani con piu' crediti"),
     )
     return subject, text_body, html_body
+
+
+def subscription_changed_email(*, display_name: str, old_plan_name: str, new_plan_name: str, period_end):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = f"Il tuo piano e' cambiato: {new_plan_name}"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"il tuo abbonamento e' passato dal piano {old_plan_name} al piano {new_plan_name}"
+        + (f" (periodo corrente fino al {_fmt_date(period_end)})" if period_end else "")
+        + f".\n{url}\n"
+    )
+    html_body = _render(
+        f"Piano cambiato: {new_plan_name}",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"il tuo abbonamento e' passato dal piano {old_plan_name} al piano {new_plan_name}"
+            + (f" (periodo corrente fino al {_fmt_date(period_end)})." if period_end else ".")
+        )
+        + _BUTTON.format(url=escape(url, quote=True), label="Il mio abbonamento"),
+    )
+    return subject, text_body, html_body

@@ -310,6 +310,18 @@ def create_coupon_endpoint(
     session.add(coupon)
     session.commit()
     session.refresh(coupon)
+    if settings.BILLING_ENABLED:
+        # Mirror on the provider right away so the code also works when typed
+        # directly on the hosted checkout page.
+        from app.services.billing.checkout_service import ensure_coupon_refs
+        from app.services.billing.provider import get_billing_provider
+
+        try:
+            ensure_coupon_refs(session, coupon, get_billing_provider())
+        except HTTPException:
+            session.delete(coupon)
+            session.commit()
+            raise
     return coupon
 
 
@@ -323,17 +335,9 @@ def revoke_coupon_endpoint(coupon_id: int, session: Session = Depends(get_sessio
         session.add(coupon)
         session.commit()
         session.refresh(coupon)
-        if settings.BILLING_ENABLED:
-            from app.models.billing import BillingExternalRef
-            from app.services.billing.provider import get_billing_provider
+        from app.services.billing.checkout_service import deactivate_coupon_on_provider
 
-            ref = session.exec(
-                select(BillingExternalRef)
-                .where(BillingExternalRef.entity_type == "coupon")
-                .where(BillingExternalRef.entity_id == coupon.id)
-            ).first()
-            if ref is not None:
-                get_billing_provider().deactivate_coupon(coupon_external_id=ref.external_id)
+        deactivate_coupon_on_provider(session, coupon)
     return coupon
 
 

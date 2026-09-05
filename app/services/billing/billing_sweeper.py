@@ -14,19 +14,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from app.core.config import settings
 from app.db.database import get_session_context
 from app.services.billing.billing_service import sweep_ending_notices, sweep_expired_subscriptions
+from app.services.billing.checkout_service import reconcile_provider_subscriptions
 
 logger = logging.getLogger(__name__)
 
+_last_reconcile_at = 0.0
+
 
 def sweep_once_sync() -> tuple[int, int]:
+    global _last_reconcile_at
     with get_session_context() as session:
         ended = sweep_expired_subscriptions(session)
     with get_session_context() as session:
         notified = sweep_ending_notices(session)
+    if settings.BILLING_ENABLED and time.time() - _last_reconcile_at >= settings.BILLING_RECONCILE_INTERVAL_SECONDS:
+        _last_reconcile_at = time.time()
+        with get_session_context() as session:
+            changed = reconcile_provider_subscriptions(session)
+        if changed:
+            logger.info("Billing reconcile: %d subscription(s) updated from the provider", changed)
     return ended, notified
 
 
