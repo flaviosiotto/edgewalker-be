@@ -71,6 +71,23 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
+def _metadata(obj: Any) -> dict[str, str]:
+    """``metadata`` as ``{str: str}``. stripe-python >= 12 returns a
+    ``StripeObject`` that is neither iterable nor a mapping, so ``dict()`` on it
+    raises; plain dicts arrive from tests."""
+    value = _get(obj, "metadata", None)
+    if value is None:
+        return {}
+    if hasattr(value, "to_dict"):
+        value = value.to_dict()
+    if not isinstance(value, dict):
+        try:
+            value = dict(value)
+        except (TypeError, ValueError):
+            return {}
+    return {str(k): str(v) for k, v in value.items()}
+
+
 def _provider_error(exc: Exception) -> HTTPException:
     message = getattr(exc, "user_message", None) or str(exc)
     logger.warning("Stripe error: %s", message)
@@ -128,7 +145,7 @@ def map_event(event: Any) -> list[BillingEvent]:
             return []
         subscription = _get(obj, "subscription")
         customer = _get(obj, "customer")
-        metadata = dict(_get(obj, "metadata", {}) or {})
+        metadata = _metadata(obj)
         return [
             BillingEvent(
                 type=BillingEventType.CHECKOUT_COMPLETED,
@@ -136,7 +153,7 @@ def map_event(event: Any) -> list[BillingEvent]:
                 event_id=event_id,
                 subscription_external_id=subscription if isinstance(subscription, str) else str(_get(subscription, "id")),
                 customer_external_id=customer if isinstance(customer, str) else str(_get(customer, "id")),
-                metadata={str(k): str(v) for k, v in metadata.items()},
+                metadata=metadata,
                 raw=raw,
             )
         ]
@@ -155,7 +172,7 @@ def map_event(event: Any) -> list[BillingEvent]:
                 period_start=sub.period_start,
                 period_end=sub.period_end,
                 cancel_at_period_end=sub.cancel_at_period_end,
-                metadata={str(k): str(v) for k, v in (dict(_get(obj, "metadata", {}) or {})).items()},
+                metadata=_metadata(obj),
                 raw=raw,
             )
         ]
@@ -315,24 +332,28 @@ class StripeProvider:
             product_id = existing_product_id
             if product_id:
                 product = stripe.Product.retrieve(product_id)
-                if product.get("name") != plan_name or not product.get("active", True):
+                if _get(product, "name") != plan_name or not _get(product, "active", True):
                     stripe.Product.modify(product_id, name=plan_name, active=True)
             else:
                 product = stripe.Product.create(name=plan_name, metadata={"plan_code": plan_code})
                 product_id = str(product["id"])
 
             if existing_price_id:
+                # StripeObject (stripe-python >= 12) has no ``.get``: go through ``_get``.
                 price = stripe.Price.retrieve(existing_price_id)
-                price_recurring = price.get("recurring") or {}
+                price_recurring = _get(price, "recurring")
+                price_product = _get(price, "product")
+                if price_product is not None and not isinstance(price_product, str):
+                    price_product = _get(price_product, "id")
                 same = (
-                    int(price.get("unit_amount") or -1) == int(amount_cents)
-                    and str(price.get("currency", "")).lower() == currency.lower()
-                    and price_recurring.get("interval") == recurring["interval"]
-                    and int(price_recurring.get("interval_count") or 0) == recurring["interval_count"]
-                    and price.get("product") == product_id
+                    int(_get(price, "unit_amount") or -1) == int(amount_cents)
+                    and str(_get(price, "currency", "")).lower() == currency.lower()
+                    and _get(price_recurring, "interval") == recurring["interval"]
+                    and int(_get(price_recurring, "interval_count") or 0) == recurring["interval_count"]
+                    and price_product == product_id
                 )
                 if same:
-                    if not price.get("active", True):
+                    if not _get(price, "active", True):
                         stripe.Price.modify(existing_price_id, active=True)
                     return product_id, existing_price_id
                 # Prices are immutable: archive the old one, create the new one.
