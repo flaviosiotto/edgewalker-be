@@ -29,4 +29,7 @@ opentelemetry-instrumentation-httpx>=0.46b0
 opentelemetry-instrumentation-redis>=0.46b0
 opentelemetry-instrumentation-sqlalchemy>=0.46b0
 opentelemetry-instrumentation-psycopg2>=0.46b0
-opentelemetry-instrumentation-logging>=0.46b0stripe>=12.0.0
+opentelemetry-instrumentation-logging>=0.46b0
+
+# Payment provider adapter (app/services/billing/stripe_provider.py)
+stripe>=12.0.0
