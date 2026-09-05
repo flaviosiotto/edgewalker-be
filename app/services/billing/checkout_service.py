@@ -131,6 +131,44 @@ def ensure_price_ref(session: Session, plan: Plan, price: PlanPrice, provider: B
     return price_id
 
 
+def sync_plan_prices(session: Session, plan: Plan, provider: BillingProvider) -> dict[int, str]:
+    """Every active price of a plan on the provider, keyed by local price id.
+
+    The customer portal lets a subscriber switch between the prices of a
+    product, so all of them must exist on the provider, not only the one being
+    bought."""
+    prices = session.exec(
+        select(PlanPrice).where(PlanPrice.plan_id == plan.id).where(PlanPrice.is_active == True)  # noqa: E712
+    ).all()
+    return {price.id: ensure_price_ref(session, plan, price, provider) for price in prices}
+
+
+def sync_catalog(session: Session) -> list[dict[str, Any]]:
+    """Create/refresh products and prices on the provider for every active,
+    non-default plan. Admin action: lets the provider-side portal be configured
+    (eligible products) before the first sale."""
+    provider = get_billing_provider()
+    rows: list[dict[str, Any]] = []
+    plans = session.exec(select(Plan).where(Plan.is_active == True).order_by(Plan.sort_order, Plan.id)).all()  # noqa: E712
+    for plan in plans:
+        if plan.is_default:
+            continue
+        synced = sync_plan_prices(session, plan, provider)
+        product_ref = get_external_ref(session, ENTITY_PLAN, plan.id, provider.name)
+        for price_id, price_external_id in synced.items():
+            price = session.get(PlanPrice, price_id)
+            rows.append({
+                "plan_code": plan.code,
+                "plan_name": plan.name,
+                "interval": price.interval if price else None,
+                "amount_cents": price.amount_cents if price else None,
+                "currency": price.currency if price else None,
+                "product_external_id": product_ref.external_id if product_ref else None,
+                "price_external_id": price_external_id,
+            })
+    return rows
+
+
 def ensure_coupon_refs(session: Session, coupon: Coupon, provider: BillingProvider) -> str:
     """Provider promotion code for a local coupon (created on first use)."""
     ref = get_external_ref(session, ENTITY_COUPON, coupon.id, provider.name)
@@ -276,7 +314,10 @@ def create_checkout(session: Session, user: User, plan_price_id: int, coupon_cod
         promotion_code_id = ensure_coupon_refs(session, coupon, provider)
 
     customer_id = ensure_customer_ref(session, user, provider)
-    price_external_id = ensure_price_ref(session, plan, price, provider)
+    # All the plan's prices, so the portal can switch period later.
+    price_external_id = sync_plan_prices(session, plan, provider).get(price.id) or ensure_price_ref(
+        session, plan, price, provider
+    )
     metadata = {
         "user_id": str(user.id),
         "plan_id": str(plan.id),

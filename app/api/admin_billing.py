@@ -27,6 +27,7 @@ from app.models.strategy import BacktestResult, BacktestStatus, LiveStatus, Stra
 from app.models.user import User
 from app.schemas.auth import MessageResponse
 from app.schemas.billing import (
+    CatalogSyncRow,
     AdminAssignPlanRequest,
     AdminExtendRequest,
     AdminGrantCreditsRequest,
@@ -234,6 +235,18 @@ def delete_plan_endpoint(plan_id: int, session: Session = Depends(get_session)):
 # ---------------------------------------------------------------------------
 # AI model rates
 # ---------------------------------------------------------------------------
+
+
+@router.post("/billing/sync-catalog", response_model=list[CatalogSyncRow])
+def sync_catalog_endpoint(session: Session = Depends(get_session)):
+    """Create/refresh products and prices on the payment provider for every
+    active paid plan, so the provider's customer portal can be configured
+    (eligible products for plan switching) before the first sale."""
+    if not settings.BILLING_ENABLED:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Pagamenti disabilitati (BILLING_ENABLED=false)")
+    from app.services.billing.checkout_service import sync_catalog
+
+    return sync_catalog(session)
 
 
 @router.get("/ai-model-rates", response_model=list[AiModelRateRead])

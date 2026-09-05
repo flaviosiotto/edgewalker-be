@@ -323,3 +323,13 @@ class CouponValidateResponse(BaseModel):
     final_cents: Optional[int] = None
     currency: Optional[str] = None
     message: Optional[str] = None
+
+
+class CatalogSyncRow(BaseModel):
+    plan_code: str
+    plan_name: str
+    interval: Optional[str] = None
+    amount_cents: Optional[int] = None
+    currency: Optional[str] = None
+    product_external_id: Optional[str] = None
+    price_external_id: Optional[str] = None
