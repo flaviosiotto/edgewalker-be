@@ -555,3 +555,59 @@ def create_user_delegated_token(
         expires_delta=expires_delta,
         no_expiry=no_expiry,
     )
+
+
+async def get_current_ai_usage_principal(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+) -> AuthPrincipal:
+    """Who may report AI usage for a turn (POST /ai-usage/report).
+
+    The n8n workflow ends a turn with whichever token it was handed in
+    ``metadata.api_auth`` — a UI access token (``n8n_chat_api_access``), a
+    consultative token (``agent_backend_consult`` / ``n8n_backend_consult``)
+    or a runner-callback token — and the strategy-runner reports its own
+    estimate with its delegated runner token. All of them resolve to the
+    user the usage is charged to.
+    """
+    credentials_exception = _credentials_exception("Could not validate usage reporter credentials")
+
+    pat_principal = _try_pat_principal(request, token, session)
+    if pat_principal is not None:
+        if not pat_principal.user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+        _release_auth_connection(session)
+        return pat_principal
+
+    access_payload = decode_token(token, audience=settings.ACCESS_TOKEN_AUDIENCE)
+    if access_payload is not None:
+        principal = _load_principal_from_payload(
+            access_payload,
+            session,
+            allowed_token_types={"access"},
+            credentials_exception=credentials_exception,
+        )
+        _release_auth_connection(session)
+        return principal
+
+    delegated_payload = decode_token_for_audiences(
+        token,
+        [settings.RUNNER_TOKEN_AUDIENCE, settings.AGENT_TOKEN_AUDIENCE, settings.N8N_TOKEN_AUDIENCE],
+    )
+    if delegated_payload is None:
+        raise credentials_exception
+    principal = _load_principal_from_payload(
+        delegated_payload,
+        session,
+        allowed_token_types={"delegated"},
+        allowed_purposes={
+            "runner_backend",
+            "agent_backend_consult",
+            "n8n_backend_consult",
+            "agent_runner_callback",
+        },
+        credentials_exception=credentials_exception,
+    )
+    _release_auth_connection(session)
+    return principal

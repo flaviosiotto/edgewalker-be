@@ -48,6 +48,8 @@ import redis as _redis
 import httpx
 
 from app.services.live_runner_service import CONTAINER_PREFIX as LIVE_RUNNER_CONTAINER_PREFIX, live_runner_service
+from app.services.entitlement_service import assert_within
+from app.services.limits import LimitKey
 from app.services.performance_service import compute_live_performance
 from app.schemas.performance import PerformanceStats
 from app.services.live_summary_service import (
@@ -370,6 +372,10 @@ async def _start_live_instance_internal(
     manager_agent_id: int | None = None,
 ) -> tuple[StrategyLive, dict[str, Any]]:
     strategy = _get_strategy_or_404(session, strategy_id, user_id)
+
+    # Plan limit on concurrent live sessions (row lock on the subscription so
+    # two simultaneous starts cannot both pass with a cap of 1).
+    assert_within(session, user_id, LimitKey.LIVE_CONCURRENT_MAX, lock=True)
 
     # Manager agent per-sessione: esplicito dal payload di start, altrimenti
     # il manager della strategia. L'agent esplicito deve appartenere all'utente.
@@ -757,6 +763,8 @@ async def create_live_instance(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to create live instance for strategy %s", payload.strategy_id)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc

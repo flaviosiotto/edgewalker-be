@@ -46,6 +46,20 @@ def create_db_and_tables():
     from app.models.connection import Connection, Account  # noqa: F401
     from app.models.live_trading import LiveOrder, LiveFill, LivePosition, LiveTrade  # noqa: F401
     from app.models.marketdata import SymbolCache, SymbolSyncLog  # noqa: F401
+    from app.models.agent_call import AgentCall  # noqa: F401
+    from app.models.billing import (  # noqa: F401
+        AiCreditLedger,
+        AiCreditPeriod,
+        AiModelRate,
+        BillingExternalRef,
+        Coupon,
+        CouponRedemption,
+        Plan,
+        PlanPrice,
+        Subscription,
+        SubscriptionEvent,
+        TrialGrant,
+    )
 
     bootstrap_tables = [
         table

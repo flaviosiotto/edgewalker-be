@@ -31,11 +31,15 @@ from app.api.pats import router as pats_router
 from app.api.lab import router as lab_router
 from app.api.secrets import router as secrets_router
 from app.api.studio_access import router as studio_access_router
+from app.api.billing import router as billing_router
+from app.api.admin_billing import router as admin_billing_router
 from app.services.connection_events import install_connection_event_listeners
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
 from app.services.backtest_runner_monitor import start_backtest_runner_monitor, stop_backtest_runner_monitor
 from app.services.chat_realtime import start_chat_realtime, stop_chat_realtime
+from app.services.billing.billing_service import ensure_billing_schema, ensure_billing_seed
+from app.services.billing.billing_sweeper import start_billing_sweeper, stop_billing_sweeper
 from app.utils.auth_utils import get_current_active_user
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -54,6 +58,12 @@ async def lifespan(app: FastAPI):
     with get_session_context() as session:
         ensure_bootstrap_admin(session)
 
+    # Subscription plans: the user_effective_limits view (create_all knows
+    # nothing about views) + default plan for every account.
+    ensure_billing_schema()
+    with get_session_context() as session:
+        ensure_billing_seed(session)
+
     # Must precede the connection manager: its startup reset is the first
     # status write we want relayed to connected clients.
     install_connection_event_listeners()
@@ -71,9 +81,13 @@ async def lifespan(app: FastAPI):
     start_chat_realtime()
     logging.getLogger(__name__).info("Started chat realtime listener")
 
+    await start_billing_sweeper()
+    logging.getLogger(__name__).info("Started billing sweeper")
+
     yield
 
     # Cleanup
+    await stop_billing_sweeper()
     stop_chat_realtime()
     await stop_backtest_runner_monitor()
     await stop_live_runner_monitor()
@@ -148,6 +162,8 @@ app.add_middleware(TrackIDMiddleware)
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(admin_users_router)
+app.include_router(admin_billing_router)
+app.include_router(billing_router)
 app.include_router(system_router)
 app.include_router(agents_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(chats_router, dependencies=[Depends(get_current_active_user)])

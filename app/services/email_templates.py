@@ -233,3 +233,261 @@ def password_changed_email(*, display_name: str):
     )
 
     return subject, text_body, html_body
+
+
+# ---------------------------------------------------------------------------
+# Subscription plans (docs/piani-abbonamento-studio.md §6)
+# ---------------------------------------------------------------------------
+
+
+def _fmt_date(value) -> str:
+    if value is None:
+        return "-"
+    try:
+        return value.strftime("%d/%m/%Y")
+    except AttributeError:
+        return str(value)
+
+
+def _live_list_text(items: list[str], intro: str) -> str:
+    if not items:
+        return ""
+    return intro + "\n" + "".join(f"- {item}\n" for item in items)
+
+
+def _live_list_html(items: list[str], intro: str) -> str:
+    if not items:
+        return ""
+    rows = "".join(f'<li style="margin:0 0 4px;">{escape(item)}</li>' for item in items)
+    return _paragraph(intro) + f'<ul style="margin:0 0 12px;padding-left:20px;font-size:15px;line-height:22px;">{rows}</ul>'
+
+
+def trial_started_email(*, display_name: str, plan_name: str, trial_end):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = f"La tua prova del piano {plan_name} e' iniziata"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"la prova gratuita del piano {plan_name} e' attiva fino al {_fmt_date(trial_end)}.\n"
+        "Alla scadenza tornerai al piano gratuito: potrai attivare il piano in qualsiasi momento da qui:\n"
+        f"{url}\n"
+    )
+    html_body = _render(
+        f"Prova del piano {plan_name} iniziata",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(f"la prova gratuita del piano {plan_name} e' attiva fino al {_fmt_date(trial_end)}.")
+        + _paragraph("Alla scadenza tornerai al piano gratuito. Puoi attivare il piano in qualsiasi momento.")
+        + _BUTTON.format(url=escape(url, quote=True), label="Il mio abbonamento"),
+    )
+    return subject, text_body, html_body
+
+
+def trial_ending_email(*, display_name: str, plan_name: str, ends_at, live_to_stop: list[str]):
+    url = build_frontend_url("pricing")
+    subject = f"La tua prova del piano {plan_name} termina il {_fmt_date(ends_at)}"
+    warn_text = "Le live in eccesso rispetto al piano gratuito verranno fermate alla scadenza:"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"la prova gratuita del piano {plan_name} termina il {_fmt_date(ends_at)}.\n"
+        + _live_list_text(live_to_stop, warn_text)
+        + "Per continuare senza interruzioni attiva il piano da qui:\n"
+        f"{url}\n"
+    )
+    html_body = _render(
+        f"La prova del piano {plan_name} sta per terminare",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(f"la prova gratuita del piano {plan_name} termina il {_fmt_date(ends_at)}.")
+        + _live_list_html(live_to_stop, warn_text)
+        + _paragraph("Per continuare senza interruzioni attiva il piano.")
+        + _BUTTON.format(url=escape(url, quote=True), label="Attiva il piano"),
+    )
+    return subject, text_body, html_body
+
+
+def plan_ending_soon_email(*, display_name: str, plan_name: str, ends_at, live_to_stop: list[str]):
+    url = build_frontend_url("pricing")
+    subject = f"Il tuo piano {plan_name} termina il {_fmt_date(ends_at)}"
+    warn_text = "Le live in eccesso rispetto al piano gratuito verranno fermate alla scadenza:"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"il piano {plan_name} termina il {_fmt_date(ends_at)} e non verra' rinnovato.\n"
+        + _live_list_text(live_to_stop, warn_text)
+        + "Puoi scegliere un piano da qui:\n"
+        f"{url}\n"
+    )
+    html_body = _render(
+        f"Il piano {plan_name} sta per terminare",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(f"il piano {plan_name} termina il {_fmt_date(ends_at)} e non verra' rinnovato.")
+        + _live_list_html(live_to_stop, warn_text)
+        + _BUTTON.format(url=escape(url, quote=True), label="Scegli un piano"),
+    )
+    return subject, text_body, html_body
+
+
+def subscription_deactivated_email(*, display_name: str, old_plan_name: str, new_plan_name: str, stopped_live: list[str]):
+    url = build_frontend_url("pricing")
+    subject = f"Il tuo piano {old_plan_name} e' terminato"
+    stopped_text = "Queste live sono state fermate perche' eccedono i limiti del nuovo piano:"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"il piano {old_plan_name} e' terminato: ora sei sul piano {new_plan_name}.\n"
+        + _live_list_text(stopped_live, stopped_text)
+        + "Le tue strategie, gli Studi e lo storico restano al loro posto. Puoi riattivare un piano da qui:\n"
+        f"{url}\n"
+    )
+    html_body = _render(
+        f"Piano {old_plan_name} terminato",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(f"il piano {old_plan_name} e' terminato: ora sei sul piano {new_plan_name}.")
+        + _live_list_html(stopped_live, stopped_text)
+        + _paragraph("Le tue strategie, gli Studi e lo storico restano al loro posto.")
+        + _BUTTON.format(url=escape(url, quote=True), label="Riattiva un piano"),
+    )
+    return subject, text_body, html_body
+
+
+def subscription_assigned_by_admin_email(*, display_name: str, plan_name: str, ends_at, stopped_live: list[str]):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = f"Il piano {plan_name} e' stato attivato sul tuo account"
+    until = f" fino al {_fmt_date(ends_at)}" if ends_at else ""
+    stopped_text = "Queste live sono state fermate perche' eccedono i limiti del nuovo piano:"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"un amministratore ha attivato il piano {plan_name} sul tuo account{until}.\n"
+        + _live_list_text(stopped_live, stopped_text)
+        + f"Dettagli e limiti:\n{url}\n"
+    )
+    html_body = _render(
+        f"Piano {plan_name} attivato",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(f"un amministratore ha attivato il piano {plan_name} sul tuo account{until}.")
+        + _live_list_html(stopped_live, stopped_text)
+        + _BUTTON.format(url=escape(url, quote=True), label="Il mio abbonamento"),
+    )
+    return subject, text_body, html_body
+
+
+def subscription_activated_email(*, display_name: str, plan_name: str, period_end):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = f"Il tuo piano {plan_name} e' attivo"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"il pagamento e' andato a buon fine: il piano {plan_name} e' attivo"
+        + (f" fino al {_fmt_date(period_end)}" if period_end else "")
+        + f".\n{url}\n"
+    )
+    html_body = _render(
+        f"Piano {plan_name} attivo",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"il pagamento e' andato a buon fine: il piano {plan_name} e' attivo"
+            + (f" fino al {_fmt_date(period_end)}." if period_end else ".")
+        )
+        + _BUTTON.format(url=escape(url, quote=True), label="Il mio abbonamento"),
+    )
+    return subject, text_body, html_body
+
+
+def subscription_renewed_email(*, display_name: str, plan_name: str, period_end):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = f"Il tuo piano {plan_name} e' stato rinnovato"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"il piano {plan_name} e' stato rinnovato"
+        + (f" fino al {_fmt_date(period_end)}" if period_end else "")
+        + f".\n{url}\n"
+    )
+    html_body = _render(
+        f"Piano {plan_name} rinnovato",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"il piano {plan_name} e' stato rinnovato"
+            + (f" fino al {_fmt_date(period_end)}." if period_end else ".")
+        )
+        + _BUTTON.format(url=escape(url, quote=True), label="Il mio abbonamento"),
+    )
+    return subject, text_body, html_body
+
+
+def payment_failed_email(*, display_name: str, plan_name: str, period_end):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = f"Pagamento non riuscito per il piano {plan_name}"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"non siamo riusciti ad addebitare il rinnovo del piano {plan_name}. "
+        "Aggiorna il metodo di pagamento per evitare la disattivazione:\n"
+        f"{url}\n"
+    )
+    html_body = _render(
+        "Pagamento non riuscito",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"non siamo riusciti ad addebitare il rinnovo del piano {plan_name}. "
+            "Aggiorna il metodo di pagamento per evitare la disattivazione."
+        )
+        + _BUTTON.format(url=escape(url, quote=True), label="Gestisci il pagamento"),
+    )
+    return subject, text_body, html_body
+
+
+def cancel_scheduled_email(*, display_name: str, plan_name: str, period_end):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = f"Cancellazione del piano {plan_name} programmata"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"il piano {plan_name} restera' attivo fino al {_fmt_date(period_end)} e poi non verra' rinnovato. "
+        "Puoi annullare la cancellazione da qui:\n"
+        f"{url}\n"
+    )
+    html_body = _render(
+        "Cancellazione programmata",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"il piano {plan_name} restera' attivo fino al {_fmt_date(period_end)} e poi non verra' rinnovato."
+        )
+        + _BUTTON.format(url=escape(url, quote=True), label="Il mio abbonamento"),
+    )
+    return subject, text_body, html_body
+
+
+def ai_credits_low_email(*, display_name: str, used: int, granted: int, renews_on):
+    url = build_frontend_url("pricing")
+    subject = "Stai per esaurire i crediti AI del mese"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"hai usato {used} crediti AI su {granted} per questo periodo (si rinnovano il {_fmt_date(renews_on)}). "
+        "Quando finiscono, l'agente non risponde piu' fino al rinnovo. Puoi passare a un piano con piu' crediti:\n"
+        f"{url}\n"
+    )
+    html_body = _render(
+        "Crediti AI quasi esauriti",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"hai usato {used} crediti AI su {granted} per questo periodo (si rinnovano il {_fmt_date(renews_on)}). "
+            "Quando finiscono, l'agente non risponde piu' fino al rinnovo."
+        )
+        + _BUTTON.format(url=escape(url, quote=True), label="Piani con piu' crediti"),
+    )
+    return subject, text_body, html_body
+
+
+def ai_credits_exhausted_email(*, display_name: str, used: int, granted: int, renews_on):
+    url = build_frontend_url("pricing")
+    subject = "Crediti AI esauriti per questo periodo"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"hai esaurito i {granted} crediti AI del periodo: l'agente non risponde piu' fino al {_fmt_date(renews_on)}. "
+        "Gli alert e le regole restano attivi ma non vengono inoltrati all'agente. "
+        "Puoi passare a un piano con piu' crediti:\n"
+        f"{url}\n"
+    )
+    html_body = _render(
+        "Crediti AI esauriti",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"hai esaurito i {granted} crediti AI del periodo: l'agente non risponde piu' fino al {_fmt_date(renews_on)}. "
+            "Gli alert e le regole restano attivi ma non vengono inoltrati all'agente."
+        )
+        + _BUTTON.format(url=escape(url, quote=True), label="Piani con piu' crediti"),
+    )
+    return subject, text_body, html_body

@@ -26,6 +26,12 @@ from app.schemas.strategy import (
     LayoutConfigUpdate,
 )
 from app.schemas.chat import ChatCreate
+from app.services.entitlement_service import (
+    assert_indicator_count,
+    assert_within,
+    check_ai_budget,
+)
+from app.services.limits import LimitKey
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
     build_n8n_backend_api_metadata,
@@ -260,6 +266,11 @@ def _placeholder_strategy_name(session: Session, user_id: int) -> str:
 
 
 def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> Strategy:
+    # Plan limits (HTTP 402 with a structured detail on violation): number of
+    # strategies owned and indicators inside this one.
+    assert_within(session, user_id, LimitKey.STRATEGIES_MAX)
+    assert_indicator_count(session, user_id, payload.definition)
+
     name = (payload.name or "").strip()
     if not name:
         name = _placeholder_strategy_name(session, user_id)
@@ -351,6 +362,7 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
         strategy.description = payload.description
 
     if payload.definition is not None:
+        assert_indicator_count(session, strategy.user_id, payload.definition)
         strategy.definition = _strip_rule_chat_ids(
             _normalize_strategy_indicator_field_references(payload.definition)
         )
@@ -639,6 +651,10 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
     # Resolve connection_id from the strategy
     strategy = get_strategy(session, backtest.strategy_id, user_id)
     connection_id = strategy.connection_id if strategy else None
+
+    # Plan limit on concurrent backtests (row lock on the subscription so two
+    # simultaneous /run calls cannot both pass with a cap of 1).
+    assert_within(session, strategy.user_id, LimitKey.BACKTEST_CONCURRENT_MAX, lock=True)
 
     if not connection_id:
         raise HTTPException(
@@ -1100,6 +1116,8 @@ def trigger_rule_agent(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Chat with id {chat_id} not found",
         )
+    # AI credits of the chat owner (402 when the monthly allowance is spent).
+    check_ai_budget(session, chat.user_id)
     session_id = _chat_session_id(chat)
     request_id = str(uuid.uuid4())
     

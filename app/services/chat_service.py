@@ -23,6 +23,7 @@ from app.services.studio_document_service import (
     fetch_latest_studio_documents,
     strategy_studio_bindings,
 )
+from app.services.entitlement_service import check_ai_budget, record_ai_usage
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
     build_n8n_backend_api_metadata,
@@ -568,6 +569,35 @@ def list_chat_history(
     )
 
 
+def _record_turn_estimate(
+    *,
+    user_id: int,
+    request_id: str,
+    session_id: str,
+    prompt_chars: int,
+    response_chars: int,
+) -> None:
+    """Charge one chat turn from text length (best effort, own DB session:
+    the request session is closed before the webhook call)."""
+    from app.db.database import get_session_context
+    from app.services.entitlement_service import estimate_tokens_from_chars
+
+    try:
+        with get_session_context() as own_session:
+            record_ai_usage(
+                own_session,
+                user_id=user_id,
+                tokens_input=estimate_tokens_from_chars(prompt_chars),
+                tokens_output=estimate_tokens_from_chars(response_chars),
+                correlation_id=request_id,
+                session_id=session_id,
+                estimated=True,
+                reason="chat_turn",
+            )
+    except Exception:  # noqa: BLE001 - accounting must never break the chat
+        logger.exception("AI usage estimate failed for request %s", request_id)
+
+
 def send_chat_message(
     session: Session,
     *,
@@ -587,6 +617,8 @@ def send_chat_message(
 
     chat = _get_owned_chat(session, chat_id, user_id)
     _ensure_chat_accepts_messages(session, chat)
+    # AI credits of the chat owner: 402 before anything is persisted or sent.
+    check_ai_budget(session, chat.user_id)
     agent = _resolve_chat_agent(session, chat)
     request_id = str(uuid.uuid4())
     session_id = _chat_session_id(chat)
@@ -652,6 +684,13 @@ def send_chat_message(
                 headers=headers,
             )
             response.raise_for_status()
+            _record_turn_estimate(
+                user_id=chat_user_id,
+                request_id=request_id,
+                session_id=session_id,
+                prompt_chars=len(normalized_text),
+                response_chars=len(response.text or ""),
+            )
     except httpx.ConnectError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -811,6 +850,7 @@ async def stream_chat_message(
 
     chat = _get_owned_chat(session, chat_id, user_id)
     _ensure_chat_accepts_messages(session, chat)
+    check_ai_budget(session, chat.user_id)
     agent = _resolve_chat_agent(session, chat)
     request_id = str(uuid.uuid4())
     session_id = _chat_session_id(chat)
@@ -954,6 +994,16 @@ async def stream_chat_message(
                     "session_id": session_id,
                     "full_text": full_text,
                 },
+            )
+            # Character-based estimate of the turn; the n8n usage report with
+            # the real token counts replaces it (same correlation id).
+            await asyncio.to_thread(
+                _record_turn_estimate,
+                user_id=chat_user_id,
+                request_id=request_id,
+                session_id=session_id,
+                prompt_chars=len(normalized_text),
+                response_chars=len(full_text),
             )
         except httpx.ConnectError as exc:
             yield _sse_event(

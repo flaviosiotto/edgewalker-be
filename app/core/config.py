@@ -169,6 +169,21 @@ class Settings(BaseSettings):
     REGISTRATION_MAX_PER_IP_PER_HOUR: int = 10
     EMAIL_VERIFICATION_MAX_RESENDS_PER_HOUR: int = 5
 
+    # Subscription plans / billing (docs/piani-abbonamento-studio.md).
+    # BILLING_ENABLED off = NullProvider: default plan, trials and admin
+    # assignments work, paid plans cannot be bought. The provider adapter is
+    # selected by name so switching provider never touches the domain.
+    BILLING_ENABLED: bool = False
+    BILLING_PROVIDER: str = "stripe"
+    BILLING_SWEEPER_INTERVAL_SECONDS: int = 600
+    # Days before an unrenewed end of period at which the user is warned
+    # (and told which live sessions will be stopped).
+    BILLING_ENDING_NOTICE_DAYS: int = 3
+    # Optional copy to an operator on payment failures / live stopped by plan.
+    BILLING_ADMIN_NOTIFY_EMAIL: Optional[str] = None
+    BILLING_SUCCESS_URL: str = ""
+    BILLING_CANCEL_URL: str = ""
+
     BACKEND_CORS_ORIGINS: List[str] = []
 
     LOG_LEVEL: str = "INFO"
