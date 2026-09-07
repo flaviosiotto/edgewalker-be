@@ -91,8 +91,10 @@ def _metadata(obj: Any) -> dict[str, str]:
 def _provider_error(exc: Exception) -> HTTPException:
     message = getattr(exc, "user_message", None) or str(exc)
     logger.warning("Stripe error: %s", message)
+    # 400 and not 502: Cloudflare in front of the API replaces 502/504 with its
+    # own page (no CORS headers), so the browser would never see the message.
     return HTTPException(
-        status_code=status.HTTP_502_BAD_GATEWAY,
+        status_code=status.HTTP_400_BAD_REQUEST,
         detail={"code": "billing_provider_error", "message": f"Stripe: {message}"},
     )
 
@@ -399,13 +401,23 @@ class StripeProvider:
             params["applies_to"] = {"products": product_external_ids}
         try:
             coupon = stripe.Coupon.create(**params)
+        except stripe.StripeError as exc:
+            raise _provider_error(exc) from exc
+        try:
+            # API >= 2025-03-31: the coupon goes under ``promotion`` (the bare
+            # ``coupon`` parameter is rejected as unknown).
             promotion = stripe.PromotionCode.create(
-                coupon=str(coupon["id"]),
+                promotion={"type": "coupon", "coupon": str(coupon["id"])},
                 code=code,
                 **({"max_redemptions": int(max_redemptions)} if max_redemptions else {}),
                 **({"expires_at": int(valid_until.timestamp())} if valid_until else {}),
             )
         except stripe.StripeError as exc:
+            # No orphan coupon on the provider when the code cannot be created.
+            try:
+                stripe.Coupon.delete(str(coupon["id"]))
+            except stripe.StripeError:
+                logger.warning("Could not delete Stripe coupon %s after promotion code failure", coupon["id"])
             raise _provider_error(exc) from exc
         return {"coupon": str(coupon["id"]), "promotion_code": str(promotion["id"])}
 
