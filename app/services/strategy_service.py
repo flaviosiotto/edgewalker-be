@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
@@ -560,7 +561,17 @@ def copy_strategy(
         updated_at=now,
     )
     session.add(copy)
-    session.flush()  # copy.id for the lessons
+    try:
+        session.flush()  # copy.id for the lessons
+    except IntegrityError as exc:
+        # Name race (two copies at once) or a stale DB constraint: report it
+        # as a conflict instead of a 500 with the whole INSERT in the log.
+        session.rollback()
+        logger.warning("copy_strategy %s → account %s: %s", source.id, account.id, exc.orig)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Strategy name '{new_name}' conflicts with an existing one",
+        ) from exc
 
     from app.models.agent_lesson import AgentLesson
 
