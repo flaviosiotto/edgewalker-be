@@ -243,26 +243,69 @@ def resolve_strategy_manager_agent_id(
 DEFAULT_STRATEGY_NAME = "Nuova strategia"
 
 
-def _placeholder_strategy_name(session: Session, user_id: int) -> str:
+def _placeholder_strategy_name(session: Session, user_id: int, account_id: int) -> str:
     """Unique placeholder for a strategy created without a name.
 
     The design agent is expected to rename it as soon as it understands the
     idea; until then the user sees "Nuova strategia", "Nuova strategia 2", ...
-    (unique per user because of uq_strategies_user_name).
+    (unique per (user, account) because of uq_strategies_user_account_name).
     """
+    return _unique_strategy_name(session, user_id, account_id, DEFAULT_STRATEGY_NAME, style="number")
+
+
+def _strategy_name_taken(
+    session: Session,
+    user_id: int,
+    account_id: int,
+    name: str,
+    *,
+    exclude_id: int | None = None,
+) -> bool:
+    """True when ``name`` already belongs to another strategy of the same user
+    on the same account (the uniqueness scope since migr. 053)."""
+    stmt = (
+        select(Strategy.id)
+        .where(Strategy.user_id == user_id)
+        .where(Strategy.account_id == account_id)
+        .where(Strategy.name == name)
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Strategy.id != exclude_id)
+    return session.exec(stmt).first() is not None
+
+
+def _unique_strategy_name(
+    session: Session,
+    user_id: int,
+    account_id: int,
+    base: str,
+    *,
+    style: str = "copy",
+) -> str:
+    """First free name derived from ``base`` on the target account.
+
+    style="number": base, "base 2", "base 3", ... (placeholders).
+    style="copy":   base, "base (copia)", "base (copia 2)", ... (duplicates).
+    Names are capped at 60 chars (StrategyCreate.name) by trimming the base.
+    """
+    max_len = 60
     taken = set(
         session.exec(
             select(Strategy.name)
             .where(Strategy.user_id == user_id)
-            .where(Strategy.name.like(f"{DEFAULT_STRATEGY_NAME}%"))  # type: ignore[attr-defined]
+            .where(Strategy.account_id == account_id)
+            .where(Strategy.name.like(f"{base}%"))  # type: ignore[attr-defined]
         ).all()
     )
-    if DEFAULT_STRATEGY_NAME not in taken:
-        return DEFAULT_STRATEGY_NAME
+    if base not in taken:
+        return base
     n = 2
-    while f"{DEFAULT_STRATEGY_NAME} {n}" in taken:
+    while True:
+        suffix = f" {n}" if style == "number" else (" (copia)" if n == 2 else f" (copia {n})")
+        candidate = f"{base[: max_len - len(suffix)].rstrip()}{suffix}"
+        if candidate not in taken:
+            return candidate
         n += 1
-    return f"{DEFAULT_STRATEGY_NAME} {n}"
 
 
 def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> Strategy:
@@ -271,25 +314,20 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
     assert_within(session, user_id, LimitKey.STRATEGIES_MAX)
     assert_indicator_count(session, user_id, payload.definition)
 
+    account = _get_owned_account(session, payload.account_id, user_id)
+
     name = (payload.name or "").strip()
     if not name:
-        name = _placeholder_strategy_name(session, user_id)
+        name = _placeholder_strategy_name(session, user_id, account.id)
 
-    existing = session.exec(
-        select(Strategy)
-        .where(Strategy.user_id == user_id)
-        .where(Strategy.name == name)
-    ).first()
-    if existing:
+    if _strategy_name_taken(session, user_id, account.id, name):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Strategy name already exists",
+            detail="Strategy name already exists on this account",
         )
 
     if payload.manager_agent_id is not None:
         _get_owned_agent(session, payload.manager_agent_id, user_id)
-
-    account = _get_owned_account(session, payload.account_id, user_id)
 
     now = datetime.now(timezone.utc)
     strategy = Strategy(
@@ -345,16 +383,10 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
                 detail="Strategy name is required",
             )
 
-        existing = session.exec(
-            select(Strategy)
-            .where(Strategy.user_id == strategy.user_id)
-            .where(Strategy.name == name)
-            .where(Strategy.id != strategy_id)
-        ).first()
-        if existing:
+        if _strategy_name_taken(session, strategy.user_id, strategy.account_id, name, exclude_id=strategy_id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Strategy name already exists",
+                detail="Strategy name already exists on this account",
             )
         strategy.name = name
 
@@ -387,9 +419,179 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
 
 
 def delete_strategy(session: Session, strategy_id: int, user_id: int | None = None) -> None:
+    """Delete a strategy and everything hanging off it (cascade).
+
+    Refused (409) while a live session is active: the cascade would drop the
+    strategy_live row under a runner container that is still alive, leaving
+    it orphaned. Stop the live first.
+    """
     strategy = get_strategy(session, strategy_id, user_id)
+    live = strategy.live
+    if live is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Strategy has an active live session (#{live.id}, {live.status}): stop it before deleting",
+        )
     session.delete(strategy)
     session.commit()
+
+
+# ─── COPY ───
+
+
+def _definition_symbols(definition: Any) -> list[str]:
+    """Every symbol the definition trades or observes: ``strategy.symbol``
+    (primary) plus ``strategy.charts[*].symbol`` (multi-chart DSL)."""
+    if not isinstance(definition, dict):
+        return []
+    strat = definition.get("strategy")
+    if not isinstance(strat, dict):
+        return []
+    out: list[str] = []
+    primary = strat.get("symbol")
+    if isinstance(primary, str) and primary.strip():
+        out.append(primary.strip())
+    charts = strat.get("charts")
+    if isinstance(charts, list):
+        for chart in charts:
+            if isinstance(chart, dict):
+                sym = chart.get("symbol")
+                if isinstance(sym, str) and sym.strip() and sym.strip() not in out:
+                    out.append(sym.strip())
+    return out
+
+
+def _symbol_warnings(
+    session: Session,
+    definition: Any,
+    *,
+    source_connection_id: int,
+    target_connection: Connection,
+) -> list[str]:
+    """Best-effort check of the definition's symbols against the target
+    datafeed. Same connection = nothing to check. Otherwise the symbols are
+    looked up in the target connection's symbol cache: a symbol missing from
+    a populated cache is reported; an empty cache only yields a generic
+    "verify" warning when the broker differs. Never blocks the copy."""
+    if target_connection.id == source_connection_id:
+        return []
+    symbols = _definition_symbols(definition)
+    if not symbols:
+        return []
+    from app.models.marketdata import SymbolCache
+
+    cached = set(
+        session.exec(
+            select(SymbolCache.symbol)
+            .where(SymbolCache.connection_id == target_connection.id)
+            .where(SymbolCache.symbol.in_([s.upper() for s in symbols]))  # type: ignore[attr-defined]
+        ).all()
+    )
+    has_cache = session.exec(
+        select(SymbolCache.id).where(SymbolCache.connection_id == target_connection.id).limit(1)
+    ).first() is not None
+    broker = str(target_connection.broker_type or "").lower() or "target"
+    if not has_cache:
+        source = session.get(Connection, source_connection_id)
+        if source is not None and str(source.broker_type or "").lower() == broker:
+            return []
+        return [
+            f"Simboli non verificati: la connessione di destinazione ({broker}) non ha un catalogo simboli. "
+            f"Controlla {', '.join(symbols)} prima di lanciare."
+        ]
+    missing = [s for s in symbols if s.upper() not in cached]
+    return [f"Simbolo '{s}' non trovato sul broker di destinazione ({broker})" for s in missing]
+
+
+def copy_strategy(
+    session: Session,
+    strategy_id: int,
+    user_id: int,
+    *,
+    target_account_id: int,
+    name: str | None = None,
+) -> tuple[Strategy, list[str]]:
+    """Duplicate a strategy onto ``target_account_id`` (same account allowed).
+
+    Copies the design (definition, description, layout, manager agent) and
+    the agent lessons, orphaned of their backtest evidence. Never copies run
+    history: live sessions, orders, fills, alerts, chats, backtests. The
+    datafeed connection is derived from the target account.
+
+    ``name`` explicit → 409 if taken on the target account; omitted → the
+    original name, or "<name> (copia)", "(copia 2)"... when taken.
+    Returns the new strategy and a list of non-blocking symbol warnings.
+    """
+    source = get_strategy(session, strategy_id, user_id)
+    account = _get_owned_account(session, target_account_id, user_id)
+    connection = _get_owned_connection(session, account.connection_id, user_id)
+
+    assert_within(session, user_id, LimitKey.STRATEGIES_MAX)
+
+    explicit = (name or "").strip()
+    if explicit:
+        if _strategy_name_taken(session, user_id, account.id, explicit):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Strategy name already exists on this account",
+            )
+        new_name = explicit
+    else:
+        new_name = _unique_strategy_name(session, user_id, account.id, source.name, style="copy")
+
+    warnings = _symbol_warnings(
+        session,
+        source.definition,
+        source_connection_id=source.connection_id,
+        target_connection=connection,
+    )
+
+    now = datetime.now(timezone.utc)
+    copy = Strategy(
+        user_id=user_id,
+        name=new_name,
+        description=source.description,
+        definition=source.definition,
+        layout_config=source.layout_config,
+        manager_agent_id=source.manager_agent_id,
+        account_id=account.id,
+        connection_id=account.connection_id,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(copy)
+    session.flush()  # copy.id for the lessons
+
+    from app.models.agent_lesson import AgentLesson
+
+    lessons = session.exec(
+        select(AgentLesson).where(AgentLesson.strategy_id == source.id).order_by(AgentLesson.id)
+    ).all()
+    for lesson in lessons:
+        evidence = dict(lesson.evidence or {})
+        evidence["copied_from"] = {
+            "strategy_id": source.id,
+            "lesson_id": lesson.id,
+            "backtest_id": lesson.backtest_id,
+        }
+        session.add(
+            AgentLesson(
+                strategy_id=copy.id,
+                user_id=user_id,
+                lesson=lesson.lesson,
+                context=lesson.context,
+                status=lesson.status,
+                confidence=lesson.confidence,
+                source=lesson.source,
+                backtest_id=None,  # orphaned on purpose: the backtests stay with the original
+                evidence=evidence,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    session.commit()
+    return get_strategy(session, copy.id, user_id), warnings
 
 
 def create_backtest(

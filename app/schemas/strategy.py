@@ -125,6 +125,63 @@ class StrategyUpdate(BaseModel):
     # creation (live history, orders and performance hang off it).
 
 
+# ─── COPY / BULK ───
+
+
+class StrategyCopyRequest(BaseModel):
+    """Duplicate a strategy onto an account (the same one or another)."""
+    target_account_id: int
+    # Explicit name → 409 if taken on the target account. Omitted → original
+    # name, or "<name> (copia)" when taken.
+    name: Optional[str] = Field(default=None, max_length=60)
+
+
+class StrategyCopyResponse(BaseModel):
+    strategy: StrategyRead
+    # Non-blocking symbol checks against the target datafeed.
+    warnings: list[str] = []
+
+
+class StrategyBulkCopyRequest(BaseModel):
+    strategy_ids: list[int] = Field(min_length=1, max_length=200)
+    target_account_id: int
+
+
+class StrategyBulkCopyItem(BaseModel):
+    strategy_id: int
+    ok: bool
+    new_strategy_id: Optional[int] = None
+    new_name: Optional[str] = None
+    warnings: list[str] = []
+    # HTTP-style status + detail of the failure (409 name, 402 plan limit...).
+    error_status: Optional[int] = None
+    error: Optional[Any] = None
+
+
+class StrategyBulkCopyResponse(BaseModel):
+    items: list[StrategyBulkCopyItem]
+    copied: int
+    failed: int
+    strategies: list[StrategyRead] = []
+
+
+class StrategyBulkDeleteRequest(BaseModel):
+    strategy_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class StrategyBulkDeleteItem(BaseModel):
+    strategy_id: int
+    ok: bool
+    error_status: Optional[int] = None
+    error: Optional[Any] = None
+
+
+class StrategyBulkDeleteResponse(BaseModel):
+    items: list[StrategyBulkDeleteItem]
+    deleted: int
+    failed: int
+
+
 # ─── BACKTEST SCHEMAS ───
 
 

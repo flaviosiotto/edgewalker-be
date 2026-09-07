@@ -12,6 +12,14 @@ from app.db.database import get_session
 from app.models.user import User
 from app.schemas.strategy import (
     StrategyPerformanceSummary,
+    StrategyBulkCopyItem,
+    StrategyBulkCopyRequest,
+    StrategyBulkCopyResponse,
+    StrategyBulkDeleteItem,
+    StrategyBulkDeleteRequest,
+    StrategyBulkDeleteResponse,
+    StrategyCopyRequest,
+    StrategyCopyResponse,
     StrategyCreate,
     StrategyRead,
     StrategyUpdate,
@@ -24,6 +32,7 @@ from app.services.live_summary_service import build_live_summary
 from app.services.performance_service import compute_strategy_performance, strategy_live_session_count
 from app.schemas.performance import PerformanceStats
 from app.services.strategy_service import (
+    copy_strategy,
     create_strategy,
     delete_strategy,
     get_strategy,
@@ -151,6 +160,105 @@ def list_strategies_endpoint(
 ):
     strategies = list_strategies(session, current_user.id)
     return [_serialize_strategy_with_live(session, s) for s in strategies]
+
+
+@router.post("/bulk/copy", response_model=StrategyBulkCopyResponse)
+def bulk_copy_strategies_endpoint(
+    payload: StrategyBulkCopyRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Copy N strategies onto one account (typical: a new Prop account).
+
+    Per-item semantics, not atomic: every strategy is copied in its own
+    transaction and the report says which ones failed and why (409 name
+    taken, 402 plan limit, 404 unknown id...). Names are kept when free on
+    the target account, otherwise suffixed "(copia)".
+    """
+    items: list[StrategyBulkCopyItem] = []
+    created: list[StrategyRead] = []
+    seen: set[int] = set()
+    for sid in payload.strategy_ids:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        try:
+            strategy, warnings = copy_strategy(
+                session, sid, current_user.id, target_account_id=payload.target_account_id
+            )
+        except HTTPException as exc:
+            session.rollback()
+            items.append(StrategyBulkCopyItem(
+                strategy_id=sid, ok=False, error_status=exc.status_code, error=exc.detail,
+            ))
+            continue
+        except Exception:  # one bad item must not void the whole report
+            logger.exception("bulk copy: strategy %s failed", sid)
+            session.rollback()
+            items.append(StrategyBulkCopyItem(strategy_id=sid, ok=False, error_status=500, error="Copia non riuscita"))
+            continue
+        created.append(_serialize_strategy_with_live(session, strategy))
+        items.append(StrategyBulkCopyItem(
+            strategy_id=sid, ok=True, new_strategy_id=strategy.id, new_name=strategy.name, warnings=warnings,
+        ))
+    copied = sum(1 for i in items if i.ok)
+    return StrategyBulkCopyResponse(items=items, copied=copied, failed=len(items) - copied, strategies=created)
+
+
+@router.post("/bulk/delete", response_model=StrategyBulkDeleteResponse)
+def bulk_delete_strategies_endpoint(
+    payload: StrategyBulkDeleteRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Delete N strategies. Per-item semantics: a strategy with an active
+    live session is refused (409) and reported, the others are deleted."""
+    items: list[StrategyBulkDeleteItem] = []
+    seen: set[int] = set()
+    for sid in payload.strategy_ids:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        try:
+            delete_strategy(session, sid, current_user.id)
+        except HTTPException as exc:
+            session.rollback()
+            items.append(StrategyBulkDeleteItem(
+                strategy_id=sid, ok=False, error_status=exc.status_code, error=exc.detail,
+            ))
+            continue
+        except Exception:
+            logger.exception("bulk delete: strategy %s failed", sid)
+            session.rollback()
+            items.append(StrategyBulkDeleteItem(strategy_id=sid, ok=False, error_status=500, error="Eliminazione non riuscita"))
+            continue
+        items.append(StrategyBulkDeleteItem(strategy_id=sid, ok=True))
+    deleted = sum(1 for i in items if i.ok)
+    return StrategyBulkDeleteResponse(items=items, deleted=deleted, failed=len(items) - deleted)
+
+
+@router.post("/{strategy_id}/copy", response_model=StrategyCopyResponse)
+def copy_strategy_endpoint(
+    strategy_id: int,
+    payload: StrategyCopyRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Duplicate a strategy onto an account (same or another).
+
+    Copies the design and the agent lessons (orphaned of their backtests);
+    never the run history (live, orders, alerts, chats, backtests). Returns
+    the new strategy plus non-blocking symbol warnings when the target
+    datafeed differs from the source one.
+    """
+    strategy, warnings = copy_strategy(
+        session,
+        strategy_id,
+        current_user.id,
+        target_account_id=payload.target_account_id,
+        name=payload.name,
+    )
+    return StrategyCopyResponse(strategy=_serialize_strategy_with_live(session, strategy), warnings=warnings)
 
 
 @router.get("/{strategy_id}", response_model=StrategyRead)

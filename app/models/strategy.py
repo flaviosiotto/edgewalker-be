@@ -66,7 +66,11 @@ class Strategy(SQLModel, table=True):
     """Design-time strategy definition. No runtime/live state here."""
     __tablename__ = "strategies"
     __allow_unmapped__ = True
-    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_strategies_user_name"),)
+    # Name unique per (user, account) since migr. 053: the same strategy can
+    # exist under the same name on two accounts (copy to a new Prop account).
+    __table_args__ = (
+        UniqueConstraint("user_id", "account_id", "name", name="uq_strategies_user_account_name"),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
