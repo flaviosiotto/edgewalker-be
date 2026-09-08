@@ -63,7 +63,7 @@ omonimi vengono mantenuti i loro record personali e le loro modifiche.
 
 Il provisioning e' idempotente. Risorse eliminate successivamente non vengono
 ricreate automaticamente. La guida puo' essere chiusa e ripresa solo dal menu
-del profilo, alla voce Riprendi tour. Non viene creato un backtest prima del collegamento.
+del profilo, alla voce Tour guidato. Non viene creato un backtest prima del collegamento.
 
 Entrambe le connessioni nascono inattive: nessun gateway viene avviato per un
 utente appena registrato o ancora in attesa di verifica. Il primo accesso apre
@@ -90,7 +90,9 @@ Benvenuto, Bitcoin e Forex hanno progresso e chiusura della guida indipendenti,
 salvati sul server. `PATCH /onboarding` accetta anche `track: welcome` e salva
 `welcome_step` e `welcome_dismissed` nel JSONB esistente, senza nuove migrazioni.
 Distribuire backend e frontend aggiornati insieme tramite Dokploy.
-Il menu del profilo riprende Benvenuto, Bitcoin o Forex dal passo salvato.
+La singola voce Tour guidato nel profilo riprende dal passo salvato il percorso
+della pagina corrente: Benvenuto nell'elenco strategie, Bitcoin o Forex nel
+rispettivo design. Non cambia pagina ed e' disabilitata nelle pagine senza tour.
 Non ci sono pulsanti di ripresa nelle pagine, neppure in Help e Connessioni.
 Un utente
 con onboarding Forex gia' preparato riceve il percorso Bitcoin mancante al
