@@ -62,13 +62,15 @@ codice non riscrive gli agent gia' creati. Nel recupero di utenti con agent
 omonimi vengono mantenuti i loro record personali e le loro modifiche.
 
 Il provisioning e' idempotente. Risorse eliminate successivamente non vengono
-ricreate automaticamente. La guida puo' essere chiusa e ripresa dal workspace
-o dalla pagina Help. Non viene creato un backtest prima del collegamento.
+ricreate automaticamente. La guida puo' essere chiusa e ripresa solo dal menu
+del profilo, alla voce Riprendi tour. Non viene creato un backtest prima del collegamento.
 
 Entrambe le connessioni nascono inattive: nessun gateway viene avviato per un
 utente appena registrato o ancora in attesa di verifica. Il primo accesso apre
 l'elenco strategie con un tour di benvenuto ancorato agli elementi della pagina,
-senza modale o blocco della navigazione. Presenta Bitcoin, Forex e gli agent
+senza modale, sezioni aggiunte, scroll automatico o blocco della navigazione.
+I suggerimenti sono brevi, esclusivamente floating, con sfondo distinto nei
+temi chiaro e scuro. Presenta Bitcoin, Forex e gli agent
 personali, poi lascia scegliere quale strategia esplorare. Il tour prosegue
 nel workspace in fasi dedicate a regole, collegamento e primo backtest.
 Il pulsante della guida Bitcoin attiva la connessione e collega i dati pubblici
@@ -88,7 +90,8 @@ Benvenuto, Bitcoin e Forex hanno progresso e chiusura della guida indipendenti,
 salvati sul server. `PATCH /onboarding` accetta anche `track: welcome` e salva
 `welcome_step` e `welcome_dismissed` nel JSONB esistente, senza nuove migrazioni.
 Distribuire backend e frontend aggiornati insieme tramite Dokploy.
-Il tour si riprende dall'elenco o dal workspace, e si ricomincia dalla pagina Help.
+Il menu del profilo riprende Benvenuto, Bitcoin o Forex dal passo salvato.
+Non ci sono pulsanti di ripresa nelle pagine, neppure in Help e Connessioni.
 Un utente
 con onboarding Forex gia' preparato riceve il percorso Bitcoin mancante al
 successivo accesso, se la strategia Forex con il suo manager esiste ancora.
