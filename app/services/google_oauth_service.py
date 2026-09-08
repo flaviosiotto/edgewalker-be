@@ -393,9 +393,9 @@ def _create_user_from_google(
     if outcome == UserStatus.ACTIVE:
         user.approved_at = now
 
-    session.add(user)
-    session.commit()
-    session.refresh(user)
+    from app.services.user_service import save_new_user
+
+    save_new_user(session, user)
 
     session.add(
         UserIdentity(

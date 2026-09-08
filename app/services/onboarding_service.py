@@ -9,6 +9,7 @@ from app.models.agent import Agent, Chat
 from app.models.connection import Account, Connection
 from app.models.strategy import Strategy
 from app.models.user import User
+from app.services.onboarding_defaults import starter_agents
 from app.services.onboarding_state import is_provisional_account, require_configured_account
 
 
@@ -40,7 +41,7 @@ def _prepare_bitcoin(session: Session, user_id: int, agent_id: int) -> dict:
     connection = Connection(
         user_id=user_id, name="Binance - Dati pubblici", broker_type="binance",
         config={"market_type": "spot", "testnet": False, "data_only": True, "read_only": True},
-        is_active=True, sync_enabled=False,
+        is_active=False, sync_enabled=False,
     )
     session.add(connection)
     session.flush()
@@ -91,21 +92,23 @@ def prepare_onboarding(session: Session, user_id: int) -> dict:
         session.commit()
         return dict(user.onboarding)
 
-    template_ids = list(dict.fromkeys(settings.ONBOARDING_AGENT_IDS))
-    templates = [session.get(Agent, template_id) for template_id in template_ids]
-    if not templates or any(template is None or not template.n8n_webhook for template in templates):
-        raise HTTPException(503, "Gli agent iniziali non sono ancora configurati dall'amministratore.")
+    state = provision_user_workspace(session, user)
+    session.commit()
+    return state
+
+
+def provision_user_workspace(session: Session, user: User) -> dict:
+    if user.onboarding:
+        return dict(user.onboarding)
+    user_id = user.id
+    templates = starter_agents(settings.ONBOARDING_AGENT_WEBHOOK_URL)
     agents = []
     now = datetime.now(timezone.utc)
     for template in templates:
-        agent = session.exec(select(Agent).where(Agent.user_id == user_id, Agent.agent_name == template.agent_name)).first()
+        agent = session.exec(select(Agent).where(Agent.user_id == user_id, Agent.agent_name == template["agent_name"])).first()
         if agent is None:
             agent = Agent(
-                user_id=user_id, agent_name=template.agent_name,
-                n8n_webhook=template.n8n_webhook, is_default=not agents,
-                avatar=template.avatar, accent_color=template.accent_color,
-                avatar_url=template.avatar_url, description=template.description,
-                risk_profile=template.risk_profile, persona=deepcopy(template.persona),
+                user_id=user_id, is_default=not agents, **deepcopy(template),
             )
             session.add(agent)
             session.flush()
@@ -143,7 +146,7 @@ def prepare_onboarding(session: Session, user_id: int) -> dict:
         **bitcoin,
     }
     session.add(user)
-    session.commit()
+    session.flush()
     return dict(user.onboarding)
 
 

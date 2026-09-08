@@ -27,6 +27,7 @@ from app.services.email_templates import (
     email_verification_email,
 )
 from app.services.password_reset_service import validate_password_strength
+from app.services.user_service import save_new_user
 from app.utils.auth_utils import get_password_hash
 
 logger = logging.getLogger(__name__)
@@ -202,9 +203,7 @@ def register_user(
         role="user",
     )
     apply_status(user, UserStatus.PENDING_EMAIL)
-    session.add(user)
-    session.commit()
-    session.refresh(user)
+    save_new_user(session, user)
 
     issue_verification_email(session, user, background_tasks)
 

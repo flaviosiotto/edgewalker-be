@@ -5,45 +5,65 @@
 1. Applicare `migrations/055_user_onboarding.sql` con il normale processo di
    migrazione, prima di avviare il nuovo backend. La colonna JSONB su `user`
    serve anche alle query degli utenti gia' esistenti.
-2. Impostare sul backend `ONBOARDING_AGENT_IDS` come array JSON, per esempio
-   `[1,2]`, con gli ID degli agent approvati dall'amministratore. Non sono
-   selezionati automaticamente agent appartenenti ad altri utenti. Il primo
-   template fornisce il manager delle due strategie iniziali.
-3. Verificare che i webhook n8n dei template siano adatti a utenti diversi:
+2. Gli agent standard sono definiti in `app/services/onboarding_defaults.py`:
+   Tutor e Risk Manager, creati come record personali con nuovi ID. Tutor e'
+   il manager iniziale delle strategie. Non serve `ONBOARDING_AGENT_IDS`.
+   `ONBOARDING_AGENT_WEBHOOK_URL` permette di cambiare l'endpoint n8n dei nuovi
+   agent; il default e' `/n8n/webhook/edgewalker-manager-v2`, dal workflow
+   manager versionato nel repository devops. Pubblicare il workflow in n8n e
+   configurare `N8N_INTERNAL_URL` per la risoluzione interna in Swarm.
+3. Verificare che il workflow n8n sia adatto a utenti diversi:
    contesto e autorizzazione devono usare l'identita' ricevuta dal backend,
-   senza credenziali personali o riferimenti fissi al proprietario del template.
+   senza credenziali personali o riferimenti fissi a un proprietario.
 4. Configurare l'app OAuth cTrader e il redirect pubblico secondo la normale
    integrazione della piattaforma. L'onboarding usa `scope=accounts`.
 5. Distribuire backend, frontend e immagine gateway aggiornata tramite Dokploy.
    Il gateway Binance deve supportare la modalita' senza credenziali senza
    eseguire chiamate private. Non cambiano i contratti Redis.
 
-Se gli ID sono assenti, inesistenti o senza webhook, `/onboarding/prepare`
-risponde 503 senza creare risorse parziali. Il frontend mostra un errore con
-Riprova. I limiti e il credito AI del piano restano quelli della piattaforma;
-l'onboarding non aggiunge credito o abbonamenti.
+Il provisioning non interroga n8n o broker e non dipende da record agent
+preesistenti. Un workflow non raggiungibile impedisce le chiamate AI, non la
+creazione del workspace. I limiti e il credito AI del piano restano quelli
+della piattaforma; l'onboarding non aggiunge credito o abbonamenti.
 
 ## Comportamento
 
-La preparazione avviene al primo accesso autenticato, non durante la
-registrazione. Gli amministratori e gli utenti che hanno gia' una strategia
-o una connessione vengono esclusi automaticamente.
+La preparazione avviene nella stessa transazione della creazione dell'utente:
+registrazione pubblica, accesso Google, creazione amministrativa e bootstrap
+del primo amministratore usano `save_new_user()`. Se il provisioning fallisce,
+viene annullata anche la creazione dell'utente. Email di verifica e approvazione
+restano obbligatorie dove previste; le risorse iniziali non sbloccano l'accesso.
 
-In una sola transazione, con lock sull'utente, vengono creati:
+Per gli utenti gia' registrati, `/onboarding/prepare` conserva il recupero
+idempotente al primo accesso, con lock sull'utente. In questo recupero gli
+amministratori preesistenti e gli utenti con strategie o connessioni vengono
+esclusi; chi ha workspace vuoto e stato `{}` riceve gli esempi senza configurare
+ID template. Uno stato gia' preparato non viene sovrascritto.
 
-- copie dei template agent e nuove chat, senza messaggi o cronologia;
-- una connessione Binance Spot `data_only=true`, `read_only=true`, senza chiavi;
+Vengono creati:
+
+- Tutor e Risk Manager personali e nuove chat, senza messaggi o cronologia;
+- una connessione Binance Spot inattiva `data_only=true`, `read_only=true`, senza chiavi;
 - un account tecnico Binance `spot`, tipo `data_only`, senza saldo;
 - una strategia BTC/USDT oraria con size 0.001 BTC e chat di design;
 - una connessione cTrader demo inattiva, senza token, con `read_only=true`;
 - un account locale `provisional`, senza saldo o credenziali;
 - una normale strategia EUR/USD oraria, con chat di design e regola di esempio.
 
+Gli ID agent non sono condivisi tra utenti. Nome, profilo, persona e webhook
+sono modificabili tramite le normali API agent con controllo del proprietario.
+Il webhook puo' essere comune come servizio di esecuzione, ma non comporta
+record agent, chat o configurazioni condivise. Modificare gli standard nel
+codice non riscrive gli agent gia' creati. Nel recupero di utenti con agent
+omonimi vengono mantenuti i loro record personali e le loro modifiche.
+
 Il provisioning e' idempotente. Risorse eliminate successivamente non vengono
 ricreate automaticamente. La guida puo' essere chiusa e ripresa dal workspace
 o dalla pagina Help. Non viene creato un backtest prima del collegamento.
 
-Il primo accesso apre Bitcoin. Il pulsante della guida collega i dati pubblici
+Entrambe le connessioni nascono inattive: nessun gateway viene avviato per un
+utente appena registrato o ancora in attesa di verifica. Il primo accesso apre
+Bitcoin. Il pulsante della guida attiva la connessione e collega i dati pubblici
 usando la normale API delle connessioni: non servono conto Binance, API key o
 depositi. Grafici e backtest usano il feed Spot BTC/USDT. La disponibilita'
 dipende dall'accesso alle API pubbliche Binance dal server, dai limiti di

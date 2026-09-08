@@ -7,11 +7,25 @@ from fastapi import HTTPException, status
 from app.core.config import settings
 from app.models.user import User, UserStatus, apply_status
 from app.schemas.user import UserCreate
+from app.services.onboarding_service import provision_user_workspace
 from app.utils.auth_utils import get_password_hash
 
 logger = logging.getLogger(__name__)
 
 ALLOWED_ROLES = {"user", "admin"}
+
+
+def save_new_user(session: Session, user: User) -> User:
+    try:
+        session.add(user)
+        session.flush()
+        provision_user_workspace(session, user)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    session.refresh(user)
+    return user
 
 
 def create_user(session: Session, payload: UserCreate) -> User:
@@ -41,10 +55,7 @@ def create_user(session: Session, payload: UserCreate) -> User:
         approved_at=datetime.now(timezone.utc),
     )
     apply_status(user, UserStatus.ACTIVE)
-    session.add(user)
-    session.commit()
-    session.refresh(user)
-    return user
+    return save_new_user(session, user)
 
 
 def ensure_bootstrap_admin(session: Session) -> None:
@@ -75,8 +86,7 @@ def ensure_bootstrap_admin(session: Session) -> None:
         approved_at=now,
     )
     apply_status(admin, UserStatus.ACTIVE)
-    session.add(admin)
-    session.commit()
+    save_new_user(session, admin)
     logger.info("Seeded bootstrap administrator %s", settings.BOOTSTRAP_ADMIN_EMAIL)
 
 
