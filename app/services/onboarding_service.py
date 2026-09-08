@@ -154,9 +154,9 @@ def update_onboarding(session: Session, user_id: int, *, dismissed: bool, step: 
     user = session.exec(select(User).where(User.id == user_id).with_for_update()).one()
     if user.onboarding.get("status") not in {"pending", "ready"}:
         raise HTTPException(409, "La guida iniziale non e' disponibile.")
-    if track not in {"forex", "bitcoin"} or (track == "bitcoin" and not user.onboarding.get("bitcoin_strategy_id")):
+    if track not in {"forex", "bitcoin", "welcome"} or (track == "bitcoin" and not user.onboarding.get("bitcoin_strategy_id")):
         raise HTTPException(409, "Il percorso richiesto non e' disponibile.")
-    prefix = "bitcoin_" if track == "bitcoin" else ""
+    prefix = f"{track}_" if track != "forex" else ""
     user.onboarding = {**user.onboarding, f"{prefix}dismissed": dismissed, f"{prefix}step": step}
     session.add(user)
     session.commit()

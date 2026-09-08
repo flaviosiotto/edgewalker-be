@@ -5,6 +5,10 @@
 1. Applicare `migrations/055_user_onboarding.sql` con il normale processo di
    migrazione, prima di avviare il nuovo backend. La colonna JSONB su `user`
    serve anche alle query degli utenti gia' esistenti.
+   Applicare anche `migrations/056_drop_global_unique_connection_name.sql`:
+   elimina l'unicita' globale residua su `connections.name` mantenendo quella
+   per `(user_id, name)`. Senza questa migrazione, il secondo utente collide
+   con i nomi delle connessioni di esempio e la registrazione viene annullata.
 2. Gli agent standard sono definiti in `app/services/onboarding_defaults.py`:
    Tutor e Risk Manager, creati come record personali con nuovi ID. Tutor e'
    il manager iniziale delle strategie. Non serve `ONBOARDING_AGENT_IDS`.
@@ -63,7 +67,11 @@ o dalla pagina Help. Non viene creato un backtest prima del collegamento.
 
 Entrambe le connessioni nascono inattive: nessun gateway viene avviato per un
 utente appena registrato o ancora in attesa di verifica. Il primo accesso apre
-Bitcoin. Il pulsante della guida attiva la connessione e collega i dati pubblici
+l'elenco strategie con un tour di benvenuto ancorato agli elementi della pagina,
+senza modale o blocco della navigazione. Presenta Bitcoin, Forex e gli agent
+personali, poi lascia scegliere quale strategia esplorare. Il tour prosegue
+nel workspace in fasi dedicate a regole, collegamento e primo backtest.
+Il pulsante della guida Bitcoin attiva la connessione e collega i dati pubblici
 usando la normale API delle connessioni: non servono conto Binance, API key o
 depositi. Grafici e backtest usano il feed Spot BTC/USDT. La disponibilita'
 dipende dall'accesso alle API pubbliche Binance dal server, dai limiti di
@@ -76,7 +84,12 @@ il gateway senza credenziali non interroga saldi, ordini o posizioni private e
 rifiuta inserimenti e cancellazioni di ordini. Il Live viene rifiutato anche
 dal backend. Per trading autenticato si usa una connessione distinta.
 
-Bitcoin e Forex hanno progresso e chiusura della guida indipendenti. Un utente
+Benvenuto, Bitcoin e Forex hanno progresso e chiusura della guida indipendenti,
+salvati sul server. `PATCH /onboarding` accetta anche `track: welcome` e salva
+`welcome_step` e `welcome_dismissed` nel JSONB esistente, senza nuove migrazioni.
+Distribuire backend e frontend aggiornati insieme tramite Dokploy.
+Il tour si riprende dall'elenco o dal workspace, e si ricomincia dalla pagina Help.
+Un utente
 con onboarding Forex gia' preparato riceve il percorso Bitcoin mancante al
 successivo accesso, se la strategia Forex con il suo manager esiste ancora.
 Le risorse Bitcoin eliminate dopo il provisioning non vengono ricreate.
@@ -107,6 +120,15 @@ autorizzata separatamente con scope trading; questa guida non promuove la
 connessione iniziale a operativa.
 
 ## Verifiche
+
+Regressione PostgreSQL della migrazione 056 (solo tabella temporanea, nessuna
+modifica ai dati applicativi; verifica anche la riesecuzione):
+
+```bash
+psql -X -v ON_ERROR_STOP=1 -f scripts/test_connection_name_migration.sql
+```
+
+Usare i normali parametri di connessione PostgreSQL dell'ambiente di test.
 
 Test unitari senza database o gateway reali (Session mock):
 

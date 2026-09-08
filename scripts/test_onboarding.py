@@ -259,6 +259,13 @@ class OnboardingTests(unittest.TestCase):
         self.assertTrue(state["dismissed"])
         self.assertEqual(state["bitcoin_step"], 1)
         self.assertFalse(state["bitcoin_dismissed"])
+        state = update_onboarding(self.session, 1, dismissed=True, step=3, track="welcome")
+        self.assertEqual(state["welcome_step"], 3)
+        self.assertTrue(state["welcome_dismissed"])
+        self.assertEqual(state["step"], 2)
+        self.assertTrue(state["dismissed"])
+        self.assertEqual(state["bitcoin_step"], 1)
+        self.assertFalse(state["bitcoin_dismissed"])
 
     def test_cannot_update_guide_before_preparation(self):
         self.session.exec.return_value = result(self.user)

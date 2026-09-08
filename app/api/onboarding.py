@@ -15,7 +15,7 @@ router = APIRouter(prefix="/onboarding", tags=["Onboarding"])
 class GuideProgress(BaseModel):
     dismissed: bool = False
     step: int = Field(default=0, ge=0, le=4)
-    track: Literal["forex", "bitcoin"] = "forex"
+    track: Literal["forex", "bitcoin", "welcome"] = "forex"
 
 
 class ActivateOnboarding(BaseModel):
