@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Optional
 
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 
@@ -27,6 +28,7 @@ ACTIVE_STATUSES = {UserStatus.ACTIVE.value}
 
 class User(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
+    onboarding: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
     email: str = Field(index=True, unique=True)
     username: str = Field(index=True, unique=True)
     role: str = Field(

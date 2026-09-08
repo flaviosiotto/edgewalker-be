@@ -21,3 +21,8 @@ Starter FastAPI + SQLModel con auth JWT, utenti e healthcheck.
 - `GET /users/me`
 - `GET /health`
 - `GET /version`
+
+## Onboarding
+
+Configurazione degli agent iniziali, migrazione e verifiche dei percorsi Bitcoin e Forex:
+[docs/onboarding.md](docs/onboarding.md).

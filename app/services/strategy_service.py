@@ -33,6 +33,7 @@ from app.services.entitlement_service import (
     check_ai_budget,
 )
 from app.services.limits import LimitKey
+from app.services.onboarding_state import require_configured_account
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
     build_n8n_backend_api_metadata,
@@ -316,6 +317,7 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
     assert_indicator_count(session, user_id, payload.definition)
 
     account = _get_owned_account(session, payload.account_id, user_id)
+    require_configured_account(account)
 
     name = (payload.name or "").strip()
     if not name:
@@ -525,6 +527,7 @@ def copy_strategy(
     """
     source = get_strategy(session, strategy_id, user_id)
     account = _get_owned_account(session, target_account_id, user_id)
+    require_configured_account(account)
     connection = _get_owned_connection(session, account.connection_id, user_id)
 
     assert_within(session, user_id, LimitKey.STRATEGIES_MAX)
@@ -617,6 +620,7 @@ def create_backtest(
     so the backtest retains the exact configuration used at creation time.
     """
     strategy = get_strategy(session, strategy_id, user_id)
+    require_configured_account(session.get(Account, strategy.account_id))
     allowed_sources = {"ibkr", "yahoo", "binance", "ctrader"}
     source = str(payload.source or "").strip().lower()
     connection_source = ""
@@ -863,6 +867,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
 
     # Resolve connection_id from the strategy
     strategy = get_strategy(session, backtest.strategy_id, user_id)
+    require_configured_account(session.get(Account, strategy.account_id))
     connection_id = strategy.connection_id if strategy else None
 
     # Plan limit on concurrent backtests (row lock on the subscription so two

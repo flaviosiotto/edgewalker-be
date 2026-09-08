@@ -210,7 +210,7 @@ class BacktestCreate(BaseModel):
     # Data source parameters (for fetch)
     source: Optional[Literal["ibkr", "yahoo", "binance", "ctrader"]] = None
     timeframe: str = "5m"  # e.g., "1m", "5m", "15m", "1h", "1d"
-    asset: Literal["stock", "future", "futures", "forex"] = "stock"
+    asset: Literal["stock", "future", "futures", "forex", "crypto"] = "stock"
     rth: bool = True  # True = Regular Trading Hours only
     
     # IBKR-specific parameters

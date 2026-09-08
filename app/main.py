@@ -12,6 +12,7 @@ from app.observability import init_telemetry, instrument_app
 from app.db.database import create_db_and_tables, get_session_context
 from app.services.user_service import ensure_bootstrap_admin
 from app.api.auth import router as auth_router
+from app.api.onboarding import router as onboarding_router
 from app.api.users import router as users_router
 from app.api.admin_users import router as admin_users_router
 from app.api.healthcheck import router as system_router
@@ -160,6 +161,7 @@ class TrackIDMiddleware(BaseHTTPMiddleware):
 app.add_middleware(TrackIDMiddleware)
 
 app.include_router(auth_router)
+app.include_router(onboarding_router)
 app.include_router(users_router)
 app.include_router(admin_users_router)
 app.include_router(admin_billing_router)

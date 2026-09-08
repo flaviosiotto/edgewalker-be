@@ -464,8 +464,8 @@ def _binance_env(config: dict[str, Any]) -> dict[str, str]:
     if market_type not in {"spot", "futures"}:
         raise ValueError("Binance market_type must be 'spot' or 'futures'")
     return {
-        "BINANCE_API_KEY": str(config.get("api_key", "")),
-        "BINANCE_API_SECRET": str(config.get("api_secret", "")),
+        "BINANCE_API_KEY": "" if config.get("data_only") else str(config.get("api_key", "")),
+        "BINANCE_API_SECRET": "" if config.get("data_only") else str(config.get("api_secret", "")),
         "BINANCE_TESTNET": str(config.get("testnet", False)).lower(),
         "BINANCE_MARKET_TYPE": market_type,
     }

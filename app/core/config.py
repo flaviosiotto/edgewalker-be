@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     VERSION: str = "0.1.0"
     API_ROOT_PATH: str = "/api"
     API_V1_STR: str = "/api/v1"
+    ONBOARDING_AGENT_IDS: list[int] = Field(default_factory=list)
 
     # Interactive IB Gateway (TWS) launch flow. The browser is redirected to
     # the per-connection noVNC container under
