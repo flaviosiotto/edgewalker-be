@@ -33,6 +33,7 @@ from sqlmodel import Session, select
 from app.db.database import get_session_context
 from app.models.connection import Account, Connection, ConnectionStatus, AccountSnapshot
 from app.services.broker_connectors.base import ConnectorResult, DiscoveredAccount
+from app.services.tws_diagnostics import read_tws_logs, redact_tws_logs, tws_phase
 from app.services.tws_launch_service import (
     clear_tws_launch_session,
     create_tws_launch_url,
@@ -942,7 +943,12 @@ class ConnectionManager:
             "TWS_READ_ONLY_API": str(config.get("read_only_api", False)).lower(),
             "TWS_READ_ONLY_LOGIN": str(config.get("read_only_login", False)).lower(),
             "LOG_LEVEL": "INFO",
+            "TZ": "UTC",
         }
+        restart_time = str(config.get("auto_restart_time", "23:45")).strip()
+        if restart_time:
+            restart_time = datetime.strptime(restart_time, "%H:%M").strftime("%I:%M %p")
+        env["TWS_AUTO_RESTART_TIME"] = restart_time
         username = _first_non_empty_config_value(config, "username", "tws_username", "ib_username", "ib_login_id")
         password = _first_non_empty_config_value(config, "password", "tws_password", "ib_password", "ib_login_password")
         second_factor_device = _first_non_empty_config_value(config, "second_factor_device", "tws_second_factor_device")
@@ -1361,16 +1367,21 @@ class ConnectionManager:
                 "(legacy env name: CLIENT_PORTAL_PATH_ROUTING_ENABLED)"
             )
 
-        existing = self._get_tws_container(connection_id)
+        started_at = asyncio.get_running_loop().time()
+        existing = await asyncio.to_thread(self._get_tws_container, connection_id)
         runtime_already_running = bool(existing and existing.status == "running")
-        container_name, api_port, runtime_session_id = self._spawn_tws_gateway(
-            connection_id, config, allow_recreate=allow_recreate
+        container_name, api_port, runtime_session_id = await asyncio.to_thread(
+            self._spawn_tws_gateway, connection_id, config, allow_recreate=allow_recreate
         )
+        logger.info("TWS startup connection=%s stage=container elapsed=%.2fs", connection_id, asyncio.get_running_loop().time() - started_at)
         if not runtime_already_running:
             try:
-                await self._wait_for_tws_novnc(container_name)
+                await asyncio.gather(
+                    self._wait_for_tws_novnc(container_name),
+                    self._wait_for_tws_router(connection_id),
+                )
             except Exception:
-                self._destroy_tws_gateway(connection_id)
+                await asyncio.to_thread(self._destroy_tws_gateway, connection_id)
                 raise
         else:
             logger.info(
@@ -1379,8 +1390,7 @@ class ConnectionManager:
                 connection_id,
             )
 
-        if TWS_PATH_ROUTING_ENABLED:
-            await self._wait_for_tws_router(connection_id)
+        logger.info("TWS startup connection=%s stage=runtime_ready elapsed=%.2fs", connection_id, asyncio.get_running_loop().time() - started_at)
 
         updated_config = _with_tws_runtime_state(
             config,
@@ -1590,7 +1600,7 @@ class ConnectionManager:
                 "message": message,
             }
 
-        message = "Autenticazione IB Gateway richiesta nel popup."
+        message = "Login IB Gateway in corso. Approva la 2FA quando richiesta."
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
             if conn is not None:
@@ -1616,17 +1626,14 @@ class ConnectionManager:
             "message": message,
         }
 
-    async def tws_auth_status(self, connection_id: int, *, user_id: int | None = None) -> dict[str, Any]:
+    async def tws_auth_status(self, connection_id: int, *, user_id: int | None = None, include_logs: bool = False) -> dict[str, Any]:
         with get_session_context() as session:
             conn = session.get(Connection, connection_id)
             if conn is None:
                 raise ValueError("Connection not found")
             config = dict(conn.config or {})
             status_value = conn.status
-            status_message = conn.status_message
 
-        # Status read: never recreate a live runtime (the user may be mid-login).
-        config = await self._ensure_tws_runtime(connection_id, config, allow_recreate=False)
         launch_url = None
         if user_id is not None and status_value == ConnectionStatus.AWAITING_AUTH.value:
             launch_url = await create_tws_launch_url(
@@ -1636,13 +1643,25 @@ class ConnectionManager:
                 path_prefix=_tws_path_prefix(connection_id),
             )
 
-        container = self._get_tws_container(connection_id)
+        container = await asyncio.to_thread(self._get_tws_container, connection_id)
         gateway_started = bool(container and container.status == "running")
-        probe = await self._probe_tws_api(connection_id, config) if gateway_started else {
-            "ready": False,
-            "message": status_message or "IB Gateway runtime non avviato.",
-        }
-        ready = gateway_started and bool(probe.get("ready"))
+        cached = self._tws_api_probe_cache.get(connection_id)
+        probe = cached[1] if cached and asyncio.get_running_loop().time() - cached[0] <= TWS_API_PROBE_CACHE_SECONDS else {}
+        ready = gateway_started and (status_value == ConnectionStatus.CONNECTED.value or bool(probe.get("ready")))
+        logs: dict[str, str] = {}
+        logs_error = None
+        if gateway_started and (include_logs or status_value != ConnectionStatus.CONNECTED.value):
+            try:
+                logs = await asyncio.to_thread(read_tws_logs, container, config)
+            except Exception:
+                logs_error = "Log TWS temporaneamente non disponibili."
+        elif include_logs and container is not None:
+            try:
+                raw = await asyncio.to_thread(container.logs, tail=200, timestamps=True)
+                logs = {"launcher": redact_tws_logs(raw[-131072:].decode("utf-8", errors="replace"), config, container.attrs.get("Config", {}).get("Env", []) or [])}
+            except Exception:
+                logs_error = "Log TWS non disponibili."
+        phase, message = tws_phase(status_value, container.status if container else "missing", logs, api_ready=ready)
         return {
             "service_ready": gateway_started,
             "authenticated": ready,
@@ -1650,7 +1669,11 @@ class ConnectionManager:
             "gateway_started": gateway_started,
             "connection_status": status_value,
             "launch_url": launch_url,
-            "message": probe.get("message") or status_message or "Completa il login IB Gateway nel popup.",
+            "message": message,
+            "phase": phase,
+            "logs": logs if include_logs else {},
+            "logs_error": logs_error,
+            "observed_at": datetime.now(timezone.utc),
         }
 
     def _tws_connect_lock(self, connection_id: int) -> asyncio.Lock:

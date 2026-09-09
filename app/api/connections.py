@@ -17,7 +17,7 @@ import logging
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session
@@ -385,6 +385,10 @@ class InteractiveAuthStatusResponse(BaseModel):
     connection_status: str
     launch_url: str | None = None
     message: str | None = None
+    phase: str | None = None
+    logs: dict[str, str] = Field(default_factory=dict)
+    logs_error: str | None = None
+    observed_at: datetime | None = None
 
 
 class OrdersRereadRequest(BaseModel):
@@ -415,9 +419,11 @@ async def connect_endpoint(
     manager = get_connection_manager()
 
     if conn.broker_type == "ibkr":
+        user_id = current_user.id
+        session.close()
         auth = await manager.begin_tws_auth(
             connection_id,
-            user_id=current_user.id,
+            user_id=user_id,
         )
         if auth["ready_to_connect"]:
             result = await manager.complete_tws_connect(connection_id)
@@ -446,6 +452,8 @@ async def connect_endpoint(
 @router.get("/{connection_id}/tws/auth-status", response_model=InteractiveAuthStatusResponse)
 async def tws_auth_status_endpoint(
     connection_id: int,
+    response: Response,
+    include_logs: bool = False,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -455,8 +463,11 @@ async def tws_auth_status_endpoint(
     if conn.broker_type != "ibkr":
         raise HTTPException(status_code=400, detail="Connection is not an IBKR connection")
 
+    user_id = current_user.id
+    session.close()
+    response.headers["Cache-Control"] = "no-store"
     manager = get_connection_manager()
-    payload = await manager.tws_auth_status(connection_id, user_id=current_user.id)
+    payload = await manager.tws_auth_status(connection_id, user_id=user_id, include_logs=include_logs)
     return InteractiveAuthStatusResponse(**payload)
 
 
