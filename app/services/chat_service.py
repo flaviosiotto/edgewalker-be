@@ -364,11 +364,43 @@ def _summarize_tool_calls(tool_calls: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+#: Per-turn usage fields exposed to the chat UI. The model name stays out on
+#: purpose: the model is a platform choice the trader does not see.
+_USAGE_PUBLIC_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "cache_read_tokens",
+    "requests",
+    "tool_calls",
+    "credits",
+    "estimated",
+)
+
+
+def _turn_usage(message: dict[str, Any]) -> dict[str, Any] | None:
+    """The turn's token/credit consumption stamped by agent-svc on the answer
+    row (``response_metadata.edgewalker.turn_usage``), or ``None`` for rows
+    written by other producers (n8n memory, runner notes, user messages)."""
+    response_metadata = message.get("response_metadata")
+    if not isinstance(response_metadata, dict):
+        return None
+    edgewalker = response_metadata.get("edgewalker")
+    if not isinstance(edgewalker, dict) or not isinstance(edgewalker.get("turn_usage"), dict):
+        return None
+    raw = edgewalker["turn_usage"]
+    usage = {key: raw[key] for key in _USAGE_PUBLIC_FIELDS if key in raw and raw[key] is not None}
+    return usage or None
+
+
 def _serialize_history_message(entry: N8nChatHistory) -> ChatHistoryMessageRead:
     message = _coerce_message_dict(entry.message)
     metadata_src = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
     metadata = dict(metadata_src)
     message_type = message.get("type") if isinstance(message.get("type"), str) else None
+    usage = _turn_usage(message)
+    if usage is not None:
+        metadata["usage"] = usage
 
     # LangChain tool semantics:
     #   - type=ai with non-empty tool_calls  → agent planning a tool invocation
