@@ -266,6 +266,21 @@ def report_ai_usage(
         reason=payload.reason,
         background_tasks=background_tasks,
     )
+    if entry is not None and not estimated and payload.correlation_id:
+        # Fill the reserved token columns of the runner's agent_call row (marker
+        # on the chart) for the same dispatch; no-op when the turn was not
+        # runner-initiated or already filled.
+        from sqlalchemy import update
+
+        from app.models.agent_call import AgentCall
+
+        session.execute(
+            update(AgentCall)
+            .where(AgentCall.correlation_id == payload.correlation_id)
+            .where(AgentCall.tokens_input.is_(None))
+            .values(tokens_input=tokens_in, tokens_output=tokens_out, model=(payload.model or "")[:64] or None)
+        )
+        session.commit()
     budget = get_ai_budget(session, principal.user.id)
     return AiUsageReportResponse(
         recorded=entry is not None,

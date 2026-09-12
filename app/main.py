@@ -33,6 +33,7 @@ from app.api.lab import router as lab_router
 from app.api.secrets import router as secrets_router
 from app.api.studio_access import router as studio_access_router
 from app.api.billing import router as billing_router
+from app.api.admin_agent_turns import router as admin_agent_turns_router
 from app.api.admin_billing import router as admin_billing_router
 from app.services.connection_events import install_connection_event_listeners
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
@@ -165,6 +166,7 @@ app.include_router(onboarding_router)
 app.include_router(users_router)
 app.include_router(admin_users_router)
 app.include_router(admin_billing_router)
+app.include_router(admin_agent_turns_router)
 app.include_router(billing_router)
 app.include_router(system_router)
 app.include_router(agents_router, dependencies=[Depends(get_current_active_user)])
