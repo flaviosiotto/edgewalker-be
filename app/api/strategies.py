@@ -26,6 +26,8 @@ from app.schemas.strategy import (
     RuleTriggerRequest,
     RuleTriggerResponse,
     LayoutConfigUpdate,
+    ChartDrawingsRead,
+    ChartDrawingsUpdate,
 )
 from app.schemas.chat import ChatCreate, ChatRead
 from app.services.live_summary_service import build_live_summary
@@ -45,6 +47,7 @@ from app.services.strategy_service import (
     delete_strategy_chat,
     trigger_rule_agent,
     update_strategy_layout,
+    update_strategy_chart_drawings,
 )
 from app.utils.auth_utils import (
     AuthPrincipal,
@@ -398,6 +401,24 @@ def update_strategy_layout_endpoint(
     """Update only the UI layout configuration for a strategy."""
     strategy = update_strategy_layout(session, strategy_id, payload, current_user.id)
     return _serialize_strategy_with_live(session, strategy)
+
+
+@router.put("/{strategy_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
+def update_strategy_chart_drawings_endpoint(
+    strategy_id: int,
+    chart_id: str,
+    payload: ChartDrawingsUpdate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Replace the user drawings of one chart (``definition.strategy.charts[].drawings``).
+
+    Dedicated write path so chart annotations never go through the full
+    strategy update: no name/entitlement checks, no rule normalisation, and
+    the frozen definition of a running live/backtest is left untouched.
+    """
+    drawings = update_strategy_chart_drawings(session, strategy_id, chart_id, payload, current_user.id)
+    return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)
 
 
 # ─── CHAT ENDPOINTS ───

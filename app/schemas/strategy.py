@@ -1,7 +1,7 @@
 from datetime import datetime, date
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.chat import ChatRead
 from app.schemas.live_strategy import LiveStrategySummaryRead
@@ -411,6 +411,87 @@ class BacktestListPage(BaseModel):
 class LayoutConfigUpdate(BaseModel):
     """Schema for updating only the layout_config field."""
     layout_config: dict[str, Any]
+
+
+# ─── CHART DRAWINGS SCHEMAS ───
+#
+# Canonical schema of a user drawing on a strategy chart, mirrored by
+# ``edgewalker.charting.drawings`` (renderer) and the FE
+# ``plugins/drawings/types.ts``.  Stored in
+# ``definition.strategy.charts[i].drawings``; ``t`` is epoch seconds UTC.
+
+DrawingType = Literal[
+    "trend_line", "ray", "extended_line",
+    "horizontal_line", "horizontal_ray", "vertical_line",
+    "rectangle", "path", "text", "callout",
+]
+
+#: type → (min anchors, max anchors | None)
+DRAWING_ANCHOR_COUNTS: dict[str, tuple[int, int | None]] = {
+    "trend_line": (2, 2),
+    "ray": (2, 2),
+    "extended_line": (2, 2),
+    "horizontal_line": (1, 1),
+    "horizontal_ray": (1, 1),
+    "vertical_line": (1, 1),
+    "rectangle": (2, 2),
+    "path": (2, None),
+    "text": (1, 1),
+    "callout": (2, 2),
+}
+
+MAX_DRAWING_ANCHORS = 500
+MAX_DRAWINGS_PER_CHART = 200
+
+
+class ChartDrawingAnchor(BaseModel):
+    t: float = Field(description="Epoch seconds UTC")
+    p: float = Field(description="Price")
+
+
+class ChartDrawingStyle(BaseModel):
+    color: str = Field(default="#2962ff", max_length=32)
+    width: float = Field(default=2.0, gt=0, le=20)
+    dash: Literal["solid", "dashed", "dotted"] = "solid"
+    fill: Optional[str] = Field(default=None, max_length=32)
+    fill_opacity: Optional[float] = Field(default=None, ge=0, le=1)
+    font_size: Optional[float] = Field(default=None, gt=0, le=72)
+    text_color: Optional[str] = Field(default=None, max_length=32)
+
+
+class ChartDrawing(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    type: DrawingType
+    symbol: Optional[str] = Field(default=None, max_length=64)
+    anchors: list[ChartDrawingAnchor] = Field(max_length=MAX_DRAWING_ANCHORS)
+    style: ChartDrawingStyle = Field(default_factory=ChartDrawingStyle)
+    props: dict[str, Any] = Field(default_factory=dict)
+    locked: bool = False
+    created_at: Optional[int] = None
+    updated_at: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _check_anchor_count(self) -> "ChartDrawing":
+        lo, hi = DRAWING_ANCHOR_COUNTS[self.type]
+        n = len(self.anchors)
+        if n < lo or (hi is not None and n > hi):
+            raise ValueError(
+                f"{self.type} needs {lo}{'+' if hi is None else '' if hi == lo else f'-{hi}'} anchors, got {n}"
+            )
+        text = self.props.get("text")
+        if text is not None and (not isinstance(text, str) or len(text) > 500):
+            raise ValueError("props.text must be a string of at most 500 characters")
+        return self
+
+
+class ChartDrawingsUpdate(BaseModel):
+    """Full replacement of the drawings of one chart (PUT semantics)."""
+    drawings: list[ChartDrawing] = Field(max_length=MAX_DRAWINGS_PER_CHART)
+
+
+class ChartDrawingsRead(BaseModel):
+    chart_id: str
+    drawings: list[ChartDrawing]
 
 
 # ─── TRADE SCHEMAS ───

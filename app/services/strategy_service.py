@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import uuid
@@ -25,6 +26,7 @@ from app.schemas.strategy import (
     BacktestUpdate,
     TradeCreate,
     LayoutConfigUpdate,
+    ChartDrawingsUpdate,
 )
 from app.schemas.chat import ChatCreate
 from app.services.entitlement_service import (
@@ -1077,6 +1079,76 @@ def update_strategy_layout(
     session.commit()
     session.refresh(strategy)
     return strategy
+
+
+def update_strategy_chart_drawings(
+    session: Session,
+    strategy_id: int,
+    chart_id: str,
+    payload: ChartDrawingsUpdate,
+    user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Replace the drawings of one chart inside ``definition.strategy.charts``.
+
+    Drawings are chart annotations the trader edits at any time (also while a
+    run is active), so they get their own write path: the definition is
+    patched in place without going through the full strategy update (name
+    checks, indicator entitlement, rule normalisation) and without touching
+    the frozen copy of a running live/backtest.  The agent workflow reads
+    them from the saved strategy, so an edit during a run reaches the next
+    chart render.
+
+    A legacy definition without ``charts[]`` gets the primary chart
+    materialised from the flat fields when ``chart_id == "main"`` (the same
+    fallback the runner applies).  Any other unknown chart id is a 404.
+    """
+    strategy = get_strategy(session, strategy_id, user_id)
+    definition = copy.deepcopy(strategy.definition) if isinstance(strategy.definition, dict) else None
+    strat = definition.get("strategy") if isinstance(definition, dict) else None
+    if not isinstance(strat, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Strategy definition has no 'strategy' object",
+        )
+
+    charts = strat.get("charts")
+    if not isinstance(charts, list) or not charts:
+        if chart_id != "main":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chart not found")
+        charts = [{
+            "id": "main",
+            "symbol": strat.get("symbol") or "",
+            "timeframe": strat.get("timeframe") or "5m",
+            "indicators": list(strat.get("indicators") or []),
+            **({"asset": strat["asset"]} if strat.get("asset") else {}),
+            **({"history_depth_days": strat["history_depth_days"]} if strat.get("history_depth_days") else {}),
+        }]
+        strat["charts"] = charts
+
+    target: dict[str, Any] | None = None
+    for i, entry in enumerate(charts):
+        if not isinstance(entry, dict):
+            continue
+        entry_id = str(entry.get("id") or ("main" if i == 0 else f"chart-{i}"))
+        if entry_id == chart_id:
+            target = entry
+            break
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chart not found")
+
+    drawings = [d.model_dump(exclude_none=True) for d in payload.drawings]
+    if drawings:
+        target["drawings"] = drawings
+    else:
+        target.pop("drawings", None)
+
+    # New top-level object: SQLAlchemy sees the JSONB column as changed.
+    strategy.definition = definition
+    strategy.updated_at = datetime.now(timezone.utc)
+    session.add(strategy)
+    session.commit()
+    session.refresh(strategy)
+    return drawings
 
 
 def update_backtest_layout(
