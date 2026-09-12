@@ -1081,34 +1081,21 @@ def update_strategy_layout(
     return strategy
 
 
-def update_strategy_chart_drawings(
-    session: Session,
-    strategy_id: int,
-    chart_id: str,
-    payload: ChartDrawingsUpdate,
-    user_id: int | None = None,
-) -> list[dict[str, Any]]:
-    """Replace the drawings of one chart inside ``definition.strategy.charts``.
+def _definition_with_chart_drawings(definition: Any, chart_id: str, drawings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a copy of *definition* with ``strategy.charts[chart_id].drawings`` replaced.
 
-    Drawings are chart annotations the trader edits at any time (also while a
-    run is active), so they get their own write path: the definition is
-    patched in place without going through the full strategy update (name
-    checks, indicator entitlement, rule normalisation) and without touching
-    the frozen copy of a running live/backtest.  The agent workflow reads
-    them from the saved strategy, so an edit during a run reaches the next
-    chart render.
-
+    Shared by the strategy (design), live-session and backtest write paths:
+    the three JSONB snapshots have the same ``{"strategy": {...}}`` shape.
     A legacy definition without ``charts[]`` gets the primary chart
     materialised from the flat fields when ``chart_id == "main"`` (the same
     fallback the runner applies).  Any other unknown chart id is a 404.
     """
-    strategy = get_strategy(session, strategy_id, user_id)
-    definition = copy.deepcopy(strategy.definition) if isinstance(strategy.definition, dict) else None
+    definition = copy.deepcopy(definition) if isinstance(definition, dict) else None
     strat = definition.get("strategy") if isinstance(definition, dict) else None
     if not isinstance(strat, dict):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Strategy definition has no 'strategy' object",
+            detail="Definition has no 'strategy' object",
         )
 
     charts = strat.get("charts")
@@ -1136,18 +1123,80 @@ def update_strategy_chart_drawings(
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chart not found")
 
-    drawings = [d.model_dump(exclude_none=True) for d in payload.drawings]
     if drawings:
         target["drawings"] = drawings
     else:
         target.pop("drawings", None)
+    return definition  # type: ignore[return-value]
 
+
+def update_strategy_chart_drawings(
+    session: Session,
+    strategy_id: int,
+    chart_id: str,
+    payload: ChartDrawingsUpdate,
+    user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Replace the drawings of one chart of the *design* strategy.
+
+    Dedicated write path: the definition is patched in place without going
+    through the full strategy update (name checks, indicator entitlement,
+    rule normalisation).  Live sessions and backtests keep their own
+    drawings on their frozen snapshot (see :func:`update_live_chart_drawings`
+    and :func:`update_backtest_chart_drawings`); a new run starts with a
+    copy of the design drawings because the snapshot copies the definition.
+    """
+    strategy = get_strategy(session, strategy_id, user_id)
+    drawings = [d.model_dump(exclude_none=True) for d in payload.drawings]
     # New top-level object: SQLAlchemy sees the JSONB column as changed.
-    strategy.definition = definition
+    strategy.definition = _definition_with_chart_drawings(strategy.definition, chart_id, drawings)
     strategy.updated_at = datetime.now(timezone.utc)
     session.add(strategy)
     session.commit()
     session.refresh(strategy)
+    return drawings
+
+
+def update_live_chart_drawings(
+    session: Session,
+    live_id: int,
+    chart_id: str,
+    payload: ChartDrawingsUpdate,
+    user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Replace the drawings of one chart on a live session's frozen definition.
+
+    Drawings made while trading live belong to that session, not to the
+    design: the agent workflow reads the run snapshot (``strategy_live.definition``)
+    on every turn, so an edit here reaches the next chart render.
+    """
+    sl = session.get(StrategyLive, live_id)
+    if not sl:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Live session {live_id} not found")
+    if user_id is not None:
+        _ = get_strategy(session, sl.strategy_id, user_id)
+    drawings = [d.model_dump(exclude_none=True) for d in payload.drawings]
+    sl.definition = _definition_with_chart_drawings(sl.definition, chart_id, drawings)
+    session.add(sl)
+    session.commit()
+    session.refresh(sl)
+    return drawings
+
+
+def update_backtest_chart_drawings(
+    session: Session,
+    backtest_id: int,
+    chart_id: str,
+    payload: ChartDrawingsUpdate,
+    user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Replace the drawings of one chart on a backtest's config snapshot."""
+    backtest = get_backtest(session, backtest_id, user_id)
+    drawings = [d.model_dump(exclude_none=True) for d in payload.drawings]
+    backtest.config = _definition_with_chart_drawings(backtest.config, chart_id, drawings)
+    session.add(backtest)
+    session.commit()
+    session.refresh(backtest)
     return drawings
 
 

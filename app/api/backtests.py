@@ -17,6 +17,8 @@ from app.schemas.strategy import (
     BacktestSummary,
     LayoutConfigUpdate,
     TradeRead,
+    ChartDrawingsRead,
+    ChartDrawingsUpdate,
 )
 from app.schemas.chat import ChatRead
 from app.services.strategy_service import (
@@ -28,6 +30,7 @@ from app.services.strategy_service import (
     list_all_backtests,
     list_trades,
     run_backtest,
+    update_backtest_chart_drawings,
     update_backtest_layout,
 )
 from app.utils.auth_utils import get_current_active_or_consultative_user
@@ -508,6 +511,19 @@ def update_backtest_layout_endpoint(
 ):
     """Update only the UI layout configuration for a backtest."""
     return update_backtest_layout(session, backtest_id, payload, current_user.id)
+
+
+@router.put("/{backtest_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
+def update_backtest_chart_drawings_endpoint(
+    backtest_id: int,
+    chart_id: str,
+    payload: ChartDrawingsUpdate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Replace the user drawings of one chart on the backtest's config snapshot."""
+    drawings = update_backtest_chart_drawings(session, backtest_id, chart_id, payload, current_user.id)
+    return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)
 
 
 @router.get("/{backtest_id}/trades", response_model=list[TradeRead])

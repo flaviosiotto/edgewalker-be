@@ -411,11 +411,12 @@ def update_strategy_chart_drawings_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Replace the user drawings of one chart (``definition.strategy.charts[].drawings``).
+    """Replace the user drawings of one chart of the design strategy.
 
     Dedicated write path so chart annotations never go through the full
-    strategy update: no name/entitlement checks, no rule normalisation, and
-    the frozen definition of a running live/backtest is left untouched.
+    strategy update: no name/entitlement checks, no rule normalisation.
+    Live sessions and backtests have their own endpoints (drawings made
+    during a run stay on that run's snapshot).
     """
     drawings = update_strategy_chart_drawings(session, strategy_id, chart_id, payload, current_user.id)
     return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)

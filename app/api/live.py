@@ -23,6 +23,7 @@ from app.models.live_trading import LiveFill, LivePosition, PositionStatus
 from app.models.strategy import LiveStatus, Strategy, StrategyLive
 from app.models.user import User
 from app.schemas.chat import ChatRead
+from app.schemas.strategy import ChartDrawingsRead, ChartDrawingsUpdate
 from app.schemas.live_strategy import (
     LiveDashboardOverviewRead,
     LivePerformanceSummary,
@@ -1468,6 +1469,24 @@ def update_live_layout_endpoint(
         live_id=sl.id,
         layout_config=sl.layout_config,
     )
+
+
+@router.put("/sessions/{live_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
+def update_live_chart_drawings_endpoint(
+    live_id: int,
+    chart_id: str,
+    payload: ChartDrawingsUpdate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Replace the user drawings of one chart on the live session's snapshot.
+
+    Drawings made while trading live belong to that session (the agent reads
+    them from ``strategy_live.definition``), not to the design strategy.
+    """
+    from app.services.strategy_service import update_live_chart_drawings
+    drawings = update_live_chart_drawings(session, live_id, chart_id, payload, current_user.id)
+    return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)
 
 
 # ═════════════════════════════════════════════════════════════════════
