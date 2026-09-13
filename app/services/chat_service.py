@@ -340,7 +340,9 @@ def _default_sender_label(sender_kind: str | None) -> str | None:
     if sender_kind == "user":
         return "You"
     if sender_kind == "agent":
-        return "Agent"
+        # No generic label: the agent's own name comes from metadata.agent_name
+        # (agent-svc rows); the frontend falls back to the chat's current agent.
+        return None
     if sender_kind == "system":
         return "System"
     if sender_kind in ("tool_call", "tool_result"):
