@@ -29,7 +29,8 @@ from app.models.billing import (
     SubscriptionStatus,
 )
 from app.models.user import User
-from app.services import email_templates
+from app.models.wallet import CreditPack, TopupStatus, WalletTopup
+from app.services import email_templates, wallet_service
 from app.services.billing.billing_service import (
     _close_subscription,
     _open_subscription,
@@ -56,6 +57,8 @@ ENTITY_PRICE = "plan_price"
 ENTITY_COUPON = "coupon"  # provider promotion code
 ENTITY_COUPON_BASE = "coupon_base"  # provider coupon behind the promotion code
 ENTITY_SUBSCRIPTION = "subscription"
+ENTITY_CREDIT_PACK = "credit_pack"  # provider product of a wallet top-up pack
+ENTITY_CREDIT_PACK_PRICE = "credit_pack_price"
 
 
 def _utcnow() -> datetime:
@@ -167,6 +170,105 @@ def sync_catalog(session: Session) -> list[dict[str, Any]]:
                 "price_external_id": price_external_id,
             })
     return rows
+
+
+def ensure_pack_ref(session: Session, pack: CreditPack, provider: BillingProvider) -> str:
+    """Provider one-off price for a top-up pack (product + price, rotated
+    when the amount changes, like plan prices)."""
+    product_ref = get_external_ref(session, ENTITY_CREDIT_PACK, pack.id, provider.name)
+    price_ref = get_external_ref(session, ENTITY_CREDIT_PACK_PRICE, pack.id, provider.name)
+    product_id, price_id = provider.sync_plan_price(
+        plan_code=f"credit_pack_{pack.id}",
+        plan_name=f"Credito EdgeWalker {pack.name}",
+        interval="one_time",
+        amount_cents=pack.amount_cents,
+        currency=pack.currency,
+        existing_product_id=product_ref.external_id if product_ref else None,
+        existing_price_id=price_ref.external_id if price_ref else None,
+    )
+    set_external_ref(session, ENTITY_CREDIT_PACK, pack.id, provider.name, product_id)
+    set_external_ref(session, ENTITY_CREDIT_PACK_PRICE, pack.id, provider.name, price_id)
+    session.commit()
+    return price_id
+
+
+def sync_packs(session: Session) -> list[dict[str, Any]]:
+    """Admin action: every active top-up pack as a product/price on the provider."""
+    provider = get_billing_provider()
+    rows: list[dict[str, Any]] = []
+    for pack in wallet_service.list_packs(session, active_only=True):
+        price_id = ensure_pack_ref(session, pack, provider)
+        product_ref = get_external_ref(session, ENTITY_CREDIT_PACK, pack.id, provider.name)
+        rows.append({
+            "pack_id": pack.id,
+            "name": pack.name,
+            "amount_cents": pack.amount_cents,
+            "credit_cents": pack.credit_cents,
+            "currency": pack.currency,
+            "product_external_id": product_ref.external_id if product_ref else None,
+            "price_external_id": price_id,
+        })
+    return rows
+
+
+def create_topup_checkout(session: Session, user: User, pack_id: int) -> str:
+    """Hosted one-off checkout for a wallet top-up pack; the wallet is
+    credited by the provider webhook (``PAYMENT_COMPLETED``)."""
+    provider = get_billing_provider()
+    settings_row = wallet_service.get_settings(session)
+    if not settings_row.enabled:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Credito piattaforma disabilitato")
+    pack = session.get(CreditPack, pack_id)
+    if pack is None or not pack.is_active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pacchetto non disponibile")
+    if pack.amount_cents < settings_row.min_topup_cents:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Pacchetto sotto la ricarica minima")
+    customer_id = ensure_customer_ref(session, user, provider)
+    price_external_id = ensure_pack_ref(session, pack, provider)
+    metadata = {"kind": "wallet_topup", "user_id": str(user.id), "pack_id": str(pack.id)}
+    checkout = provider.create_checkout(
+        customer_external_id=customer_id,
+        price_external_id=price_external_id,
+        promotion_code_external_id=None,
+        success_url=settings.BILLING_SUCCESS_URL or build_frontend_url("settings", tab="subscription", topup="success"),
+        cancel_url=build_frontend_url("settings", tab="subscription", topup="cancel"),
+        metadata=metadata,
+        allow_promotion_codes=False,
+        mode="payment",
+    )
+    wallet_service.open_topup(
+        session, user_id=user.id, pack=pack, provider=provider.name, checkout_external_id=checkout.external_id
+    )
+    log_event(
+        session, user_id=user.id, type="topup_started",
+        payload={"pack": pack.name, "amount_cents": pack.amount_cents, "credit_cents": pack.credit_cents},
+    )
+    session.commit()
+    return checkout.url
+
+
+def _apply_payment_completed(session: Session, event: BillingEvent, background_tasks: BackgroundTasks | None) -> bool:
+    if (event.metadata.get("kind") or "") != "wallet_topup" or not event.checkout_external_id:
+        logger.info("Payment event %s/%s is not a wallet top-up, ignored", event.provider, event.event_id)
+        return False
+    topup = wallet_service.settle_topup(
+        session,
+        provider=event.provider,
+        checkout_external_id=event.checkout_external_id,
+        payment_external_id=event.payment_external_id,
+        background_tasks=background_tasks,
+    )
+    if topup is None:
+        return False
+    if event.customer_external_id:
+        set_external_ref(session, ENTITY_CUSTOMER, topup.user_id, event.provider, event.customer_external_id)
+    log_event(
+        session, user_id=topup.user_id, type="topup_completed",
+        payload={**event.raw, "amount_cents": topup.amount_cents, "credit_cents": topup.credit_cents},
+        provider=event.provider, provider_event_id=event.event_id,
+    )
+    session.commit()
+    return True
 
 
 def ensure_coupon_refs(session: Session, coupon: Coupon, provider: BillingProvider) -> str:
@@ -520,6 +622,8 @@ def apply_event(session: Session, event: BillingEvent, *, background_tasks: Back
 
     if event.type == BillingEventType.CHECKOUT_COMPLETED:
         return _apply_checkout_completed(session, event, background_tasks)
+    if event.type == BillingEventType.PAYMENT_COMPLETED:
+        return _apply_payment_completed(session, event, background_tasks)
 
     subscription = _local_subscription_for(session, event)
     if subscription is None:

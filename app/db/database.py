@@ -60,6 +60,13 @@ def create_db_and_tables():
         SubscriptionEvent,
         TrialGrant,
     )
+    from app.models.wallet import (  # noqa: F401
+        CreditPack,
+        PlatformCreditSettings,
+        UserWallet,
+        WalletLedger,
+        WalletTopup,
+    )
 
     bootstrap_tables = [
         table

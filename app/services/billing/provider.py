@@ -25,6 +25,8 @@ from fastapi import HTTPException, status
 class BillingEventType(str, Enum):
     #: hosted checkout finished: a provider subscription now exists for a user
     CHECKOUT_COMPLETED = "checkout_completed"
+    #: hosted checkout in one-off payment mode finished (wallet top-up)
+    PAYMENT_COMPLETED = "payment_completed"
     #: first invoice of a subscription paid
     SUBSCRIPTION_ACTIVATED = "subscription_activated"
     #: a renewal invoice paid
@@ -68,6 +70,11 @@ class BillingEvent:
     metadata: dict[str, str] = field(default_factory=dict)
     #: e.g. invoice billing reason ("subscription_create" / "subscription_cycle")
     reason: Optional[str] = None
+    #: one-off payments (PAYMENT_COMPLETED): checkout session and payment ids
+    checkout_external_id: Optional[str] = None
+    payment_external_id: Optional[str] = None
+    amount_cents: Optional[int] = None
+    currency: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -103,6 +110,7 @@ class BillingProvider(Protocol):
         cancel_url: str,
         metadata: dict[str, str],
         allow_promotion_codes: bool,
+        mode: str = "subscription",
     ) -> CheckoutSession: ...
 
     def create_portal(self, *, customer_external_id: str, return_url: str) -> str: ...

@@ -38,6 +38,8 @@ _RECURRING = {
     "semester": {"interval": "month", "interval_count": 6},
     "year": {"interval": "year", "interval_count": 1},
 }
+#: ``interval`` value for one-off prices (wallet top-up packs)
+ONE_TIME = "one_time"
 
 _STATUS_MAP = {
     "trialing": BillingSubscriptionStatus.TRIALING,
@@ -143,7 +145,27 @@ def map_event(event: Any) -> list[BillingEvent]:
     raw = {"type": event_type, "object_id": _get(obj, "id")}
 
     if event_type == "checkout.session.completed":
-        if str(_get(obj, "mode", "")) != "subscription":
+        mode = str(_get(obj, "mode", ""))
+        if mode == "payment":
+            if str(_get(obj, "payment_status", "")) not in ("paid", "no_payment_required"):
+                return []
+            customer = _get(obj, "customer")
+            payment_intent = _get(obj, "payment_intent")
+            return [
+                BillingEvent(
+                    type=BillingEventType.PAYMENT_COMPLETED,
+                    provider=PROVIDER_NAME,
+                    event_id=event_id,
+                    customer_external_id=customer if isinstance(customer, str) else (str(_get(customer, "id")) if customer else None),
+                    checkout_external_id=str(_get(obj, "id")),
+                    payment_external_id=payment_intent if isinstance(payment_intent, str) else (str(_get(payment_intent, "id")) if payment_intent else None),
+                    amount_cents=int(_get(obj, "amount_total") or 0) or None,
+                    currency=str(_get(obj, "currency") or "").upper() or None,
+                    metadata=_metadata(obj),
+                    raw=raw,
+                )
+            ]
+        if mode != "subscription":
             return []
         subscription = _get(obj, "subscription")
         customer = _get(obj, "customer")
@@ -279,17 +301,24 @@ class StripeProvider:
         cancel_url: str,
         metadata: dict[str, str],
         allow_promotion_codes: bool,
+        mode: str = "subscription",
     ) -> CheckoutSession:
         params: dict[str, Any] = {
-            "mode": "subscription",
+            "mode": mode,
             "customer": customer_external_id,
             "line_items": [{"price": price_external_id, "quantity": 1}],
             "success_url": success_url,
             "cancel_url": cancel_url,
             "metadata": metadata,
-            "subscription_data": {"metadata": metadata},
             "customer_update": {"address": "auto", "name": "auto"},
         }
+        if mode == "subscription":
+            params["subscription_data"] = {"metadata": metadata}
+        else:
+            # One-off payment (wallet top-up): the invoice keeps the metadata
+            # and the receipt goes out from Stripe.
+            params["payment_intent_data"] = {"metadata": metadata}
+            params["invoice_creation"] = {"enabled": True}
         if promotion_code_external_id:
             params["discounts"] = [{"promotion_code": promotion_code_external_id}]
         elif allow_promotion_codes:
@@ -327,8 +356,8 @@ class StripeProvider:
         existing_product_id: Optional[str],
         existing_price_id: Optional[str],
     ) -> tuple[str, str]:
-        recurring = _RECURRING.get(interval)
-        if recurring is None:
+        recurring = None if interval == ONE_TIME else _RECURRING.get(interval)
+        if recurring is None and interval != ONE_TIME:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Periodo non supportato: {interval}")
         try:
             product_id = existing_product_id
@@ -347,11 +376,18 @@ class StripeProvider:
                 price_product = _get(price, "product")
                 if price_product is not None and not isinstance(price_product, str):
                     price_product = _get(price_product, "id")
+                same_period = (
+                    price_recurring is None
+                    if recurring is None
+                    else (
+                        _get(price_recurring, "interval") == recurring["interval"]
+                        and int(_get(price_recurring, "interval_count") or 0) == recurring["interval_count"]
+                    )
+                )
                 same = (
                     int(_get(price, "unit_amount") or -1) == int(amount_cents)
                     and str(_get(price, "currency", "")).lower() == currency.lower()
-                    and _get(price_recurring, "interval") == recurring["interval"]
-                    and int(_get(price_recurring, "interval_count") or 0) == recurring["interval_count"]
+                    and same_period
                     and price_product == product_id
                 )
                 if same:
@@ -361,13 +397,15 @@ class StripeProvider:
                 # Prices are immutable: archive the old one, create the new one.
                 stripe.Price.modify(existing_price_id, active=False)
 
-            price = stripe.Price.create(
-                product=product_id,
-                unit_amount=int(amount_cents),
-                currency=currency.lower(),
-                recurring=recurring,
-                metadata={"plan_code": plan_code, "interval": interval},
-            )
+            price_params: dict[str, Any] = {
+                "product": product_id,
+                "unit_amount": int(amount_cents),
+                "currency": currency.lower(),
+                "metadata": {"plan_code": plan_code, "interval": interval},
+            }
+            if recurring is not None:
+                price_params["recurring"] = recurring
+            price = stripe.Price.create(**price_params)
         except stripe.StripeError as exc:
             raise _provider_error(exc) from exc
         return product_id, str(price["id"])

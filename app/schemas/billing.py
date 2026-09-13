@@ -136,6 +136,7 @@ class SubscriptionRead(BaseModel):
     trial_available_plan_ids: list[int] = Field(default_factory=list)
     billing_enabled: bool = False
     events: list[SubscriptionEventRead] = Field(default_factory=list)
+    wallet: Optional["WalletRead"] = None
 
 
 class TrialStartRequest(BaseModel):
@@ -163,6 +164,10 @@ class AiUsageReportRequest(BaseModel):
     prompt_chars: Optional[int] = Field(default=None, ge=0)
     response_chars: Optional[int] = Field(default=None, ge=0)
     reason: str = Field(default="agent_turn", max_length=32)
+    # Real provider cost of the turn (data only, never used to charge).
+    provider: Optional[str] = Field(default=None, max_length=40)
+    cost: Optional[Decimal] = Field(default=None, ge=0)
+    cost_currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
 
 
 class AiUsageReportResponse(BaseModel):
@@ -171,6 +176,11 @@ class AiUsageReportResponse(BaseModel):
     estimated: Optional[bool] = None
     used: Decimal
     granted: Optional[Decimal] = None
+    #: cents charged to the platform credit for this turn (0 = all from the plan)
+    wallet_cents: Optional[int] = None
+    #: where the next turn is paid from: plan | wallet | none
+    source: str = "plan"
+    wallet_balance_cents: int = 0
 
 
 class AiBudgetRead(BaseModel):
@@ -180,6 +190,10 @@ class AiBudgetRead(BaseModel):
     remaining: Optional[Decimal] = None
     period_start: date
     period_end: date
+    source: str = "plan"
+    wallet_enabled: bool = False
+    wallet_usable: bool = False
+    wallet_balance_cents: int = 0
 
 
 class AiModelRateRead(BaseModel):
@@ -256,6 +270,7 @@ class AdminSubscriptionRow(BaseModel):
     ai_credits_granted: Optional[float] = None
     counters: dict[str, int] = Field(default_factory=dict)
     over_limit: list[str] = Field(default_factory=list)
+    wallet_balance_cents: int = 0
 
 
 class AdminSubscriptionPage(BaseModel):
@@ -369,3 +384,155 @@ class CatalogSyncRow(BaseModel):
     currency: Optional[str] = None
     product_external_id: Optional[str] = None
     price_external_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Platform credit (wallet) — docs/credito-piattaforma-studio.md
+# ---------------------------------------------------------------------------
+
+
+class CreditPackRead(BaseModel):
+    id: int
+    name: str
+    amount_cents: int
+    credit_cents: int
+    currency: str
+    is_active: bool
+    sort_order: int
+
+
+class CreditPackInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    amount_cents: int = Field(gt=0)
+    credit_cents: int = Field(gt=0)
+    currency: str = Field(default="EUR", min_length=3, max_length=3)
+    is_active: bool = True
+    sort_order: int = 0
+
+
+class WalletRead(BaseModel):
+    enabled: bool
+    currency: str
+    balance_cents: int
+    auto_use_for_ai: bool
+    price_per_ai_credit_cents: Decimal
+    low_balance_cents: int
+    min_topup_cents: int
+    packs: list[CreditPackRead] = Field(default_factory=list)
+
+
+class WalletUpdateRequest(BaseModel):
+    auto_use_for_ai: bool
+
+
+class WalletLedgerRead(BaseModel):
+    id: int
+    user_id: int
+    amount_cents: int
+    balance_after_cents: int
+    kind: str
+    ai_credits: Optional[Decimal] = None
+    ai_ledger_id: Optional[int] = None
+    topup_id: Optional[int] = None
+    note: Optional[str] = None
+    actor_user_id: Optional[int] = None
+    created_at: datetime
+    # admin listing only
+    email: Optional[str] = None
+
+
+class WalletLedgerPage(BaseModel):
+    items: list[WalletLedgerRead]
+    total: int
+
+
+class TopupRequest(BaseModel):
+    pack_id: int
+
+
+class PlatformCreditSettingsRead(BaseModel):
+    enabled: bool
+    currency: str
+    price_per_ai_credit_cents: Decimal
+    low_balance_cents: int
+    min_topup_cents: int
+    display_fx_eur_per_usd: Optional[Decimal] = None
+    updated_at: datetime
+
+
+class PlatformCreditSettingsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    price_per_ai_credit_cents: Optional[Decimal] = Field(default=None, ge=0)
+    low_balance_cents: Optional[int] = Field(default=None, ge=0)
+    min_topup_cents: Optional[int] = Field(default=None, ge=0)
+    display_fx_eur_per_usd: Optional[Decimal] = Field(default=None, gt=0)
+    clear_display_fx: bool = False
+
+
+class AdminWalletAdjustRequest(BaseModel):
+    amount_cents: int = Field(description="positivo = accredito, negativo = addebito")
+    note: Optional[str] = Field(default=None, max_length=500)
+    notify: bool = True
+    kind: str = Field(default="admin_adjust", pattern="^(admin_adjust|refund)$")
+
+
+class AdminUserWalletRead(BaseModel):
+    wallet: WalletRead
+    ledger: list[WalletLedgerRead]
+
+
+class WalletSummaryRead(BaseModel):
+    currency: str
+    days: int
+    outstanding_cents: int
+    wallets_with_balance: int
+    users_low_balance: int
+    topups_cents: int
+    topups_count: int
+    overage_cents: int
+    overage_count: int
+    overage_credits: float
+    admin_adjust_cents: int
+    admin_adjust_count: int
+
+
+class PackSyncRow(BaseModel):
+    pack_id: int
+    name: str
+    amount_cents: int
+    credit_cents: int
+    currency: str
+    product_external_id: Optional[str] = None
+    price_external_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Provider token cost report
+# ---------------------------------------------------------------------------
+
+
+class AiCostRow(BaseModel):
+    group: str
+    calls: int
+    calls_with_cost: int
+    tokens_input: int
+    tokens_output: int
+    tokens_cached: int
+    tokens_reasoning: int
+    cost: Optional[Decimal] = None
+    cost_currency: Optional[str] = None
+    avg_cost_per_call: Optional[Decimal] = None
+    cost_per_1k_tokens: Optional[Decimal] = None
+    cached_share: Optional[float] = None
+    credits: Decimal
+    credits_per_call: Optional[Decimal] = None
+    wallet_cents: int = 0
+
+
+class AiCostReport(BaseModel):
+    group_by: str
+    since: datetime
+    until: datetime
+    rows: list[AiCostRow]
+    total: AiCostRow
+    display_fx_eur_per_usd: Optional[Decimal] = None

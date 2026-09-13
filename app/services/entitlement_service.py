@@ -62,6 +62,7 @@ class LimitExceeded(HTTPException):
         plan_code: str,
         plan_name: str,
         message: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         spec = LIMIT_REGISTRY[limit]
         detail = {
@@ -74,6 +75,7 @@ class LimitExceeded(HTTPException):
             "plan_name": plan_name,
             "message": message
             or f"Limite del piano {plan_name} raggiunto: {spec.label.lower()} ({current}/{max_value}).",
+            **(extra or {}),
         }
         super().__init__(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=detail)
 
@@ -94,6 +96,10 @@ class AiBudget:
     used: Decimal
     period_start: date
     period_end: date
+    #: platform credit (wallet) that covers turns beyond ``granted``
+    wallet_enabled: bool = False
+    wallet_usable: bool = False
+    wallet_balance_cents: int = 0
 
     @property
     def remaining(self) -> Optional[Decimal]:
@@ -103,7 +109,19 @@ class AiBudget:
 
     @property
     def exhausted(self) -> bool:
+        """Plan credits of the period used up (the wallet may still allow turns)."""
         return self.granted is not None and self.used >= self.granted
+
+    @property
+    def source(self) -> str:
+        """Where the next turn is paid from: ``plan``, ``wallet`` or ``none``."""
+        if not self.exhausted:
+            return "plan"
+        return "wallet" if self.wallet_usable else "none"
+
+    @property
+    def allowed(self) -> bool:
+        return self.source != "none"
 
 
 # ---------------------------------------------------------------------------
@@ -376,33 +394,58 @@ def get_or_create_ai_period(
     return period
 
 
-def get_ai_budget(session: Session, user_id: int) -> AiBudget:
-    effective = get_effective_limits(session, user_id)
-    period = get_or_create_ai_period(session, user_id, effective)
-    return AiBudget(
-        granted=period.granted, used=period.used, period_start=period.period_key, period_end=period.period_end
-    )
+def _budget_for(session: Session, user_id: int, effective: EffectiveLimits) -> AiBudget:
+    from app.services import wallet_service
 
-
-def check_ai_budget(session: Session, user_id: int) -> AiBudget:
-    """Pre-check before invoking the agent: the turn may run while
-    ``used < granted`` (one turn may overshoot slightly; the next is blocked)."""
-    effective = get_effective_limits(session, user_id)
     period = get_or_create_ai_period(session, user_id, effective)
     budget = AiBudget(
         granted=period.granted, used=period.used, period_start=period.period_key, period_end=period.period_end
     )
-    if budget.exhausted:
+    if budget.granted is not None:
+        # Unlimited users never touch the wallet.
+        budget.wallet_enabled = wallet_service.wallet_enabled(session)
+        if budget.wallet_enabled:
+            wallet = wallet_service.get_wallet(session, user_id)
+            budget.wallet_balance_cents = int(wallet.balance_cents) if wallet else 0
+            budget.wallet_usable = bool(wallet and wallet.auto_use_for_ai and budget.wallet_balance_cents > 0)
+    return budget
+
+
+def get_ai_budget(session: Session, user_id: int) -> AiBudget:
+    effective = get_effective_limits(session, user_id)
+    return _budget_for(session, user_id, effective)
+
+
+def check_ai_budget(session: Session, user_id: int) -> AiBudget:
+    """Pre-check before invoking the agent: the turn may run while
+    ``used < granted`` (one turn may overshoot slightly; the next is blocked)
+    or, once the plan credits are gone, while the platform credit (wallet)
+    is enabled, allowed by the user and positive."""
+    effective = get_effective_limits(session, user_id)
+    budget = _budget_for(session, user_id, effective)
+    if not budget.allowed:
+        renews = budget.period_end.strftime("%d/%m/%Y")
+        if budget.wallet_enabled:
+            hint = (
+                "Il credito piattaforma e' esaurito: ricaricalo per continuare"
+                if budget.wallet_balance_cents <= 0
+                else "Attiva l'uso del credito piattaforma in Impostazioni per continuare"
+            )
+            message = f"Crediti AI del piano {effective.plan.name} esauriti (si rinnovano il {renews}). {hint}."
+        else:
+            message = f"Crediti AI del piano {effective.plan.name} esauriti per questo periodo (si rinnovano il {renews})."
         raise LimitExceeded(
             limit=LimitKey.AI_CREDITS_PER_PERIOD,
             max_value=int(budget.granted) if budget.granted is not None else None,
             current=float(budget.used),
             plan_code=effective.plan.code,
             plan_name=effective.plan.name,
-            message=(
-                f"Crediti AI del piano {effective.plan.name} esauriti per questo periodo "
-                f"(si rinnovano il {budget.period_end.strftime('%d/%m/%Y')})."
-            ),
+            message=message,
+            extra={
+                "wallet_enabled": budget.wallet_enabled,
+                "wallet_balance_cents": budget.wallet_balance_cents,
+                "period_end": budget.period_end.isoformat(),
+            },
         )
     return budget
 
@@ -456,10 +499,19 @@ def record_ai_usage(
     background_tasks: BackgroundTasks | None = None,
     tokens_reasoning: int | None = None,
     tokens_cached: int | None = None,
+    provider: str | None = None,
+    cost: Decimal | None = None,
+    cost_currency: str | None = None,
 ) -> AiCreditLedger | None:
     """Charge one agent turn. Idempotent per ``(correlation_id, session_id)``:
     an estimate is replaced by the real token report, a real report is never
-    overwritten. Returns the ledger row, or ``None`` when nothing changed."""
+    overwritten. Returns the ledger row, or ``None`` when nothing changed.
+
+    ``provider``/``cost``/``cost_currency`` are what the LLM provider reported
+    for the turn (real cost, its currency); stored as data, never used to
+    charge. Credits beyond the period allowance are charged to the platform
+    credit (wallet) through :func:`wallet_service.charge_ai_overage`.
+    """
     effective = get_effective_limits(session, user_id)
     period = get_or_create_ai_period(session, user_id, effective)
     credits = compute_credits(session, model=model, tokens_input=tokens_input, tokens_output=tokens_output)
@@ -477,7 +529,8 @@ def record_ai_usage(
             return None
         delta = credits - existing.credits
         target_period = session.get(AiCreditPeriod, (user_id, existing.period_key)) or period
-        target_period.used = Decimal(target_period.used) + delta
+        used_before = Decimal(target_period.used)
+        target_period.used = used_before + delta
         existing.credits = credits
         existing.tokens_input = tokens_input
         existing.tokens_output = tokens_output
@@ -485,10 +538,19 @@ def record_ai_usage(
         existing.tokens_cached = tokens_cached
         existing.model = model or existing.model
         existing.estimated = False
+        existing.provider = provider or existing.provider
+        if cost is not None:
+            existing.cost = cost
+            existing.cost_currency = (cost_currency or "USD")[:3]
         session.add(existing)
         session.add(target_period)
+        session.flush()
+        # Overage of this turn recomputed on the corrected figures: what the
+        # turn pushed beyond the allowance is the whole turn's share above it.
+        _charge_overage(session, user_id, existing, target_period, turn_credits=credits)
         session.commit()
         _notify_thresholds(session, user_id, target_period, background_tasks)
+        _notify_wallet(session, user_id, existing, target_period, background_tasks)
         return existing
 
     entry = AiCreditLedger(
@@ -505,13 +567,65 @@ def record_ai_usage(
         session_id=session_id,
         estimated=estimated,
         actor_user_id=actor_user_id,
+        provider=provider,
+        cost=cost,
+        cost_currency=(cost_currency or "USD")[:3] if cost is not None else None,
     )
     period.used = Decimal(period.used) + credits
     session.add(entry)
     session.add(period)
+    session.flush()
+    _charge_overage(session, user_id, entry, period, turn_credits=credits)
     session.commit()
     _notify_thresholds(session, user_id, period, background_tasks)
+    _notify_wallet(session, user_id, entry, period, background_tasks)
     return entry
+
+
+def _charge_overage(
+    session: Session, user_id: int, entry: AiCreditLedger, period: AiCreditPeriod, *, turn_credits: Decimal
+) -> None:
+    """Credits of this turn above the period allowance → platform credit.
+
+    ``period.used`` already includes the turn. The overage is the part of the
+    turn that lies beyond ``granted``: ``min(turn, used_after - granted)``,
+    never negative. Unlimited plans (``granted`` NULL) and a disabled wallet
+    charge nothing; the ledger row records the cents charged either way.
+    """
+    from app.services import wallet_service
+
+    if period.granted is None or turn_credits <= 0:
+        entry.wallet_cents = 0
+        session.add(entry)
+        return
+    used_after = Decimal(period.used)
+    over = min(Decimal(turn_credits), used_after - Decimal(period.granted))
+    if over <= 0:
+        over = Decimal("0")
+    try:
+        cents = wallet_service.charge_ai_overage(
+            session, user_id=user_id, ai_ledger=entry, credits_over=over, commit=False
+        )
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 - wallet tables may predate migration 059
+        logger.exception("Wallet overage charge failed for user %s turn %s", user_id, entry.id)
+        cents = 0
+    entry.wallet_cents = int(cents)
+    session.add(entry)
+
+
+def _notify_wallet(
+    session: Session, user_id: int, entry: AiCreditLedger, period: AiCreditPeriod, background_tasks: BackgroundTasks | None
+) -> None:
+    if not entry.wallet_cents:
+        return
+    try:
+        from app.services import wallet_service
+
+        wallet_service.notify_balance(session, user_id, background_tasks=background_tasks, ai_period_key=period.period_key)
+    except Exception:  # noqa: BLE001
+        logger.exception("Wallet notification failed for user %s", user_id)
 
 
 def grant_ai_credits(

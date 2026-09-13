@@ -35,6 +35,7 @@ from app.api.studio_access import router as studio_access_router
 from app.api.billing import router as billing_router
 from app.api.admin_agent_turns import router as admin_agent_turns_router
 from app.api.admin_billing import router as admin_billing_router
+from app.api.admin_wallet import router as admin_wallet_router
 from app.services.connection_events import install_connection_event_listeners
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
@@ -166,6 +167,7 @@ app.include_router(onboarding_router)
 app.include_router(users_router)
 app.include_router(admin_users_router)
 app.include_router(admin_billing_router)
+app.include_router(admin_wallet_router)
 app.include_router(admin_agent_turns_router)
 app.include_router(billing_router)
 app.include_router(system_router)

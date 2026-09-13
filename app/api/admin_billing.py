@@ -468,6 +468,13 @@ def list_subscriptions_endpoint(
     }
     default_plan = next((p for p in plans.values() if p.is_default), None)
     counters = _counters_by_user(session)
+    try:
+        from app.services.wallet_service import balances_by_user
+
+        balances = balances_by_user(session)
+    except Exception:  # noqa: BLE001 - wallet tables predate migration 059
+        session.rollback()
+        balances = {}
     now = _utcnow()
     periods = {
         (p.user_id, p.period_key): p
@@ -531,6 +538,7 @@ def list_subscriptions_endpoint(
                 ),
                 counters=user_counters,
                 over_limit=over,
+                wallet_balance_cents=balances.get(user.id, 0),
             )
         )
     return AdminSubscriptionPage(items=rows, total=len(rows))

@@ -19,6 +19,12 @@ from app.db.database import get_session
 from app.models.billing import Plan, PlanPrice, Subscription
 from app.models.user import User
 from app.schemas.billing import (
+    CreditPackRead,
+    TopupRequest,
+    WalletLedgerPage,
+    WalletLedgerRead,
+    WalletRead,
+    WalletUpdateRequest,
     AiBudgetRead,
     AiUsageReportRequest,
     AiUsageReportResponse,
@@ -36,7 +42,9 @@ from app.schemas.billing import (
     TrialStartRequest,
     UsageItem,
 )
+from app.services import wallet_service
 from app.services.billing.checkout_service import (
+    create_topup_checkout,
     apply_event,
     coupon_preview,
     create_checkout,
@@ -121,6 +129,7 @@ def serialize_subscription(
         trial_available_plan_ids=trial_plan_ids,
         billing_enabled=settings.BILLING_ENABLED,
         events=[SubscriptionEventRead.model_validate(e, from_attributes=True) for e in events],
+        wallet=serialize_wallet(session, user.id, with_packs=False),
     )
 
 
@@ -208,6 +217,10 @@ def _budget_read(budget, *, allowed: bool) -> AiBudgetRead:
         remaining=budget.remaining,
         period_start=budget.period_start,
         period_end=budget.period_end,
+        source=budget.source,
+        wallet_enabled=budget.wallet_enabled,
+        wallet_usable=budget.wallet_usable,
+        wallet_balance_cents=budget.wallet_balance_cents,
     )
 
 
@@ -228,7 +241,7 @@ def read_my_ai_credits(
     current_user: User = Depends(get_current_active_user),
 ):
     budget = get_ai_budget(session, current_user.id)
-    return _budget_read(budget, allowed=not budget.exhausted)
+    return _budget_read(budget, allowed=budget.allowed)
 
 
 @router.post("/ai-usage/report", response_model=AiUsageReportResponse)
@@ -267,6 +280,9 @@ def report_ai_usage(
         background_tasks=background_tasks,
         tokens_reasoning=payload.tokens_reasoning if has_tokens else None,
         tokens_cached=payload.tokens_cached if has_tokens else None,
+        provider=(payload.provider or None) if has_tokens else None,
+        cost=payload.cost if has_tokens else None,
+        cost_currency=payload.cost_currency if has_tokens else None,
     )
     if entry is not None and not estimated and payload.correlation_id:
         # Fill the reserved token columns of the runner's agent_call row (marker
@@ -290,7 +306,78 @@ def report_ai_usage(
         estimated=entry.estimated if entry is not None else None,
         used=budget.used,
         granted=budget.granted,
+        wallet_cents=int(entry.wallet_cents or 0) if entry is not None else None,
+        source=budget.source,
+        wallet_balance_cents=budget.wallet_balance_cents,
     )
+
+
+# ---------------------------------------------------------------------------
+# Platform credit (wallet)
+# ---------------------------------------------------------------------------
+
+
+def serialize_wallet(session: Session, user_id: int, *, with_packs: bool = True) -> WalletRead:
+    try:
+        view = wallet_service.wallet_view(session, user_id)
+        packs = wallet_service.list_packs(session) if with_packs and view.enabled else []
+    except Exception:  # noqa: BLE001 - wallet tables predate migration 059: feature off
+        session.rollback()
+        return WalletRead(
+            enabled=False, currency="EUR", balance_cents=0, auto_use_for_ai=True,
+            price_per_ai_credit_cents=Decimal("0"), low_balance_cents=0, min_topup_cents=0, packs=[],
+        )
+    return WalletRead(
+        enabled=view.enabled,
+        currency=view.currency,
+        balance_cents=view.balance_cents,
+        auto_use_for_ai=view.auto_use_for_ai,
+        price_per_ai_credit_cents=view.price_per_ai_credit_cents,
+        low_balance_cents=view.low_balance_cents,
+        min_topup_cents=view.min_topup_cents,
+        packs=[CreditPackRead.model_validate(p, from_attributes=True) for p in packs],
+    )
+
+
+@router.get("/users/me/wallet", response_model=WalletRead)
+def read_my_wallet(session: Session = Depends(get_session), current_user: User = Depends(get_current_active_user)):
+    return serialize_wallet(session, current_user.id)
+
+
+@router.patch("/users/me/wallet", response_model=WalletRead)
+def update_my_wallet(
+    payload: WalletUpdateRequest,
+    session: Session = Depends(get_session),
+    principal: AuthPrincipal = Depends(get_current_active_principal),
+):
+    _interactive_only(principal)
+    wallet = wallet_service.get_or_create_wallet(session, principal.user.id)
+    wallet.auto_use_for_ai = payload.auto_use_for_ai
+    session.add(wallet)
+    session.commit()
+    return serialize_wallet(session, principal.user.id)
+
+
+@router.get("/users/me/wallet/ledger", response_model=WalletLedgerPage)
+def read_my_wallet_ledger(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+    limit: int = 50,
+    offset: int = 0,
+):
+    rows, total = wallet_service.list_ledger(session, user_id=current_user.id, limit=min(limit, 200), offset=offset)
+    return WalletLedgerPage(items=[WalletLedgerRead.model_validate(r, from_attributes=True) for r in rows], total=total)
+
+
+@router.post("/billing/topup", response_model=CheckoutResponse)
+def create_topup_endpoint(
+    payload: TopupRequest,
+    session: Session = Depends(get_session),
+    principal: AuthPrincipal = Depends(get_current_active_principal),
+):
+    """Hosted one-off checkout for a wallet top-up pack."""
+    _interactive_only(principal)
+    return CheckoutResponse(url=create_topup_checkout(session, principal.user, payload.pack_id))
 
 
 __all__ = ["router", "serialize_plan", "serialize_subscription"]

@@ -367,17 +367,14 @@ def _summarize_tool_calls(tool_calls: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
-#: Per-turn usage fields exposed to the chat UI. The model name stays out on
-#: purpose: the model is a platform choice the trader does not see.
+#: Per-turn usage fields exposed to the chat UI: EdgeWalker credits only.
+#: Provider tokens, model and cost stay out on purpose (decision 13/09/2026):
+#: the trader sees what the platform charged, not the provider's meter.
 _USAGE_PUBLIC_FIELDS = (
-    "input_tokens",
-    "output_tokens",
-    "reasoning_tokens",
-    "cache_read_tokens",
-    "requests",
-    "tool_calls",
     "credits",
     "estimated",
+    "wallet_cents",
+    "tool_calls",
 )
 
 

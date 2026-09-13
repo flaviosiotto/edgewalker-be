@@ -512,3 +512,98 @@ def subscription_changed_email(*, display_name: str, old_plan_name: str, new_pla
         + _BUTTON.format(url=escape(url, quote=True), label="Il mio abbonamento"),
     )
     return subject, text_body, html_body
+
+
+# ---------------------------------------------------------------------------
+# Platform credit (wallet) — docs/credito-piattaforma-studio.md
+# ---------------------------------------------------------------------------
+
+
+def _fmt_money(cents: int, currency: str) -> str:
+    return f"{cents / 100:.2f} {currency}"
+
+
+def wallet_topup_email(*, display_name: str, amount_cents: int, credit_cents: int, balance_cents: int, currency: str):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = "Ricarica del credito piattaforma confermata"
+    bonus = credit_cents - amount_cents
+    line = f"abbiamo ricevuto {_fmt_money(amount_cents, currency)}: accreditati {_fmt_money(credit_cents, currency)}"
+    line += f" (bonus {_fmt_money(bonus, currency)})." if bonus > 0 else "."
+    text_body = (
+        f"Ciao {display_name},\n\n{line}\n"
+        f"Saldo attuale: {_fmt_money(balance_cents, currency)}.\n{url}\n"
+    )
+    html_body = _render(
+        "Ricarica confermata",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(line)
+        + _paragraph(f"Saldo attuale: <strong>{_fmt_money(balance_cents, currency)}</strong>.")
+        + _BUTTON.format(url=escape(url, quote=True), label="Il mio credito"),
+    )
+    return subject, text_body, html_body
+
+
+def wallet_low_email(*, display_name: str, balance_cents: int, currency: str):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = "Il tuo credito piattaforma sta per esaurirsi"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"il credito piattaforma e' sceso a {_fmt_money(balance_cents, currency)}. "
+        "Quando i crediti AI del piano finiscono, gli agenti si fermano se il credito e' a zero.\n"
+        f"Ricarica qui: {url}\n"
+    )
+    html_body = _render(
+        "Credito in esaurimento",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"il credito piattaforma e' sceso a <strong>{_fmt_money(balance_cents, currency)}</strong>. "
+            "Quando i crediti AI del piano finiscono, gli agenti si fermano se il credito e' a zero."
+        )
+        + _BUTTON.format(url=escape(url, quote=True), label="Ricarica il credito"),
+    )
+    return subject, text_body, html_body
+
+
+def wallet_exhausted_email(*, display_name: str, balance_cents: int, currency: str):
+    url = build_frontend_url("settings", tab="subscription")
+    subject = "Credito piattaforma esaurito: gli agenti sono fermi"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        "i crediti AI del piano sono finiti e il credito piattaforma e' esaurito: "
+        "gli agenti non rispondono finche' non ricarichi o non si rinnova il periodo.\n"
+        f"Ricarica qui: {url}\n"
+    )
+    html_body = _render(
+        "Credito esaurito",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            "i crediti AI del piano sono finiti e il credito piattaforma e' esaurito: "
+            "gli agenti non rispondono finche' non ricarichi o non si rinnova il periodo."
+        )
+        + _BUTTON.format(url=escape(url, quote=True), label="Ricarica il credito"),
+    )
+    return subject, text_body, html_body
+
+
+def wallet_adjusted_email(*, display_name: str, amount_cents: int, balance_cents: int, currency: str, note: str | None):
+    url = build_frontend_url("settings", tab="subscription")
+    sign = "accreditati" if amount_cents > 0 else "addebitati"
+    subject = "Il tuo credito piattaforma e' stato aggiornato"
+    text_body = (
+        f"Ciao {display_name},\n\n"
+        f"l'amministratore ha {sign} {_fmt_money(abs(amount_cents), currency)} sul tuo credito piattaforma"
+        + (f" ({note})" if note else "")
+        + f".\nSaldo attuale: {_fmt_money(balance_cents, currency)}.\n{url}\n"
+    )
+    html_body = _render(
+        "Credito aggiornato",
+        _paragraph(f"Ciao {display_name},")
+        + _paragraph(
+            f"l'amministratore ha {sign} <strong>{_fmt_money(abs(amount_cents), currency)}</strong> sul tuo credito piattaforma"
+            + (f" ({escape(note)})" if note else "")
+            + "."
+        )
+        + _paragraph(f"Saldo attuale: <strong>{_fmt_money(balance_cents, currency)}</strong>.")
+        + _BUTTON.format(url=escape(url, quote=True), label="Il mio credito"),
+    )
+    return subject, text_body, html_body

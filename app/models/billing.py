@@ -352,6 +352,15 @@ class AiCreditLedger(SQLModel, table=True):
     actor_user_id: Optional[int] = Field(
         default=None, sa_column=Column(Integer, ForeignKey("user.id", ondelete="SET NULL"), nullable=True)
     )
+    # Real provider cost of the turn (migration 059): what the LLM provider
+    # billed, in its own currency, as reported in the response usage. NULL for
+    # estimates and for providers that do not report it. ``provider`` is
+    # always explicit data (no provider is assumed anywhere).
+    provider: Optional[str] = Field(default=None, sa_column=Column(String(40), nullable=True))
+    cost: Optional[Decimal] = Field(default=None, sa_column=Column(Numeric(12, 6), nullable=True))
+    cost_currency: Optional[str] = Field(default=None, sa_column=Column(String(3), nullable=True))
+    #: cents charged to the platform credit for the overage of this turn
+    wallet_cents: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
