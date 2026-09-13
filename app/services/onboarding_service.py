@@ -101,7 +101,7 @@ def provision_user_workspace(session: Session, user: User) -> dict:
     if user.onboarding:
         return dict(user.onboarding)
     user_id = user.id
-    templates = starter_agents(settings.ONBOARDING_AGENT_WEBHOOK_URL)
+    templates = starter_agents(settings.ONBOARDING_AGENT_WEBHOOK_URL or settings.AGENT_SVC_WEBHOOK_URL)
     agents = []
     now = datetime.now(timezone.utc)
     for template in templates:

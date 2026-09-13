@@ -3,6 +3,7 @@ from sqlmodel import Session, select
 from fastapi import HTTPException, status
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.models.agent import Agent, Chat
 from app.schemas.agent import AgentCreate, AgentUpdate, AgentSettings
 from app.schemas.chat import ChatCreate
@@ -27,7 +28,7 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
     agent = Agent(
         user_id=user_id,
         agent_name=payload.agent_name,
-        n8n_webhook=payload.n8n_webhook,
+        n8n_webhook=(payload.n8n_webhook or "").strip() or settings.AGENT_SVC_WEBHOOK_URL,
         is_default=payload.is_default,
         avatar=payload.avatar,
         accent_color=payload.accent_color,

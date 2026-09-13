@@ -68,7 +68,9 @@ class AgentPersonaFields(BaseModel):
 
 class AgentCreate(AgentPersonaFields):
     agent_name: str
-    n8n_webhook: str
+    # Execution engine address. Optional since phase 3: the backend assigns
+    # AGENT_SVC_WEBHOOK_URL; only legacy/admin callers still pass an URL.
+    n8n_webhook: Optional[str] = None
     is_default: bool = False
 
 

@@ -10,7 +10,14 @@ class Settings(BaseSettings):
     VERSION: str = "0.1.0"
     API_ROOT_PATH: str = "/api"
     API_V1_STR: str = "/api/v1"
-    ONBOARDING_AGENT_WEBHOOK_URL: str = "/n8n/webhook/edgewalker-manager-v2"
+    # Motore degli agent (fase 3 dismissione n8n): URL che il backend assegna
+    # a ogni agent creato dall'utente o dall'onboarding. Il campo
+    # agent.n8n_webhook resta nel DB come indirizzo di esecuzione (gli agent
+    # ancora su n8n continuano a funzionare), ma non e' piu' esposto nel FE.
+    # In prod: http://edgewalker-agent-svc-xpsadu:8080/webhook/edgewalker-agent
+    AGENT_SVC_WEBHOOK_URL: str = "http://agent-svc:8080/webhook/edgewalker-agent"
+    # Vuoto = usa AGENT_SVC_WEBHOOK_URL; valorizzato = URL legacy n8n.
+    ONBOARDING_AGENT_WEBHOOK_URL: str = ""
 
     # Interactive IB Gateway (TWS) launch flow. The browser is redirected to
     # the per-connection noVNC container under
