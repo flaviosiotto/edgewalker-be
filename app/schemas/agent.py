@@ -27,6 +27,24 @@ def _validate_accent_color(value: Optional[str]) -> Optional[str]:
     return normalized.lower()
 
 
+# User-facing behaviour knobs (migr. 058). The reasoning level is the only
+# thing the trader chooses about the model; the platform maps it to a real
+# model per plan in ai_model_policy (admin). No model name ever lives here.
+ReasoningLevel = Literal["quick", "balanced", "deep"]
+Autonomy = Literal["propose", "execute"]
+
+
+class AgentSettings(BaseModel):
+    reasoning: ReasoningLevel = "balanced"
+    # propose = the agent only suggests; execute = it may place/close orders
+    # and manage alerts in operational turns (live/backtest).
+    autonomy: Autonomy = "execute"
+    include_chart: bool = True
+    lessons_enabled: bool = True
+
+    model_config = {"extra": "ignore"}
+
+
 class AgentPersonaFields(BaseModel):
     """Persona attributes shared by create/read/update.
 
@@ -40,6 +58,7 @@ class AgentPersonaFields(BaseModel):
     description: Optional[str] = None
     risk_profile: RiskProfile = "balanced"
     persona: dict[str, Any] = Field(default_factory=dict)
+    settings: AgentSettings = Field(default_factory=AgentSettings)
 
     @field_validator("accent_color")
     @classmethod
@@ -70,6 +89,7 @@ class AgentUpdate(BaseModel):
     description: Optional[str] = None
     risk_profile: Optional[RiskProfile] = None
     persona: Optional[dict[str, Any]] = None
+    settings: Optional[AgentSettings] = None
 
     @field_validator("accent_color")
     @classmethod
@@ -98,4 +118,5 @@ def build_agent_persona_block(agent: Any) -> dict[str, Any]:
         "description": getattr(agent, "description", None),
         "risk_profile": getattr(agent, "risk_profile", None) or "balanced",
         "persona": persona if isinstance(persona, dict) else {},
+        "settings": AgentSettings.model_validate(getattr(agent, "settings", None) or {}).model_dump(),
     }

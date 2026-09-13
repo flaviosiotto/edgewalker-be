@@ -77,6 +77,15 @@ class Agent(SQLModel, table=True):
         default_factory=dict,
         sa_column=Column(JSONB, nullable=False, server_default="{}"),
     )
+    # --- Behaviour (migr. 058, fase 2 agent-svc) ---------------------------
+    # {reasoning: quick|balanced|deep, autonomy: propose|execute,
+    #  include_chart: bool, lessons_enabled: bool}. Validated by the schema
+    # (AgentSettings); agent-svc reads the row and maps `reasoning` to the
+    # real model through ai_model_policy. Never a model name in here.
+    settings: dict = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default="{}"),
+    )
 
 
 

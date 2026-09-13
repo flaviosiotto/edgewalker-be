@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -156,6 +156,10 @@ class AiUsageReportRequest(BaseModel):
     model: Optional[str] = Field(default=None, max_length=120)
     tokens_input: Optional[int] = Field(default=None, ge=0)
     tokens_output: Optional[int] = Field(default=None, ge=0)
+    # Informational split (agent-svc): reasoning is already inside
+    # tokens_output, cached is a subset of tokens_input.
+    tokens_reasoning: Optional[int] = Field(default=None, ge=0)
+    tokens_cached: Optional[int] = Field(default=None, ge=0)
     prompt_chars: Optional[int] = Field(default=None, ge=0)
     response_chars: Optional[int] = Field(default=None, ge=0)
     reason: str = Field(default="agent_turn", max_length=32)
@@ -185,6 +189,38 @@ class AiModelRateRead(BaseModel):
     output_per_1k: Decimal
     is_active: bool
     updated_at: datetime
+
+
+ReasoningTier = Literal["quick", "balanced", "deep"]
+ReasoningEffort = Literal["low", "medium", "high"]
+
+
+class AiModelPolicyRead(BaseModel):
+    id: int
+    plan_code: str
+    tier: ReasoningTier
+    provider: str
+    model: str
+    reasoning_effort: Optional[ReasoningEffort] = None
+    max_iterations: int
+    history_window: int
+    is_active: bool
+    notes: Optional[str] = None
+    updated_at: datetime
+
+
+class AiModelPolicyUpsert(BaseModel):
+    """Keyed on (plan_code, tier); ``plan_code`` ``*`` = every plan."""
+
+    plan_code: str = Field(default="*", min_length=1, max_length=40)
+    tier: ReasoningTier
+    provider: str = Field(default="openrouter", min_length=1, max_length=40)
+    model: str = Field(min_length=1, max_length=120)
+    reasoning_effort: Optional[ReasoningEffort] = None
+    max_iterations: int = Field(default=15, ge=1, le=60)
+    history_window: int = Field(default=12, ge=0, le=60)
+    is_active: bool = True
+    notes: Optional[str] = Field(default=None, max_length=500)
 
 
 class AiModelRateUpsert(BaseModel):

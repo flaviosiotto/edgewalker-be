@@ -207,6 +207,11 @@ class BacktestCreate(BaseModel):
     # 600s and the runner adds a +15s TTL margin on top of this value.
     agent_timeout_s: Optional[float] = Field(default=None, ge=30, le=570)
 
+    # Reasoning level for every agent turn of this run (ask_agent, alerts,
+    # reviews, synthesis); None = the agent's own setting. Rules and alerts
+    # with an explicit level of their own still win.
+    agent_reasoning: Optional[Literal["quick", "balanced", "deep"]] = None
+
     # Data source parameters (for fetch)
     source: Optional[Literal["ibkr", "yahoo", "binance", "ctrader"]] = None
     timeframe: str = "5m"  # e.g., "1m", "5m", "15m", "1h", "1d"

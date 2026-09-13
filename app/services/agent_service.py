@@ -4,7 +4,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import selectinload
 
 from app.models.agent import Agent, Chat
-from app.schemas.agent import AgentCreate, AgentUpdate
+from app.schemas.agent import AgentCreate, AgentUpdate, AgentSettings
 from app.schemas.chat import ChatCreate
 
 
@@ -35,6 +35,7 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
         description=payload.description,
         risk_profile=payload.risk_profile,
         persona=payload.persona or {},
+        settings=payload.settings.model_dump(),
     )
     session.add(agent)
     session.commit()
@@ -111,6 +112,10 @@ def update_agent(session: Session, agent_id: int, payload: AgentUpdate, user_id:
         agent.risk_profile = payload.risk_profile
     if payload.persona is not None:
         agent.persona = payload.persona
+    if payload.settings is not None:
+        # PATCH semantics: keys left out keep their current value.
+        current = AgentSettings.model_validate(agent.settings or {}).model_dump()
+        agent.settings = {**current, **payload.settings.model_dump(exclude_unset=True)}
 
     session.add(agent)
     session.commit()

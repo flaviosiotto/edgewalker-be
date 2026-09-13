@@ -454,6 +454,8 @@ def record_ai_usage(
     reason: str = "agent_turn",
     actor_user_id: int | None = None,
     background_tasks: BackgroundTasks | None = None,
+    tokens_reasoning: int | None = None,
+    tokens_cached: int | None = None,
 ) -> AiCreditLedger | None:
     """Charge one agent turn. Idempotent per ``(correlation_id, session_id)``:
     an estimate is replaced by the real token report, a real report is never
@@ -479,6 +481,8 @@ def record_ai_usage(
         existing.credits = credits
         existing.tokens_input = tokens_input
         existing.tokens_output = tokens_output
+        existing.tokens_reasoning = tokens_reasoning
+        existing.tokens_cached = tokens_cached
         existing.model = model or existing.model
         existing.estimated = False
         session.add(existing)
@@ -495,6 +499,8 @@ def record_ai_usage(
         model=model,
         tokens_input=tokens_input,
         tokens_output=tokens_output,
+        tokens_reasoning=tokens_reasoning,
+        tokens_cached=tokens_cached,
         correlation_id=correlation_id,
         session_id=session_id,
         estimated=estimated,

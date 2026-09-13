@@ -665,6 +665,8 @@ def create_backtest(
         }
     base_parameters = payload.parameters if isinstance(payload.parameters, dict) else {}
     merged_parameters = {**base_parameters, "lessons": lessons_meta}
+    if payload.agent_reasoning:
+        merged_parameters["agent_reasoning"] = payload.agent_reasoning
     if payload.agent_timeout_s is not None:
         merged_parameters["agent_timeout_s"] = float(payload.agent_timeout_s)
 
@@ -951,6 +953,8 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             if isinstance(lessons_cfg, dict)
             else True
         )
+        raw_reasoning = str(run_parameters.get("agent_reasoning") or "").strip().lower()
+        agent_reasoning = raw_reasoning if raw_reasoning in ("quick", "balanced", "deep") else None
         raw_agent_timeout = run_parameters.get("agent_timeout_s")
         agent_timeout_s = (
             float(raw_agent_timeout)
@@ -972,6 +976,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             owner_user_id=strategy.user_id,
             use_lessons=use_lessons,
             agent_timeout_s=agent_timeout_s,
+            agent_reasoning=agent_reasoning,
         )
         logger.info(
             "Started backtest runner for backtest %d: %s",
@@ -1504,6 +1509,7 @@ def trigger_rule_agent(
             "edgewalker_chat_id": chat.id,
             "request_id": request_id,
             "message_type": "rule_trigger",
+            "reasoning": rule_context.get("reasoning") or None,
             "requested_action": "rule_trigger",
             "agent_id": agent_id,
             "agent": build_agent_persona_block(agent),

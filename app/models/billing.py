@@ -279,6 +279,29 @@ class AiModelRate(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
+class AiModelPolicy(SQLModel, table=True):
+    """Which real model runs behind a user-facing reasoning level, per plan
+    (migration 058). ``plan_code`` ``*`` is the fallback for every plan; an
+    inactive row for a plan means "this level is not available there" and
+    agent-svc degrades (deep -> balanced -> quick)."""
+
+    __tablename__ = "ai_model_policy"
+    __table_args__ = (UniqueConstraint("plan_code", "tier", name="uq_ai_model_policy_plan_tier"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    plan_code: str = Field(default="*", sa_column=Column(String(40), nullable=False, server_default="*"))
+    tier: str = Field(sa_column=Column(String(16), nullable=False))
+    provider: str = Field(default="openrouter", sa_column=Column(String(40), nullable=False, server_default="openrouter"))
+    model: str = Field(sa_column=Column(String(120), nullable=False))
+    reasoning_effort: Optional[str] = Field(default=None, sa_column=Column(String(16), nullable=True))
+    max_iterations: int = Field(default=15, sa_column=Column(Integer, nullable=False, server_default="15"))
+    history_window: int = Field(default=12, sa_column=Column(Integer, nullable=False, server_default="12"))
+    is_active: bool = Field(default=True, sa_column=Column(Boolean, nullable=False, server_default=text("TRUE")))
+    notes: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
 class AiCreditPeriod(SQLModel, table=True):
     """Running counter of one user's monthly credit window. ``granted`` is
     NULL for unlimited plans (usage is still recorded)."""
@@ -319,6 +342,10 @@ class AiCreditLedger(SQLModel, table=True):
     model: Optional[str] = Field(default=None, sa_column=Column(String(120), nullable=True))
     tokens_input: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
     tokens_output: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
+    # Informational split (migr. 058): reasoning tokens are already counted
+    # in tokens_output for the rate; cached tokens are a subset of the input.
+    tokens_reasoning: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
+    tokens_cached: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
     correlation_id: Optional[str] = Field(default=None, sa_column=Column(String(100), nullable=True))
     session_id: Optional[str] = Field(default=None, sa_column=Column(String(100), nullable=True))
     estimated: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, server_default=text("FALSE")))

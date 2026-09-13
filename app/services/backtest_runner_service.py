@@ -119,6 +119,7 @@ class BacktestRunnerService:
         manager_chat_session_id: str | None = None,
         owner_user_id: int | str | None = None,
         use_lessons: bool = True,
+        agent_reasoning: str | None = None,
         agent_timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Start a strategy-runner container in backtest mode."""
@@ -210,6 +211,10 @@ class BacktestRunnerService:
         if agent_timeout_s:
             # Per-run override of the runner's blocking agent-wait timeout.
             env["BACKTEST_AGENT_WAIT_TIMEOUT_S"] = str(float(agent_timeout_s))
+        if agent_reasoning:
+            # Run-level reasoning default for every agent turn (the runner
+            # puts it in metadata.reasoning; rules/alerts may override).
+            env["AGENT_REASONING"] = agent_reasoning
         if not use_lessons:
             # Baseline A/B leg: no review/synthesis turns and no LEZIONI
             # APPRESE injection (the workflow reads lessons_enabled from the

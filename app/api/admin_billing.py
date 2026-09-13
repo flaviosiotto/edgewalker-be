@@ -22,6 +22,7 @@ from app.models.billing import (
     PlanPrice,
     Subscription,
     SubscriptionStatus,
+    AiModelPolicy,
 )
 from app.models.strategy import BacktestResult, BacktestStatus, LiveStatus, Strategy, StrategyLive
 from app.models.user import User
@@ -34,6 +35,8 @@ from app.schemas.billing import (
     AdminSubscriptionPage,
     AdminSubscriptionRow,
     AdminUserSubscriptionDetail,
+    AiModelPolicyRead,
+    AiModelPolicyUpsert,
     AiModelRateRead,
     AiModelRateUpsert,
     CouponCreate,
@@ -268,6 +271,55 @@ def upsert_model_rate_endpoint(payload: AiModelRateUpsert, session: Session = De
     session.commit()
     session.refresh(rate)
     return rate
+
+
+# ---------------------------------------------------------------------------
+# Model policy: which real model runs behind a user-facing reasoning level
+# ---------------------------------------------------------------------------
+
+
+@router.get("/ai-model-policies", response_model=list[AiModelPolicyRead])
+def list_model_policies_endpoint(session: Session = Depends(get_session)):
+    rows = session.exec(select(AiModelPolicy).order_by(AiModelPolicy.plan_code, AiModelPolicy.tier)).all()
+    order = {"quick": 0, "balanced": 1, "deep": 2}
+    return sorted(rows, key=lambda r: (r.plan_code != "*", r.plan_code, order.get(r.tier, 9)))
+
+
+@router.put("/ai-model-policies", response_model=AiModelPolicyRead)
+def upsert_model_policy_endpoint(payload: AiModelPolicyUpsert, session: Session = Depends(get_session)):
+    plan_code = payload.plan_code.strip()
+    if plan_code != "*" and session.exec(select(Plan).where(Plan.code == plan_code)).first() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Piano '{plan_code}' inesistente")
+    policy = session.exec(
+        select(AiModelPolicy).where(AiModelPolicy.plan_code == plan_code).where(AiModelPolicy.tier == payload.tier)
+    ).first()
+    if policy is None:
+        policy = AiModelPolicy(plan_code=plan_code, tier=payload.tier, model=payload.model)
+    policy.provider = payload.provider.strip()
+    policy.model = payload.model.strip()
+    policy.reasoning_effort = payload.reasoning_effort
+    policy.max_iterations = payload.max_iterations
+    policy.history_window = payload.history_window
+    policy.is_active = payload.is_active
+    policy.notes = payload.notes
+    policy.updated_at = datetime.now(timezone.utc)
+    session.add(policy)
+    session.commit()
+    session.refresh(policy)
+    return policy
+
+
+@router.delete("/ai-model-policies/{policy_id}", response_model=MessageResponse)
+def delete_model_policy_endpoint(policy_id: int, session: Session = Depends(get_session)):
+    policy = session.get(AiModelPolicy, policy_id)
+    if policy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Policy non trovata")
+    if policy.plan_code == "*":
+        # The fallback rows are what keeps every plan runnable: edit, never delete.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le policy '*' si modificano, non si eliminano")
+    session.delete(policy)
+    session.commit()
+    return MessageResponse(message="Policy eliminata")
 
 
 @router.delete("/ai-model-rates/{rate_id}", response_model=MessageResponse)

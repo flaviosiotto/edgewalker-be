@@ -265,6 +265,8 @@ def report_ai_usage(
         estimated=estimated,
         reason=payload.reason,
         background_tasks=background_tasks,
+        tokens_reasoning=payload.tokens_reasoning if has_tokens else None,
+        tokens_cached=payload.tokens_cached if has_tokens else None,
     )
     if entry is not None and not estimated and payload.correlation_id:
         # Fill the reserved token columns of the runner's agent_call row (marker
