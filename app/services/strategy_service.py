@@ -29,6 +29,7 @@ from app.schemas.strategy import (
     ChartDrawingsUpdate,
 )
 from app.schemas.chat import ChatCreate
+from app.services.chat_service import stamp_unattributed_agent_rows
 from app.services.entitlement_service import (
     assert_indicator_count,
     assert_within,
@@ -1396,6 +1397,10 @@ def update_strategy_chat(
         chat.descrizione = payload.descrizione
     if payload.id_agent is not None:
         _get_owned_agent(session, payload.id_agent, chat.user_id)
+        if chat.id_agent != payload.id_agent:
+            # History keeps its author: rows answered so far belong to the
+            # outgoing agent, whatever the selector says from now on.
+            stamp_unattributed_agent_rows(session, chat, agent_id=chat.id_agent)
         chat.id_agent = payload.id_agent
     if payload.chat_type is not None:
         chat.chat_type = payload.chat_type
@@ -1621,6 +1626,7 @@ def update_live_manager_agent(
         select(Chat).where(Chat.live_id == live_session.id)
     ).first()
     if live_chat and live_chat.id_agent != manager_agent_id:
+        stamp_unattributed_agent_rows(session, live_chat, agent_id=live_chat.id_agent)
         live_chat.id_agent = manager_agent_id
         session.add(live_chat)
 

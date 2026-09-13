@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 from fastapi import HTTPException, status
 from sqlalchemy.orm import selectinload
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.models.agent import Agent, Chat
@@ -395,7 +396,47 @@ def _turn_usage(message: dict[str, Any]) -> dict[str, Any] | None:
     return usage or None
 
 
-def _serialize_history_message(entry: N8nChatHistory) -> ChatHistoryMessageRead:
+def _chat_agent_name(session: Session, chat: Chat) -> str | None:
+    if chat.id_agent is None:
+        return None
+    agent = session.get(Agent, chat.id_agent)
+    return agent.agent_name if agent else None
+
+
+def stamp_unattributed_agent_rows(session: Session, chat: Chat, *, agent_id: int | None) -> int:
+    """Freeze who answered BEFORE the chat's agent changes: every ``ai`` row
+    without ``metadata.agent_name`` gets the outgoing agent's name and id.
+    Rows written by agent-svc are already stamped at write time; this covers
+    the n8n era and older services. Returns the number of rows updated.
+    Caller commits."""
+    if agent_id is None:
+        return 0
+    agent = session.get(Agent, agent_id)
+    if agent is None:
+        return 0
+    result = session.execute(
+        text(
+            "UPDATE n8n_chat_histories "
+            "SET message = jsonb_set("
+            "  message, '{metadata}', "
+            "  COALESCE(message->'metadata', '{}'::jsonb) "
+            "    || jsonb_build_object('agent_name', CAST(:name AS text), 'agent_id', CAST(:agent_id AS integer)), "
+            "  true) "
+            "WHERE session_id = :session_id "
+            "  AND message->>'type' = 'ai' "
+            "  AND (message->'metadata'->>'agent_name') IS NULL"
+        ),
+        {"name": agent.agent_name, "agent_id": agent_id, "session_id": _chat_session_id(chat)},
+    )
+    return int(result.rowcount or 0)
+
+
+def _serialize_history_message(entry: N8nChatHistory, *, default_agent_name: str | None = None) -> ChatHistoryMessageRead:
+    """``default_agent_name`` labels agent rows that carry no
+    ``metadata.agent_name`` of their own. Safe only because every agent switch
+    stamps the previous agent on the rows written before it
+    (:func:`stamp_unattributed_agent_rows`): an unstamped row is always the
+    current agent's."""
     message = _coerce_message_dict(entry.message)
     metadata_src = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
     metadata = dict(metadata_src)
@@ -440,6 +481,8 @@ def _serialize_history_message(entry: N8nChatHistory) -> ChatHistoryMessageRead:
         sender_label = metadata["sender_label"]
     elif isinstance(metadata.get("agent_name"), str):
         sender_label = metadata["agent_name"]
+    elif sender_kind == "agent" and default_agent_name:
+        sender_label = default_agent_name
     else:
         sender_label = _default_sender_label(sender_kind)
 
@@ -591,7 +634,8 @@ def list_chat_history(
         rows = rows[:safe_limit]
 
     rows.reverse()
-    items = [_serialize_history_message(row) for row in rows]
+    default_agent_name = _chat_agent_name(session, chat)
+    items = [_serialize_history_message(row, default_agent_name=default_agent_name) for row in rows]
     next_before = items[0].id if has_more and items else None
     return ChatHistoryPage(
         chat_id=chat.id or chat_id,
