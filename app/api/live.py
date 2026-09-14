@@ -522,6 +522,7 @@ async def _start_live_instance_internal(
                     "strategy_id": strategy_id,
                     "live_id": sl.id,
                 },
+                no_expiry=True,
             )
 
     result = live_runner_service.start_live_instance(

@@ -925,6 +925,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
                         "strategy_id": backtest.strategy_id,
                         "backtest_id": backtest.id,
                     },
+                    no_expiry=True,
                 )
 
         raw_strategy_config = backtest.config or strategy.definition
