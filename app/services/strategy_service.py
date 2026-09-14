@@ -37,6 +37,7 @@ from app.services.entitlement_service import (
 )
 from app.services.limits import LimitKey
 from app.services.onboarding_state import require_configured_account
+from app.services.agent_webhook import agent_webhook_url
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
     build_n8n_backend_api_metadata,
@@ -910,9 +911,9 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
         if manager_agent_id:
             manager_agent = session.get(Agent, manager_agent_id)
             if manager_agent:
-                # The webhook URL itself is resolved by the runner from the
-                # agent record (chat -> agent.n8n_webhook); only the auth token
-                # — which the runner cannot mint — is injected here.
+                # The webhook URL is AGENT_WEBHOOK_URL (agent-svc) in the
+                # runner env; only the auth token — which the runner cannot
+                # mint — is minted here.
                 manager_webhook_auth_token = create_user_delegated_token(
                     session,
                     user_id=strategy.user_id,
@@ -1470,8 +1471,9 @@ def trigger_rule_agent(
     session_id = _chat_session_id(chat)
     request_id = str(uuid.uuid4())
     
-    # Use provided webhook_url or fall back to agent's webhook
-    target_webhook = webhook_url or agent.n8n_webhook
+    # The execution endpoint is always agent-svc: agent.n8n_webhook and the
+    # legacy ``webhook_url`` override are ignored.
+    target_webhook = agent_webhook_url()
 
     webhook_auth_token = issue_n8n_webhook_auth_token(
         session,
@@ -1750,8 +1752,7 @@ def notify_manager_live_start(
         },
     }
     try:
-        from app.services.live_runner_service import _rewrite_webhook_for_docker
-        webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+        webhook_url = agent_webhook_url()
         webhook_auth_token = issue_n8n_webhook_auth_token(
             session,
             user_id=strategy.user_id,
@@ -1861,9 +1862,8 @@ def post_manager_message(
         strategy = get_strategy(session, strategy_id)
         if strategy.manager_agent_id:
             agent = session.get(Agent, strategy.manager_agent_id)
-            if agent and agent.n8n_webhook:
-                from app.services.live_runner_service import _rewrite_webhook_for_docker
-                webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+            if agent:
+                webhook_url = agent_webhook_url()
                 webhook_payload = {
                     "action": "sendMessage",
                     "sessionId": live_chat.n8n_session_id or "",

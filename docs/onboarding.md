@@ -12,10 +12,9 @@
 2. Gli agent standard sono definiti in `app/services/onboarding_defaults.py`:
    Tutor e Risk Manager, creati come record personali con nuovi ID. Tutor e'
    il manager iniziale delle strategie. Non serve `ONBOARDING_AGENT_IDS`.
-   `ONBOARDING_AGENT_WEBHOOK_URL` permette di cambiare l'endpoint n8n dei nuovi
-   agent; il default e' `/n8n/webhook/edgewalker-manager-v2`, dal workflow
-   manager versionato nel repository devops. Pubblicare il workflow in n8n e
-   configurare `N8N_INTERNAL_URL` per la risoluzione interna in Swarm.
+   L'endpoint di esecuzione e' sempre `AGENT_SVC_WEBHOOK_URL` (agent-svc):
+   la colonna `agent.n8n_webhook` viene riempita con quel valore solo per
+   compatibilita' e non e' piu' letta da backend ne' runner.
 3. Verificare che il workflow n8n sia adatto a utenti diversi:
    contesto e autorizzazione devono usare l'identita' ricevuta dal backend,
    senza credenziali personali o riferimenti fissi a un proprietario.

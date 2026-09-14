@@ -49,6 +49,7 @@ import redis as _redis
 import httpx
 
 from app.services.live_runner_service import CONTAINER_PREFIX as LIVE_RUNNER_CONTAINER_PREFIX, live_runner_service
+from app.services.agent_webhook import agent_webhook_url
 from app.services.entitlement_service import assert_within
 from app.services.limits import LimitKey
 from app.services.performance_service import compute_live_performance
@@ -507,9 +508,9 @@ async def _start_live_instance_internal(
     if sl.manager_agent_id:
         manager_agent = session.get(Agent, sl.manager_agent_id)
         if manager_agent:
-            # The webhook URL is resolved by the runner from the agent record
-            # (strategy_live.manager_agent_id -> agent.n8n_webhook); only the
-            # auth token — which the runner cannot mint — is injected here.
+            # The webhook URL is AGENT_WEBHOOK_URL (agent-svc) in the runner
+            # env; only the auth token — which the runner cannot mint — is
+            # minted here.
             manager_webhook_auth_token = create_user_delegated_token(
                 session,
                 user_id=user_id,
@@ -918,7 +919,7 @@ def _serialize_chat_read(
         id=chat.id,
         id_agent=resolved_agent_id,
         agent_name=agent.agent_name if agent else chat.agent_name,
-        agent_webhook_url=agent.n8n_webhook if agent else chat.agent_webhook_url,
+        agent_webhook_url=agent_webhook_url(),
         user_id=chat.user_id,
         strategy_id=chat.strategy_id,
         nome=chat.nome,

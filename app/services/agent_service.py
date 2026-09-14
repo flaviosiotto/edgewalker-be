@@ -28,7 +28,8 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
     agent = Agent(
         user_id=user_id,
         agent_name=payload.agent_name,
-        n8n_webhook=(payload.n8n_webhook or "").strip() or settings.AGENT_SVC_WEBHOOK_URL,
+        # Legacy column: always the agent-svc endpoint, payload value ignored.
+        n8n_webhook=settings.AGENT_SVC_WEBHOOK_URL,
         is_default=payload.is_default,
         avatar=payload.avatar,
         accent_color=payload.accent_color,
@@ -94,8 +95,8 @@ def update_agent(session: Session, agent_id: int, payload: AgentUpdate, user_id:
 
     if payload.agent_name is not None:
         agent.agent_name = payload.agent_name
-    if payload.n8n_webhook is not None:
-        agent.n8n_webhook = payload.n8n_webhook
+    # payload.n8n_webhook is accepted for API compatibility but ignored: the
+    # execution endpoint is always AGENT_SVC_WEBHOOK_URL.
     if payload.is_default is not None:
         agent.is_default = payload.is_default
     if payload.avatar is not None:

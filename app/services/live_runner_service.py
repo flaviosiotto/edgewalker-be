@@ -16,6 +16,8 @@ import time
 import json
 import logging
 import os
+
+from app.core.config import settings
 from typing import Any
 
 import docker
@@ -46,11 +48,6 @@ REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_URL = os.getenv("REDIS_URL", "")
 REDIS_USERNAME = os.getenv("REDIS_USERNAME", "")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-
-# n8n internal address (Docker service name + internal port)
-N8N_INTERNAL_URL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
-# n8n path prefix used by Traefik (stripped before forwarding to n8n)
-N8N_PATH_PREFIX = os.getenv("N8N_PATH_PREFIX", "/n8n")
 
 # CORS for live runner APIs exposed directly through Traefik and the spawned runner app.
 # By default reuse BACKEND_CORS_ORIGINS so the backend and runner share one source of truth.
@@ -124,45 +121,6 @@ def _get_required_runner_image() -> str:
         "Missing required environment variable RUNNER_IMAGE for backend. "
         "Set it to the strategy runner image tag (example: edgewalker-strategy-runner:latest)."
     )
-
-
-def _rewrite_webhook_for_docker(url: str) -> str:
-    """Rewrite an external webhook URL to a Docker-internal URL.
-
-    Agent webhook URLs are stored with the external host (e.g.
-    ``http://localhost:8081/n8n/webhook/abc``).  Inside the Docker
-    network the runner must reach n8n directly at ``n8n:5678`` and
-    without the ``/n8n`` Traefik path prefix.
-
-    The rewrite is applied when the URL contains the ``N8N_PATH_PREFIX``
-    segment (default ``/n8n``).  Other URLs are returned unchanged.
-    """
-    from urllib.parse import urlparse, urlunparse
-
-    parsed = urlparse(url)
-    path = parsed.path
-
-    # Only rewrite URLs that go through Traefik to n8n
-    if not path.startswith(N8N_PATH_PREFIX):
-        return url
-
-    # Strip the Traefik prefix (/n8n/webhook/abc -> /webhook/abc)
-    new_path = path[len(N8N_PATH_PREFIX):]
-    if not new_path.startswith("/"):
-        new_path = "/" + new_path
-
-    # Build internal URL using the n8n Docker service
-    internal = urlparse(N8N_INTERNAL_URL)
-    rewritten = urlunparse((
-        internal.scheme,
-        internal.netloc,
-        new_path,
-        parsed.params,
-        parsed.query,
-        parsed.fragment,
-    ))
-    logger.debug("Rewrote webhook URL: %s -> %s", url, rewritten)
-    return rewritten
 
 
 class LiveRunnerService:
@@ -321,10 +279,10 @@ class LiveRunnerService:
         if PUBLIC_BASE_URL:
             env["RUNNER_PUBLIC_BASE_URL"] = f"{PUBLIC_BASE_URL}{runner_prefix}"
 
-        # Manager agent webhook auth token. The webhook URL itself is resolved
-        # by the runner from the agent record (strategy_live.manager_agent_id ->
-        # agent.n8n_webhook); only the auth token — which the runner cannot mint
-        # — is injected here.
+        # Agent execution endpoint (agent-svc): the runner never reads
+        # agent.n8n_webhook. The auth token — which the runner cannot mint —
+        # is injected alongside.
+        env["AGENT_WEBHOOK_URL"] = settings.AGENT_SVC_WEBHOOK_URL
         if manager_webhook_auth_token:
             env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
         if manager_chat_session_id:

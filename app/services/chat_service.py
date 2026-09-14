@@ -19,7 +19,7 @@ from app.models.n8n_chat_history import N8nChatHistory
 from app.models.strategy import LiveStatus, StrategyLive
 from app.schemas.agent import build_agent_persona_block
 from app.schemas.chat import ChatHistoryMessageRead, ChatHistoryPage, ChatSendMessageResponse
-from app.services.live_runner_service import _rewrite_webhook_for_docker
+from app.services.agent_webhook import agent_webhook_url
 from app.services.entitlement_service import check_ai_budget, record_ai_usage
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
@@ -63,12 +63,17 @@ def _get_owned_chat(session: Session, chat_id: int, user_id: int) -> Chat:
 
 
 def _resolve_chat_agent(session: Session, chat: Chat) -> Agent:
-    if chat.agent and chat.agent.n8n_webhook:
+    """Resolve the agent that answers this chat.
+
+    The execution endpoint is always ``agent_webhook_url()`` (agent-svc):
+    ``agent.n8n_webhook`` is ignored, so any owned agent is a valid target.
+    """
+    if chat.agent:
         return chat.agent
 
     if chat.id_agent is not None:
         agent = session.get(Agent, chat.id_agent)
-        if agent and agent.user_id == chat.user_id and agent.n8n_webhook:
+        if agent and agent.user_id == chat.user_id:
             return agent
 
     if chat.strategy_id is not None:
@@ -81,12 +86,12 @@ def _resolve_chat_agent(session: Session, chat: Chat) -> Agent:
         )
         if fallback_agent_id is not None:
             agent = session.get(Agent, fallback_agent_id)
-            if agent and agent.user_id == chat.user_id and agent.n8n_webhook:
+            if agent and agent.user_id == chat.user_id:
                 return agent
 
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
-        detail="No n8n webhook configured for this chat",
+        detail="No agent configured for this chat",
     )
 
 
@@ -695,7 +700,7 @@ def send_chat_message(
 
     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
     resolved_chat_id = chat.id or chat_id
-    webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+    webhook_url = agent_webhook_url()
     persist_asker_message(
         session,
         session_id=session_id,
@@ -726,6 +731,7 @@ def send_chat_message(
                 response_chars=len(response.text or ""),
             )
     except httpx.ConnectError as exc:
+        logger.warning("chat %s request %s: cannot connect to %s: %s", resolved_chat_id, request_id, webhook_url, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Cannot connect to agent webhook: {exc}",
@@ -735,8 +741,10 @@ def send_chat_message(
         detail = f"Agent webhook returned {exc.response.status_code}"
         if body:
             detail = f"{detail}: {body}"
+        logger.warning("chat %s request %s: %s (%s)", resolved_chat_id, request_id, detail, webhook_url)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
     except httpx.HTTPError as exc:
+        logger.warning("chat %s request %s: agent call to %s failed: %s", resolved_chat_id, request_id, webhook_url, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to call agent webhook: {exc}",
@@ -917,7 +925,7 @@ async def stream_chat_message(
     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
     headers["Accept"] = "text/plain"
     resolved_chat_id = chat.id
-    webhook_url = _rewrite_webhook_for_docker(agent.n8n_webhook)
+    webhook_url = agent_webhook_url()
     persist_asker_message(
         session,
         session_id=session_id,
@@ -1027,6 +1035,7 @@ async def stream_chat_message(
                 response_chars=len(full_text),
             )
         except httpx.ConnectError as exc:
+            logger.warning("chat %s request %s: cannot connect to %s: %s", resolved_chat_id, request_id, webhook_url, exc)
             yield _sse_event(
                 "message_error",
                 {
@@ -1039,6 +1048,7 @@ async def stream_chat_message(
             detail = f"Agent webhook returned {exc.response.status_code}"
             if body:
                 detail = f"{detail}: {body}"
+            logger.warning("chat %s request %s: %s (%s)", resolved_chat_id, request_id, detail, webhook_url)
             yield _sse_event(
                 "message_error",
                 {
@@ -1047,6 +1057,7 @@ async def stream_chat_message(
                 },
             )
         except httpx.HTTPError as exc:
+            logger.warning("chat %s request %s: agent call to %s failed: %s", resolved_chat_id, request_id, webhook_url, exc)
             yield _sse_event(
                 "message_error",
                 {

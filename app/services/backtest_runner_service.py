@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+
+from app.core.config import settings
 from typing import Any
 
 import docker
@@ -202,6 +204,9 @@ class BacktestRunnerService:
             env["REDIS_PASSWORD"] = REDIS_PASSWORD
         if backend_auth_token:
             env["BACKEND_AUTH_TOKEN"] = backend_auth_token
+        # Agent execution endpoint (agent-svc): the runner never reads
+        # agent.n8n_webhook.
+        env["AGENT_WEBHOOK_URL"] = settings.AGENT_SVC_WEBHOOK_URL
         if manager_webhook_auth_token:
             env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
         if manager_chat_session_id:
