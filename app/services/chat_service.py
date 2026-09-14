@@ -16,14 +16,10 @@ from sqlmodel import Session, select
 
 from app.models.agent import Agent, Chat
 from app.models.n8n_chat_history import N8nChatHistory
-from app.models.strategy import BacktestResult, LiveStatus, Strategy, StrategyLive
+from app.models.strategy import LiveStatus, StrategyLive
 from app.schemas.agent import build_agent_persona_block
 from app.schemas.chat import ChatHistoryMessageRead, ChatHistoryPage, ChatSendMessageResponse
 from app.services.live_runner_service import _rewrite_webhook_for_docker
-from app.services.studio_document_service import (
-    fetch_latest_studio_documents,
-    strategy_studio_bindings,
-)
 from app.services.entitlement_service import check_ai_budget, record_ai_usage
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
@@ -213,33 +209,6 @@ def _build_webhook_payload(
         "chatInput": text,
         "metadata": base_metadata,
     }
-
-
-def _chat_studio_bindings(session: Session, chat: Chat) -> list[dict[str, Any]]:
-    """Binding Studi della strategia del chat (sola lettura DB: va chiamata
-    PRIMA del session.close() dei percorsi di invio).
-
-    Solo le chat di design portano chat.strategy_id: quelle live/backtest
-    puntano al run (live_id/backtest_id) e la strategia va risolta da lì —
-    incidente 03/09: chat live senza documenti dello Studio appena legato.
-    Si legge la definition CORRENTE della strategia (è quella che l'utente
-    modifica legando uno Studio, anche a run in corso); lo snapshot del run
-    è il fallback se la strategia non esiste più."""
-    strategy_id = chat.strategy_id
-    snapshot: Any = None
-    if strategy_id is None and chat.live_id is not None:
-        live = session.get(StrategyLive, chat.live_id)
-        if live is not None:
-            strategy_id, snapshot = live.strategy_id, live.definition
-    elif strategy_id is None and chat.backtest_id is not None:
-        backtest = session.get(BacktestResult, chat.backtest_id)
-        if backtest is not None:
-            strategy_id, snapshot = backtest.strategy_id, backtest.config
-    if strategy_id is None:
-        return []
-    strategy = session.get(Strategy, strategy_id)
-    definition = strategy.definition if strategy is not None else snapshot
-    return strategy_studio_bindings(definition)
 
 
 def _coerce_message_dict(raw_message: Any) -> dict[str, Any]:
@@ -735,21 +704,11 @@ def send_chat_message(
         sender_label=sender_label,
         metadata={"request_id": request_id},
     )
-    studio_bindings = _chat_studio_bindings(session, chat)
-    chat_user_id = chat.user_id
     # Highest-traffic multi-user path: the webhook can take up to 120s, so the
     # pooled DB connection must go back before the call (19/08 incident).
+    # Studi: nessun documento nel payload — agent-svc legge i binding dalla
+    # strategia e il testo on demand (tool get_studio_document).
     session.close()
-
-    # Documenti degli Studi legati: stessi metadata dei turni ask_agent del
-    # runner, così l'agente li vede anche sui messaggi dell'utente. Dopo il
-    # close (è una chiamata HTTP, mai con la connessione del pool in mano).
-    if studio_bindings:
-        studio_docs = fetch_latest_studio_documents(
-            user_id=chat_user_id, bindings=studio_bindings
-        )
-        if studio_docs:
-            webhook_payload["metadata"].setdefault("studio_documents", studio_docs)
 
     try:
         with httpx.Client(timeout=DEFAULT_SEND_TIMEOUT) as client:
@@ -967,23 +926,10 @@ async def stream_chat_message(
         sender_label=sender_label,
         metadata={"request_id": request_id},
     )
-    studio_bindings = _chat_studio_bindings(session, chat)
-    chat_user_id = chat.user_id
     # The generator outlives the request's DB session (it streams for the whole
     # agent turn, with no read timeout): release the pooled connection now and
     # reference only the plain locals captured above — never ORM state.
     session.close()
-
-    # Come nel percorso non-stream: documenti degli Studi legati nei metadata
-    # (HTTP verso studio-svc in thread, il loop non si blocca).
-    if studio_bindings:
-        studio_docs = await asyncio.to_thread(
-            fetch_latest_studio_documents,
-            user_id=chat_user_id,
-            bindings=studio_bindings,
-        )
-        if studio_docs:
-            webhook_payload["metadata"].setdefault("studio_documents", studio_docs)
 
     async def event_stream() -> AsyncIterator[str]:
         decoder = codecs.getincrementaldecoder("utf-8")()
