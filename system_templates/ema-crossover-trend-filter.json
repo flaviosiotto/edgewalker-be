@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "key": "ema-crossover-trend-filter",
+  "name": "Incrocio EMA con filtro di trend",
+  "description": "Strategia trend-following di base. Sul grafico di esecuzione l'incrocio tra EMA 20 e EMA 50 dà il segnale; l'EMA 50 calcolata sul timeframe superiore (indicatore MTF EMA) fa da filtro di direzione: si compra solo sopra, si vende solo sotto. Take profit e stop loss sono espressi in multipli di ATR, quindi si adattano a qualsiasi strumento e timeframe.\n\nCome testarla: scegli uno strumento liquido, tieni il grafico di contesto a 1h (o 4h per l'esecuzione a 15m), lancia un backtest di almeno tre mesi e osserva il rapporto tra trade vincenti e perdenti nelle fasi laterali: è lì che l'incrocio soffre.",
+  "tags": [
+    "trend",
+    "principianti",
+    "atr"
+  ],
+  "charts_meta": [
+    {
+      "id": "main",
+      "role": "primary",
+      "label": "esecuzione"
+    },
+    {
+      "id": "context",
+      "role": "secondary",
+      "label": "contesto"
+    }
+  ],
+  "definition": {
+    "strategy": {
+      "timeframe": "5m",
+      "timezone": "UTC",
+      "params": {},
+      "indicators": [
+        {
+          "name": "ema20",
+          "type": "EMA",
+          "domain": "time",
+          "params": {
+            "timeperiod": 20,
+            "input": "close"
+          },
+          "overlay": true
+        },
+        {
+          "name": "ema50",
+          "type": "EMA",
+          "domain": "time",
+          "params": {
+            "timeperiod": 50,
+            "input": "close"
+          },
+          "overlay": true
+        },
+        {
+          "name": "trend_htf",
+          "type": "MTF_EMA",
+          "domain": "time",
+          "params": {
+            "timeperiod": 50,
+            "timeframe": "1h"
+          },
+          "overlay": true
+        },
+        {
+          "name": "atr14",
+          "type": "ATR",
+          "domain": "time",
+          "params": {
+            "timeperiod": 14
+          },
+          "overlay": false
+        }
+      ],
+      "charts": [
+        {
+          "id": "main",
+          "timeframe": "5m",
+          "history_depth_days": 30,
+          "indicators": [
+            {
+              "name": "ema20",
+              "type": "EMA",
+              "domain": "time",
+              "params": {
+                "timeperiod": 20,
+                "input": "close"
+              },
+              "overlay": true
+            },
+            {
+              "name": "ema50",
+              "type": "EMA",
+              "domain": "time",
+              "params": {
+                "timeperiod": 50,
+                "input": "close"
+              },
+              "overlay": true
+            },
+            {
+              "name": "trend_htf",
+              "type": "MTF_EMA",
+              "domain": "time",
+              "params": {
+                "timeperiod": 50,
+                "timeframe": "1h"
+              },
+              "overlay": true
+            },
+            {
+              "name": "atr14",
+              "type": "ATR",
+              "domain": "time",
+              "params": {
+                "timeperiod": 14
+              },
+              "overlay": false
+            }
+          ]
+        },
+        {
+          "id": "context",
+          "timeframe": "1h",
+          "history_depth_days": 180,
+          "indicators": [
+            {
+              "name": "ema50_htf",
+              "type": "EMA",
+              "domain": "time",
+              "params": {
+                "timeperiod": 50,
+                "input": "close"
+              },
+              "overlay": true
+            }
+          ]
+        }
+      ],
+      "rules": [
+        {
+          "name": "long_su_incrocio_rialzista",
+          "action": "buy",
+          "chart_id": "main",
+          "logic": "and",
+          "size": 1,
+          "conditions": [
+            {
+              "field": "ema20",
+              "op": "crossing_up",
+              "value": "ema50"
+            },
+            {
+              "field": "price.close",
+              "op": "greater_than",
+              "value": "trend_htf"
+            }
+          ],
+          "tp_expr": "price.close + 2 * atr14",
+          "sl_expr": "price.close - 1 * atr14"
+        },
+        {
+          "name": "short_su_incrocio_ribassista",
+          "action": "sell",
+          "chart_id": "main",
+          "logic": "and",
+          "size": 1,
+          "conditions": [
+            {
+              "field": "ema20",
+              "op": "crossing_down",
+              "value": "ema50"
+            },
+            {
+              "field": "price.close",
+              "op": "less_than",
+              "value": "trend_htf"
+            }
+          ],
+          "tp_expr": "price.close - 2 * atr14",
+          "sl_expr": "price.close + 1 * atr14"
+        }
+      ]
+    }
+  },
+  "lessons": [
+    {
+      "lesson": "Nelle fasi laterali l'incrocio delle medie genera molti falsi segnali: il filtro sul timeframe superiore riduce le operazioni ma non le elimina. Valuta di aggiungere un filtro di volatilità (ATR minimo).",
+      "confidence": 0.6
+    },
+    {
+      "lesson": "Un rapporto take profit / stop loss di 2:1 in ATR regge solo se la percentuale di vincita resta sopra il 35-40%: controllalo nel report del backtest prima di andare live.",
+      "confidence": 0.5
+    }
+  ]
+}

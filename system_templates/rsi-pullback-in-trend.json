@@ -1,0 +1,148 @@
+{
+  "schema": 1,
+  "key": "rsi-pullback-in-trend",
+  "name": "Pullback RSI nella direzione del trend",
+  "description": "Strategia mean-reversion con filtro di trend, su un solo grafico. Si compra un ipervenduto (RSI sotto 30) solo quando il prezzo è sopra la SMA 200, si vende un ipercomprato (RSI sopra 70) solo sotto la SMA 200. Uscite in multipli di ATR.\n\nCome testarla: adatta a strumenti che tendono a rientrare verso la media (indici, valute maggiori). Prova timeframe da 15m a 1h. Nei trend molto forti l'RSI resta a lungo in zona estrema: le lezioni sotto ti ricordano dove guardare.",
+  "tags": [
+    "mean-reversion",
+    "rsi",
+    "principianti"
+  ],
+  "charts_meta": [
+    {
+      "id": "main",
+      "role": "primary",
+      "label": "esecuzione"
+    }
+  ],
+  "definition": {
+    "strategy": {
+      "timeframe": "15m",
+      "timezone": "UTC",
+      "params": {},
+      "indicators": [
+        {
+          "name": "rsi14",
+          "type": "RSI",
+          "domain": "time",
+          "params": {
+            "timeperiod": 14,
+            "input": "close"
+          },
+          "overlay": false
+        },
+        {
+          "name": "sma200",
+          "type": "SMA",
+          "domain": "time",
+          "params": {
+            "timeperiod": 200,
+            "input": "close"
+          },
+          "overlay": true
+        },
+        {
+          "name": "atr14",
+          "type": "ATR",
+          "domain": "time",
+          "params": {
+            "timeperiod": 14
+          },
+          "overlay": false
+        }
+      ],
+      "charts": [
+        {
+          "id": "main",
+          "timeframe": "15m",
+          "history_depth_days": 60,
+          "indicators": [
+            {
+              "name": "rsi14",
+              "type": "RSI",
+              "domain": "time",
+              "params": {
+                "timeperiod": 14,
+                "input": "close"
+              },
+              "overlay": false
+            },
+            {
+              "name": "sma200",
+              "type": "SMA",
+              "domain": "time",
+              "params": {
+                "timeperiod": 200,
+                "input": "close"
+              },
+              "overlay": true
+            },
+            {
+              "name": "atr14",
+              "type": "ATR",
+              "domain": "time",
+              "params": {
+                "timeperiod": 14
+              },
+              "overlay": false
+            }
+          ]
+        }
+      ],
+      "rules": [
+        {
+          "name": "long_su_ipervenduto_in_trend",
+          "action": "buy",
+          "chart_id": "main",
+          "logic": "and",
+          "size": 1,
+          "conditions": [
+            {
+              "field": "rsi14",
+              "op": "less_than",
+              "value": 30
+            },
+            {
+              "field": "price.close",
+              "op": "greater_than",
+              "value": "sma200"
+            }
+          ],
+          "tp_expr": "price.close + 2 * atr14",
+          "sl_expr": "price.close - 1.5 * atr14"
+        },
+        {
+          "name": "short_su_ipercomprato_in_trend",
+          "action": "sell",
+          "chart_id": "main",
+          "logic": "and",
+          "size": 1,
+          "conditions": [
+            {
+              "field": "rsi14",
+              "op": "greater_than",
+              "value": 70
+            },
+            {
+              "field": "price.close",
+              "op": "less_than",
+              "value": "sma200"
+            }
+          ],
+          "tp_expr": "price.close - 2 * atr14",
+          "sl_expr": "price.close + 1.5 * atr14"
+        }
+      ]
+    }
+  },
+  "lessons": [
+    {
+      "lesson": "Se l'RSI resta sotto 30 per molte barre consecutive il mercato è in trend, non in ipervenduto: non aggiungere posizioni e considera una soglia più bassa (25) o un filtro di volatilità.",
+      "confidence": 0.6
+    },
+    {
+      "lesson": "La SMA 200 su timeframe brevi cambia direzione lentamente: dopo un'inversione i primi segnali contro il vecchio trend arrivano in ritardo. Accettalo, è il prezzo del filtro.",
+      "confidence": 0.5
+    }
+  ]
+}

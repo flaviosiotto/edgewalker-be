@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.observability import init_telemetry, instrument_app
 from app.db.database import create_db_and_tables, get_session_context
 from app.services.user_service import ensure_bootstrap_admin
+from app.services.strategy_template_service import sync_system_templates
 from app.api.auth import router as auth_router
 from app.api.onboarding import router as onboarding_router
 from app.api.users import router as users_router
@@ -20,6 +21,7 @@ from app.api.agents import router as agents_router
 from app.api.chats import router as chats_router
 from app.api.chats import runner_router as chats_runner_router
 from app.api.strategies import router as strategies_router
+from app.api.strategy_templates import router as strategy_templates_router
 from app.api.backtests import router as backtests_router
 from app.api.marketdata import router as marketdata_router
 from app.api.live import router as live_router
@@ -66,6 +68,11 @@ async def lifespan(app: FastAPI):
     ensure_billing_schema()
     with get_session_context() as session:
         ensure_billing_seed(session)
+
+    # Official strategy templates: system_templates/*.json → DB (upsert by
+    # key). A broken file is logged and skipped, never blocks the startup.
+    with get_session_context() as session:
+        sync_system_templates(session)
 
     # Must precede the connection manager: its startup reset is the first
     # status write we want relayed to connected clients.
@@ -180,6 +187,7 @@ app.include_router(chats_runner_router)
 # a router-level get_current_active_user would reject it. Every other endpoint
 # declares get_current_active_user explicitly.
 app.include_router(strategies_router)
+app.include_router(strategy_templates_router)
 # No router-level auth: like /accounts, each endpoint accepts the agent's
 # consultative token besides user JWT/PAT (a router-level
 # get_current_active_user would reject it).

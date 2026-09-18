@@ -1,0 +1,142 @@
+{
+  "schema": 1,
+  "key": "session-open-agent-review",
+  "name": "Apertura di sessione con analisi dell'agente",
+  "description": "Strategia discrezionale assistita: nessuna regola meccanica di ingresso. Dopo la prima ora di contrattazione (Initial Balance) l'agente riceve il grafico con pivot giornalieri, VWAP e sessioni, valuta se la giornata è in range o in trend e imposta alert o ordini; prima della chiusura chiude tutto. È il modo più semplice per vedere cosa fa un agente su un grafico reale.\n\nCome testarla: assegna un agente con profilo di rischio prudente, usa un indice o un future liquido con sessione regolare, e leggi la chat del backtest giorno per giorno. Gli orari sono in fuso America/New_York: adattali allo strumento.",
+  "tags": [
+    "agente",
+    "intraday",
+    "discrezionale"
+  ],
+  "charts_meta": [
+    {
+      "id": "main",
+      "role": "primary",
+      "label": "esecuzione"
+    },
+    {
+      "id": "daily",
+      "role": "secondary",
+      "label": "contesto giornaliero"
+    }
+  ],
+  "definition": {
+    "strategy": {
+      "timeframe": "5m",
+      "timezone": "America/New_York",
+      "params": {},
+      "indicators": [
+        {
+          "name": "pivot_daily",
+          "type": "PIVOT",
+          "domain": "time",
+          "params": {
+            "kind": "traditional"
+          },
+          "overlay": true
+        },
+        {
+          "name": "vwap_session",
+          "type": "VWAP",
+          "domain": "time",
+          "params": {},
+          "overlay": true
+        }
+      ],
+      "charts": [
+        {
+          "id": "main",
+          "timeframe": "5m",
+          "history_depth_days": 20,
+          "indicators": [
+            {
+              "name": "pivot_daily",
+              "type": "PIVOT",
+              "domain": "time",
+              "params": {
+                "kind": "traditional"
+              },
+              "overlay": true
+            },
+            {
+              "name": "vwap_session",
+              "type": "VWAP",
+              "domain": "time",
+              "params": {},
+              "overlay": true
+            }
+          ]
+        },
+        {
+          "id": "daily",
+          "timeframe": "1d",
+          "history_depth_days": 365,
+          "indicators": [
+            {
+              "name": "ema20_d",
+              "type": "EMA",
+              "domain": "time",
+              "params": {
+                "timeperiod": 20,
+                "input": "close"
+              },
+              "overlay": true
+            }
+          ]
+        }
+      ],
+      "rules": [
+        {
+          "name": "analisi_dopo_initial_balance",
+          "action": "ask_agent",
+          "chart_id": "main",
+          "logic": "and",
+          "size": 1,
+          "prompt": "È passata la prima ora di contrattazione. Analizza il grafico (pivot, VWAP, contesto giornaliero) e decidi se la giornata è in range o in trend. Imposta gli alert sui livelli chiave oppure entra a mercato se il quadro è chiaro, con stop loss sempre definito.",
+          "conditions": [
+            {
+              "field": "time.hour",
+              "op": "equal",
+              "value": "10"
+            },
+            {
+              "field": "time.minute",
+              "op": "equal",
+              "value": "30"
+            }
+          ]
+        },
+        {
+          "name": "chiusura_di_sessione",
+          "action": "ask_agent",
+          "chart_id": "main",
+          "logic": "and",
+          "size": 1,
+          "prompt": "Mancano dieci minuti alla chiusura: chiudi tutte le posizioni aperte e annulla gli alert rimasti. Riassumi in due righe cosa ha funzionato oggi.",
+          "conditions": [
+            {
+              "field": "time.hour",
+              "op": "equal",
+              "value": "15"
+            },
+            {
+              "field": "time.minute",
+              "op": "equal",
+              "value": "50"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "lessons": [
+    {
+      "lesson": "Se il prezzo rompe il massimo o il minimo dell'Initial Balance con volumi in aumento la giornata tende a diventare direzionale: in quel caso non operare contro la rottura.",
+      "confidence": 0.55
+    },
+    {
+      "lesson": "Nelle giornate in range il VWAP fa da calamita: gli ingressi ai pivot con obiettivo al VWAP hanno funzionato meglio di quelli con obiettivo al pivot opposto.",
+      "confidence": 0.5
+    }
+  ]
+}
