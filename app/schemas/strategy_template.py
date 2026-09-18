@@ -31,6 +31,7 @@ class TemplateLesson(BaseModel):
 class TemplateOrigin(BaseModel):
     strategy_id: Optional[int] = None
     backtest_id: Optional[int] = None
+    live_id: Optional[int] = None
 
 
 class StrategyTemplateSummary(BaseModel):
@@ -57,16 +58,18 @@ class StrategyTemplateRead(StrategyTemplateSummary):
 
 
 class StrategyTemplateSource(BaseModel):
-    """Exactly one of: an owned strategy, an owned backtest, a raw definition."""
+    """Exactly one of: an owned strategy, an owned backtest, an owned live
+    session (its frozen definition), a raw definition."""
     strategy_id: Optional[int] = None
     backtest_id: Optional[int] = None
+    live_id: Optional[int] = None
     definition: Optional[Any] = None
 
     @model_validator(mode="after")
     def _exactly_one(self) -> "StrategyTemplateSource":
-        given = [v for v in (self.strategy_id, self.backtest_id, self.definition) if v is not None]
+        given = [v for v in (self.strategy_id, self.backtest_id, self.live_id, self.definition) if v is not None]
         if len(given) != 1:
-            raise ValueError("Specify exactly one of strategy_id, backtest_id, definition")
+            raise ValueError("Specify exactly one of strategy_id, backtest_id, live_id, definition")
         return self
 
 

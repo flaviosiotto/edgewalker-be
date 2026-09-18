@@ -270,3 +270,16 @@ def test_system_template_file_validation_rejects_market_traces(tmp_path):
     (tmp_path / "bad-one.json").write_text(json.dumps(mismatch), encoding="utf-8")
     with pytest.raises(ValueError, match="key"):
         load_system_template_files(tmp_path)
+
+
+def test_source_accepts_exactly_one_reference():
+    from pydantic import ValidationError
+
+    from app.schemas.strategy_template import StrategyTemplateSource
+
+    for kwargs in ({"strategy_id": 1}, {"backtest_id": 2}, {"live_id": 3}, {"definition": {"strategy": {}}}):
+        StrategyTemplateSource(**kwargs)
+    with pytest.raises(ValidationError):
+        StrategyTemplateSource()
+    with pytest.raises(ValidationError):
+        StrategyTemplateSource(strategy_id=1, live_id=3)

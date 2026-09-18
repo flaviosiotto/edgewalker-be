@@ -33,7 +33,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.models.agent_lesson import AgentLesson
-from app.models.strategy import Strategy
+from app.models.strategy import Strategy, StrategyLive
 from app.models.strategy_template import StrategyTemplate
 from app.schemas.strategy import StrategyCreate
 from app.schemas.strategy_template import (
@@ -345,6 +345,16 @@ def _resolve_source(
         definition = backtest.config or strategy_service.get_strategy(session, backtest.strategy_id, user_id).definition
         lessons = _lessons_of_strategy(session, backtest.strategy_id) if payload.include_lessons else []
         return definition, lessons, {"strategy_id": backtest.strategy_id, "backtest_id": backtest.id}
+    if src.live_id is not None:
+        # The live session runs a frozen copy of the design (strategy_live.definition):
+        # that is what the user has been watching, so the template starts from it.
+        live = session.get(StrategyLive, src.live_id)
+        if live is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Live session {src.live_id} not found")
+        strategy = strategy_service.get_strategy(session, live.strategy_id, user_id)
+        definition = live.definition or strategy.definition
+        lessons = _lessons_of_strategy(session, strategy.id) if payload.include_lessons else []
+        return definition, lessons, {"strategy_id": strategy.id, "live_id": live.id}
     return src.definition, [], {}
 
 

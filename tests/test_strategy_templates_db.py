@@ -6,6 +6,7 @@ and edit rules. Run: ``venv/bin/python -m pytest tests/test_strategy_templates_d
 """
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -225,3 +226,51 @@ def test_save_preview_instantiate_round_trip(session, tenant, monkeypatch):
         svc.get_template(session, tpl.id, user_a.id)
     # Instantiated strategies survive the template deletion.
     assert session.get(Strategy, created.id) is not None
+
+
+def test_template_from_live_session_uses_frozen_definition(session, tenant, monkeypatch):
+    """A live session runs a frozen copy of the design: the template starts
+    from that snapshot (what the user watched), lessons come from the strategy."""
+    from app.models.agent_lesson import AgentLesson
+    from app.models.strategy import StrategyLive
+    from app.schemas.strategy_template import StrategyTemplateCreate, StrategyTemplateSource
+    from app.services import strategy_template_service as svc
+
+    monkeypatch.setattr(svc, "classify_indicator_types", lambda keys: (set(), set(keys), False))
+    user_a, conn_a, acc_a = tenant["a"]
+    user_b, _, _ = tenant["b"]
+    strategy = _make_strategy(session, user_a, acc_a, _definition())
+    # The design moved on after the launch: the snapshot still has one rule, the design two.
+    frozen = _definition(symbol="ETHUSDT")
+    live = StrategyLive(strategy_id=strategy.id, status="running", symbol="ETHUSDT", timeframe="5m",
+                        account_id=acc_a.id, connection_id=conn_a.id, definition=frozen)
+    session.add(live)
+    design = copy.deepcopy(strategy.definition)
+    design["strategy"]["rules"].append({"name": "r2", "action": "sell", "chart_id": "main", "conditions": []})
+    strategy.definition = design
+    session.add(strategy)
+    session.add(AgentLesson(strategy_id=strategy.id, user_id=user_a.id, lesson="Dal live", confidence=0.5))
+    session.commit()
+
+    payload = StrategyTemplateCreate(name="Dal live", source=StrategyTemplateSource(live_id=live.id))
+    preview = svc.preview_template(session, payload, user_a.id)
+    assert preview.rules_count == 1 and [l.lesson for l in preview.lessons] == ["Dal live"]
+
+    tpl = svc.create_template(session, payload, user_a.id)
+    assert tpl.origin["live_id"] == live.id and tpl.origin["strategy_id"] == strategy.id
+    assert len(tpl.definition["strategy"]["rules"]) == 1
+    assert "symbol" not in tpl.definition["strategy"]["charts"][0]
+
+    # Foreign live / unknown live → 404.
+    with pytest.raises(HTTPException) as exc:
+        svc.preview_template(session, payload, user_b.id)
+    assert exc.value.status_code == 404
+    with pytest.raises(HTTPException) as exc:
+        svc.preview_template(session, StrategyTemplateCreate(name="x", source=StrategyTemplateSource(live_id=10**9)), user_a.id)
+    assert exc.value.status_code == 404
+
+    # A session without a snapshot falls back to the design.
+    live.definition = None
+    session.add(live)
+    session.commit()
+    assert svc.preview_template(session, payload, user_a.id).rules_count == 2

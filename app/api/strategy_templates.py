@@ -66,7 +66,7 @@ def _read(row: StrategyTemplate) -> StrategyTemplateRead:
         **_summary(row).model_dump(),
         definition=row.definition,
         lessons=[TemplateLesson(**l) for l in (row.lessons or [])],
-        origin=TemplateOrigin(**{k: v for k, v in origin.items() if k in ("strategy_id", "backtest_id")}) if origin else None,
+        origin=TemplateOrigin(**{k: v for k, v in origin.items() if k in ("strategy_id", "backtest_id", "live_id")}) if origin else None,
         warnings=warnings,
     )
 
