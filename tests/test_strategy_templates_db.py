@@ -274,3 +274,52 @@ def test_template_from_live_session_uses_frozen_definition(session, tenant, monk
     session.add(live)
     session.commit()
     assert svc.preview_template(session, payload, user_a.id).rules_count == 2
+
+
+def test_export_import_round_trip(session, tenant, monkeypatch):
+    from app.schemas.strategy_template import StrategyTemplateCreate, StrategyTemplateImport, StrategyTemplateSource
+    from app.services import strategy_template_service as svc
+
+    monkeypatch.setattr(svc, "classify_indicator_types", lambda keys: (set(), set(), True))
+    user_a, _, acc_a = tenant["a"]
+    user_b, _, _ = tenant["b"]
+    strategy = _make_strategy(session, user_a, acc_a, _definition())
+    tpl = svc.create_template(
+        session, StrategyTemplateCreate(name="Esportabile", tags=["x"], source=StrategyTemplateSource(strategy_id=strategy.id),
+                                        chart_labels={"ctx": "contesto"}), user_a.id,
+    )
+    data = svc.export_template(tpl)
+    assert data["schema"] == 1 and "key" not in data and data["name"] == "Esportabile"
+    assert data["charts_meta"] == [{"id": "ctx", "label": "contesto"}]
+    assert "symbol" not in data["definition"]["strategy"]
+    import json as _json
+    _json.dumps(data)  # serialisable as a file
+
+    # Official export carries its key; import by another user never makes it official.
+    official = svc.list_templates(session, user_b.id, scope="official")[0]
+    off = svc.export_template(svc.get_template(session, official.id, user_b.id))
+    assert off["key"] == official.key
+    imported = svc.import_template(session, StrategyTemplateImport(file=off), user_b.id)
+    assert imported.user_id == user_b.id and imported.key is None and not imported.official
+    assert imported.origin["imported"] is True and imported.name == official.name
+    assert imported.charts_meta[0]["label"] == official.charts_meta[0]["label"]
+
+    # Round trip on the same user: same name → numeric suffix; explicit taken name → 409.
+    again = svc.import_template(session, StrategyTemplateImport(file=data), user_a.id)
+    assert again.name == "Esportabile 2" and again.definition == tpl.definition and again.charts_meta == tpl.charts_meta
+    with pytest.raises(HTTPException) as exc:
+        svc.import_template(session, StrategyTemplateImport(file=data, name="Esportabile"), user_a.id)
+    assert exc.value.status_code == 409
+
+    # A hand-edited file with market traces is sanitised on the way in.
+    dirty = dict(data, definition=_definition("ETHUSDT"), name="Sporco")
+    row = svc.import_template(session, StrategyTemplateImport(file=dirty), user_a.id)
+    assert "symbol" not in row.definition["strategy"]["charts"][0]
+    with pytest.raises(HTTPException) as exc:
+        svc.import_template(session, StrategyTemplateImport(file={"schema": 1}), user_a.id)
+    assert exc.value.status_code == 400
+
+    # Custom indicators are reported for the importer to check.
+    monkeypatch.setattr(svc, "classify_indicator_types", lambda keys: (set(), {"my_ind"}, True))
+    row = svc.import_template(session, StrategyTemplateImport(file=data, name="Con custom"), user_a.id)
+    assert any("my_ind" in w for w in row.origin["warnings"])

@@ -32,6 +32,8 @@ class TemplateOrigin(BaseModel):
     strategy_id: Optional[int] = None
     backtest_id: Optional[int] = None
     live_id: Optional[int] = None
+    # True when the template came from an uploaded file (export/import).
+    imported: Optional[bool] = None
 
 
 class StrategyTemplateSummary(BaseModel):
@@ -82,6 +84,14 @@ class StrategyTemplateCreate(BaseModel):
     include_lessons: bool = True
     # Chart labels chosen by the author, keyed by chart id ("esecuzione", "contesto").
     chart_labels: dict[str, str] = Field(default_factory=dict)
+
+
+class StrategyTemplateImport(BaseModel):
+    """Upload of a template file (the JSON produced by the export endpoint,
+    same shape as ``system_templates/*.json``). ``name`` overrides the file's
+    name; without it a taken name gets a numeric suffix."""
+    file: dict[str, Any]
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
 
 
 class StrategyTemplateUpdate(BaseModel):

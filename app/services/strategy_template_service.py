@@ -37,6 +37,7 @@ from app.models.strategy import Strategy, StrategyLive
 from app.models.strategy_template import StrategyTemplate
 from app.schemas.strategy import StrategyCreate
 from app.schemas.strategy_template import (
+    StrategyTemplateImport,
     StrategyTemplateCreate,
     StrategyTemplateInstantiate,
     StrategyTemplateUpdate,
@@ -584,6 +585,53 @@ def instantiate_template(
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,62}$")
 
 
+def template_fields_from_file(data: Any, *, strict: bool, label: str = "file") -> tuple[dict[str, Any], list[str]]:
+    """Validate a template file (``system_templates/*.json`` or an export)
+    and return the row fields + the sanitisation warnings.
+
+    ``strict`` (official files, CI test): the definition must already be
+    clean and warning-free. Non-strict (user import): whatever the file
+    carries is sanitised here and the warnings are returned to the user.
+    Raises ValueError on a malformed file.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"{label}: not a JSON object")
+    if data.get("schema") != TEMPLATE_FILE_SCHEMA:
+        raise ValueError(f"{label}: schema {data.get('schema')!r} != {TEMPLATE_FILE_SCHEMA}")
+    if not isinstance(data.get("name"), str) or not data["name"].strip():
+        raise ValueError(f"{label}: name is required")
+    if not isinstance(data.get("definition"), dict):
+        raise ValueError(f"{label}: definition is required")
+    # Author-provided chart meta may add labels; ids/timeframes come from the definition.
+    given = {str(m.get("id")): m for m in (data.get("charts_meta") or []) if isinstance(m, dict)}
+    labels = {k: str(m.get("label")) for k, m in given.items() if m.get("label")}
+    labels.update({str(k): str(v) for k, v in (data.get("chart_labels") or {}).items()} if isinstance(data.get("chart_labels"), dict) else {})
+    try:
+        sanitised, charts_meta, warnings = sanitize(data["definition"], chart_labels=labels)
+    except HTTPException as exc:
+        raise ValueError(f"{label}: {exc.detail}") from exc
+    if strict:
+        if sanitised != data["definition"]:
+            raise ValueError(f"{label}: definition is not sanitised (symbol/asset/sources/studios/drawings present)")
+        if warnings:
+            raise ValueError(f"{label}: {'; '.join(warnings)}")
+    try:
+        lessons = [TemplateLesson(**l).model_dump() for l in (data.get("lessons") or []) if isinstance(l, dict)]
+    except Exception as exc:  # noqa: BLE001 - pydantic detail is enough
+        raise ValueError(f"{label}: invalid lessons ({exc})") from exc
+    return (
+        {
+            "name": data["name"].strip()[:80],
+            "description": (data.get("description") or "").strip() or None,
+            "tags": _clean_tags(data.get("tags")),
+            "definition": sanitised,
+            "lessons": lessons,
+            "charts_meta": [m.model_dump() for m in charts_meta],
+        },
+        warnings,
+    )
+
+
 def load_system_template_files(directory: Path = SYSTEM_TEMPLATES_DIR) -> list[dict[str, Any]]:
     """Parse and validate every ``*.json`` template file. Raises ValueError
     on a malformed file (CI test) — the startup sync logs and skips instead."""
@@ -592,41 +640,97 @@ def load_system_template_files(directory: Path = SYSTEM_TEMPLATES_DIR) -> list[d
         return files
     for path in sorted(directory.glob("*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("schema") != TEMPLATE_FILE_SCHEMA:
-            raise ValueError(f"{path.name}: schema {data.get('schema')!r} != {TEMPLATE_FILE_SCHEMA}")
-        key = data.get("key") or path.stem
+        key = (data.get("key") or path.stem) if isinstance(data, dict) else path.stem
         if key != path.stem or not _KEY_RE.match(key):
             raise ValueError(f"{path.name}: key {key!r} must equal the file name (slug)")
-        if not isinstance(data.get("name"), str) or not data["name"].strip():
-            raise ValueError(f"{path.name}: name is required")
-        if not isinstance(data.get("definition"), dict):
-            raise ValueError(f"{path.name}: definition is required")
-        sanitised, charts_meta, warnings = sanitize(data["definition"], chart_labels=data.get("chart_labels"))
-        if sanitised != data["definition"]:
-            raise ValueError(f"{path.name}: definition is not sanitised (symbol/asset/sources/studios/drawings present)")
-        if warnings:
-            raise ValueError(f"{path.name}: {'; '.join(warnings)}")
-        lessons = [TemplateLesson(**l).model_dump() for l in (data.get("lessons") or [])]
-        # Author-provided chart meta may add labels; ids/timeframes come from the definition.
-        given = {str(m.get("id")): m for m in (data.get("charts_meta") or []) if isinstance(m, dict)}
-        metas = []
-        for m in charts_meta:
-            d = m.model_dump()
-            g = given.get(d["id"], {})
-            d["label"] = g.get("label") or d["label"]
-            metas.append(d)
-        files.append(
-            {
-                "key": key,
-                "name": data["name"].strip()[:80],
-                "description": (data.get("description") or "").strip() or None,
-                "tags": _clean_tags(data.get("tags")),
-                "definition": sanitised,
-                "lessons": lessons,
-                "charts_meta": metas,
-            }
-        )
+        fields, _ = template_fields_from_file(data, strict=True, label=path.name)
+        files.append({"key": key, **fields})
     return files
+
+
+# ---------------------------------------------------------------------------
+# Export / import (portable JSON, same shape as the official files)
+# ---------------------------------------------------------------------------
+
+def export_template(row: StrategyTemplate) -> dict[str, Any]:
+    """The portable file for a template: what ``template_fields_from_file``
+    reads back. ``key`` only for official templates (personal ones get none)."""
+    data: dict[str, Any] = {
+        "schema": TEMPLATE_FILE_SCHEMA,
+        "name": row.name,
+        "description": row.description,
+        "tags": list(row.tags or []),
+        "charts_meta": [{"id": m.get("id"), "label": m.get("label")} for m in (row.charts_meta or []) if m.get("label")],
+        "definition": row.definition,
+        "lessons": list(row.lessons or []),
+        "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "exported_from": "edgewalker",
+    }
+    if row.official and row.key:
+        data["key"] = row.key
+    return data
+
+
+def export_file_name(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48] or "template"
+    return f"{slug}.edgewalker-template.json"
+
+
+def _unique_template_name(session: Session, user_id: int, base: str) -> str:
+    base = base.strip()[:80] or "Template"
+    if not _template_name_taken(session, user_id, base):
+        return base
+    for n in range(2, 1000):
+        suffix = f" {n}"
+        candidate = f"{base[:80 - len(suffix)]}{suffix}"
+        if not _template_name_taken(session, user_id, candidate):
+            return candidate
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esiste già un template con questo nome")
+
+
+def import_template(session: Session, payload: StrategyTemplateImport, user_id: int) -> StrategyTemplate:
+    """Create a personal template from an uploaded file. The definition is
+    sanitised again (a hand-edited file may carry market traces) and the
+    warnings — plus the custom indicators the user must own — are stored in
+    ``origin.warnings`` so the response shows them."""
+    try:
+        fields, warnings = template_fields_from_file(payload.file, strict=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"File template non valido: {exc}") from exc
+    if payload.name:
+        name = payload.name.strip()
+        if _template_name_taken(session, user_id, name):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esiste già un template con questo nome")
+    else:
+        name = _unique_template_name(session, user_id, fields["name"])
+    _, custom, verified = classify_indicator_types(_indicator_types(fields["definition"]))
+    if custom and verified:
+        warnings.append(
+            "Indicatori personali richiesti dal template (devono esistere nel tuo catalogo): " + ", ".join(sorted(custom))
+        )
+    elif custom and not verified:
+        warnings.append("Catalogo indicatori non raggiungibile: indicatori non verificati.")
+    now = datetime.now(timezone.utc)
+    row = StrategyTemplate(
+        user_id=user_id,
+        name=name,
+        description=fields["description"],
+        tags=fields["tags"],
+        definition=fields["definition"],
+        lessons=fields["lessons"],
+        charts_meta=fields["charts_meta"],
+        origin={"imported": True, "warnings": warnings},
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(row)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esiste già un template con questo nome") from exc
+    session.refresh(row)
+    return row
 
 
 def sync_system_templates(session: Session, directory: Path = SYSTEM_TEMPLATES_DIR) -> int:

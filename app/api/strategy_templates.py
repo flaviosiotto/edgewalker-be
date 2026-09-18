@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -12,6 +13,7 @@ from app.models.strategy_template import StrategyTemplate
 from app.models.user import User
 from app.schemas.strategy_template import (
     StrategyTemplateCreate,
+    StrategyTemplateImport,
     StrategyTemplateInstantiate,
     StrategyTemplateInstantiateResponse,
     StrategyTemplateRead,
@@ -25,7 +27,10 @@ from app.schemas.strategy_template import (
 from app.services.strategy_template_service import (
     create_template,
     delete_template,
+    export_file_name,
+    export_template,
     get_template,
+    import_template,
     instantiate_template,
     list_templates,
     preview_template,
@@ -66,7 +71,7 @@ def _read(row: StrategyTemplate) -> StrategyTemplateRead:
         **_summary(row).model_dump(),
         definition=row.definition,
         lessons=[TemplateLesson(**l) for l in (row.lessons or [])],
-        origin=TemplateOrigin(**{k: v for k, v in origin.items() if k in ("strategy_id", "backtest_id", "live_id")}) if origin else None,
+        origin=TemplateOrigin(**{k: v for k, v in origin.items() if k in ("strategy_id", "backtest_id", "live_id", "imported")}) if origin else None,
         warnings=warnings,
     )
 
@@ -98,6 +103,33 @@ def create_strategy_template(
     current_user: User = Depends(get_current_active_user),
 ):
     return _read(create_template(session, payload, current_user.id))
+
+
+@router.post("/import", response_model=StrategyTemplateRead, status_code=status.HTTP_201_CREATED)
+def import_strategy_template(
+    payload: StrategyTemplateImport,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Create a personal template from an exported file (``file`` = the JSON
+    document). 400 on a malformed file; a taken name gets a numeric suffix
+    unless ``name`` is given (then 409). ``warnings`` lists what the
+    sanitisation removed and the custom indicators the user must own."""
+    return _read(import_template(session, payload, current_user.id))
+
+
+@router.get("/{template_id}/export")
+def export_strategy_template(
+    template_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The template as a portable JSON file (own or official)."""
+    row = get_template(session, template_id, current_user.id)
+    return JSONResponse(
+        content=export_template(row),
+        headers={"Content-Disposition": f'attachment; filename="{export_file_name(row.name)}"'},
+    )
 
 
 @router.get("/{template_id}", response_model=StrategyTemplateRead)

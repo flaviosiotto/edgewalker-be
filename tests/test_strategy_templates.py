@@ -283,3 +283,30 @@ def test_source_accepts_exactly_one_reference():
         StrategyTemplateSource()
     with pytest.raises(ValidationError):
         StrategyTemplateSource(strategy_id=1, live_id=3)
+
+
+def test_template_fields_from_file_strict_vs_import(real_definition):
+    from app.services.strategy_template_service import template_fields_from_file
+
+    # A raw strategy definition carries market traces: strict (official) refuses,
+    # import sanitises and reports what it removed.
+    data = {"schema": 1, "name": "Da file", "definition": copy.deepcopy(real_definition), "tags": ["Trend"],
+            "charts_meta": [{"id": "main", "label": "esecuzione"}]}
+    with pytest.raises(ValueError, match="not sanitised"):
+        template_fields_from_file(data, strict=True)
+    fields, warnings = template_fields_from_file(data, strict=False)
+    assert "symbol" not in fields["definition"]["strategy"] and fields["tags"] == ["trend"]
+    assert fields["charts_meta"][0]["label"] == "esecuzione"
+    assert isinstance(warnings, list)
+
+    for bad in (None, [], {"schema": 2, "name": "x", "definition": {}}, {"schema": 1, "definition": {}},
+                {"schema": 1, "name": "x", "definition": "nope"}, {"schema": 1, "name": "x", "definition": {}, "lessons": [{"nope": 1}]}):
+        with pytest.raises(ValueError):
+            template_fields_from_file(bad, strict=False)
+
+
+def test_export_file_name_is_a_safe_slug():
+    from app.services.strategy_template_service import export_file_name
+
+    assert export_file_name("Pullback RSI / trend (v2)") == "pullback-rsi-trend-v2.edgewalker-template.json"
+    assert export_file_name("///") == "template.edgewalker-template.json"
