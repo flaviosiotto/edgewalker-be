@@ -82,13 +82,23 @@ def _resolve_backtest_position_accounting_mode(connection: Connection | None) ->
     return "netting"
 
 
-def _with_backtest_accounting_snapshot(config: Any, *, broker_type: str, position_accounting_mode: str) -> Any:
+def _with_backtest_accounting_snapshot(
+    config: Any,
+    *,
+    broker_type: str,
+    position_accounting_mode: str,
+    contract_multiplier: float | None = None,
+) -> Any:
     if not isinstance(config, dict):
         return config
     snapshot = dict(config)
     backtest_cfg = dict(snapshot.get("backtest") or {}) if isinstance(snapshot.get("backtest"), dict) else {}
     backtest_cfg["broker_type"] = broker_type
     backtest_cfg["position_accounting_mode"] = position_accounting_mode
+    if contract_multiplier is not None and contract_multiplier > 0:
+        # Money P&L = price diff x qty x multiplier; pinned so the coordinator,
+        # the runner and any re-run price the same contract (see contract_multiplier.py).
+        backtest_cfg["contract_multiplier"] = float(contract_multiplier)
     snapshot["backtest"] = backtest_cfg
     return snapshot
 
@@ -932,10 +942,25 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
         strategy_config = _strip_rule_chat_ids(
             _normalize_strategy_indicator_field_references(raw_strategy_config)
         )
+        from app.services.contract_multiplier import resolve_contract_multiplier
+
+        contract_multiplier, multiplier_source = resolve_contract_multiplier(
+            session,
+            symbol=backtest.symbol,
+            asset=backtest.asset,
+            connection=connection,
+            backtest_config=backtest.config,
+            strategy_definition=strategy.definition,
+        )
+        logger.info(
+            "Backtest %d contract multiplier for %s: %s (source=%s)",
+            backtest.id, backtest.symbol, contract_multiplier, multiplier_source,
+        )
         strategy_config = _with_backtest_accounting_snapshot(
             strategy_config,
             broker_type=broker_type,
             position_accounting_mode=position_accounting_mode,
+            contract_multiplier=contract_multiplier,
         )
         # Pin user-defined indicators to their current valid version
         # (params.ew_hash) so the backtest resolves them by content hash.
@@ -973,6 +998,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             timeframe=backtest.timeframe or "5m",
             broker_type=broker_type,
             position_accounting_mode=position_accounting_mode,
+            contract_multiplier=contract_multiplier,
             backend_auth_token=runner_auth_token,
             manager_webhook_auth_token=manager_webhook_auth_token,
             manager_chat_session_id=_chat_session_id(backtest_chat),

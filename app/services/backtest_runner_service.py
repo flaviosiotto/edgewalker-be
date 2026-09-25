@@ -116,6 +116,7 @@ class BacktestRunnerService:
         *,
         broker_type: str = "",
         position_accounting_mode: str = "netting",
+        contract_multiplier: float | None = None,
         backend_auth_token: str | None = None,
         manager_webhook_auth_token: str | None = None,
         manager_chat_session_id: str | None = None,
@@ -159,6 +160,9 @@ class BacktestRunnerService:
             "CONNECTION_ID": str(connection_id),
             "BROKER_TYPE": str(broker_type or ""),
             "POSITION_ACCOUNTING_MODE": str(position_accounting_mode or "netting"),
+            # Contract multiplier of the traded instrument (money P&L); the
+            # runner forwards it to strategy-backtest in the subscribe payload.
+            "CONTRACT_MULTIPLIER": str(float(contract_multiplier)) if contract_multiplier and contract_multiplier > 0 else "",
             "REDIS_HOST": REDIS_HOST,
             "REDIS_PORT": REDIS_PORT,
             "STRATEGY_ID": str(strategy_id),
