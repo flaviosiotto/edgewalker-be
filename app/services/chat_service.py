@@ -344,14 +344,17 @@ def _summarize_tool_calls(tool_calls: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
-#: Per-turn usage fields exposed to the chat UI: EdgeWalker credits only.
-#: Provider tokens, model and cost stay out on purpose (decision 13/09/2026):
-#: the trader sees what the platform charged, not the provider's meter.
+#: Per-turn usage fields exposed to the chat UI: EdgeWalker credits and how
+#: long the answer took. Provider tokens, model and cost stay out on purpose
+#: (decision 13/09/2026): the trader sees what the platform charged, not the
+#: provider's meter.
 _USAGE_PUBLIC_FIELDS = (
     "credits",
     "estimated",
     "wallet_cents",
     "tool_calls",
+    "duration_ms",
+    "first_token_ms",
 )
 
 
