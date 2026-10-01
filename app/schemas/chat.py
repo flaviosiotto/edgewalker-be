@@ -63,10 +63,8 @@ class ChatHistoryAppendRequest(BaseModel):
     """Append one row to the chat history without invoking the agent.
 
     Used by the strategy-runner to record WHO is interrogating the agent
-    (rule / alert / lifecycle event) before the n8n webhook is called: the
-    n8n memory persists the same human text only at turn end; its copy is
-    deduplicated by the ``n8n_chat_histories`` trigger (migration 046 —
-    n8n-specific WORKAROUND, to be dropped when n8n is dismissed).
+    (rule / alert / lifecycle event) before the agent webhook is called, so
+    the question shows up attributed while the answer is still streaming.
     """
 
     text: str

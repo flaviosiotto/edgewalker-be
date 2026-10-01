@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import date, datetime
@@ -29,6 +30,8 @@ from app.services.n8n_auth import (
     issue_n8n_api_access_token,
     issue_n8n_webhook_auth_token,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_CHAT_PAGE_SIZE = 100
 DEFAULT_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=60.0)
@@ -487,13 +490,10 @@ def get_chat_session_id(session: Session, *, chat_id: int, user_id: int) -> str:
 # "Who is asking" — the chat is a group: human, ask_agent rules, alerts and
 # external agents (MCP) all interrogate the same agent. The asker is persisted
 # as a ``human`` row carrying ``metadata.sender_kind``/``sender_label`` BEFORE
-# the n8n webhook is called, so the question is visible (and attributed)
-# while the agent is still streaming.
-#
-# WORKAROUND (n8n-specific, remove with n8n): n8n's Postgres Chat Memory also
-# writes its own copy of the human text at turn end; that duplicate is
-# swallowed by the ``n8n_chat_histories`` BEFORE INSERT trigger (migration
-# 046). The attributed write path here is the intended design and stays.
+# the agent webhook is called, so the question is visible (and attributed)
+# while the agent is still streaming. agent-svc recognises that row and does
+# not write a copy of its own (the n8n-era dedup trigger of migration 046 is
+# dropped by migration 061).
 # ---------------------------------------------------------------------------
 
 ASKER_KINDS = ("user", "external_agent", "rule", "alert", "runner", "system")
@@ -700,6 +700,7 @@ def send_chat_message(
 
     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
     resolved_chat_id = chat.id or chat_id
+    chat_user_id = chat.user_id
     webhook_url = agent_webhook_url()
     persist_asker_message(
         session,
@@ -925,6 +926,7 @@ async def stream_chat_message(
     headers = build_n8n_webhook_auth_headers(webhook_auth_token)
     headers["Accept"] = "text/plain"
     resolved_chat_id = chat.id
+    chat_user_id = chat.user_id
     webhook_url = agent_webhook_url()
     persist_asker_message(
         session,
