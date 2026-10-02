@@ -258,6 +258,12 @@ def resolve_strategy_manager_agent_id(
 
 DEFAULT_STRATEGY_NAME = "Nuova strategia"
 
+# Self-learning degree of a backtest (BacktestCreate.learning_mode). The
+# default learns once, on the whole run: per-trade reviews tend to turn every
+# losing trade into an over-specific rule.
+LEARNING_MODES = ("off", "per_trade", "end_of_run")
+DEFAULT_LEARNING_MODE = "end_of_run"
+
 
 def _placeholder_strategy_name(session: Session, user_id: int, account_id: int) -> str:
     """Unique placeholder for a strategy created without a name.
@@ -664,7 +670,12 @@ def create_backtest(
     # lessons leg against a baseline leg.
     from app.models.agent_lesson import AgentLesson
 
-    lessons_meta: dict[str, Any] = {"enabled": bool(payload.use_lessons)}
+    lessons_meta: dict[str, Any] = {
+        "enabled": bool(payload.use_lessons),
+        "learning_mode": (
+            (payload.learning_mode or DEFAULT_LEARNING_MODE) if payload.use_lessons else "off"
+        ),
+    }
     if payload.use_lessons:
         active_lessons = list(session.exec(
             select(AgentLesson)
@@ -981,6 +992,16 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             if isinstance(lessons_cfg, dict)
             else True
         )
+        raw_learning_mode = (
+            str(lessons_cfg.get("learning_mode") or "").strip().lower()
+            if isinstance(lessons_cfg, dict)
+            else ""
+        )
+        learning_mode = (
+            "off"
+            if not use_lessons
+            else raw_learning_mode if raw_learning_mode in LEARNING_MODES else DEFAULT_LEARNING_MODE
+        )
         raw_reasoning = str(run_parameters.get("agent_reasoning") or "").strip().lower()
         agent_reasoning = raw_reasoning if raw_reasoning in ("quick", "balanced", "deep") else None
         raw_agent_timeout = run_parameters.get("agent_timeout_s")
@@ -1004,6 +1025,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             manager_chat_session_id=_chat_session_id(backtest_chat),
             owner_user_id=strategy.user_id,
             use_lessons=use_lessons,
+            learning_mode=learning_mode,
             agent_timeout_s=agent_timeout_s,
             agent_reasoning=agent_reasoning,
         )

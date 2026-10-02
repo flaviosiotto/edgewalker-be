@@ -202,6 +202,12 @@ class BacktestCreate(BaseModel):
     # baseline leg of an A/B comparison.
     use_lessons: bool = True
 
+    # Self-learning degree of this run: "off" = apply the lessons without
+    # writing any; "per_trade" = blocking review after every closed trade plus
+    # the final analysis; "end_of_run" = one analysis of the whole run's
+    # performance. None = end_of_run. Forced to "off" when use_lessons is false.
+    learning_mode: Optional[Literal["off", "per_trade", "end_of_run"]] = None
+
     # Max seconds the runner waits for each blocking agent reply before failing
     # the run. Capped at 570s: the backtest service hold-watchdog ceiling is
     # 600s and the runner adds a +15s TTL margin on top of this value.
