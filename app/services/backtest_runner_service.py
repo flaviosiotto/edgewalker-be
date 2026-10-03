@@ -121,7 +121,6 @@ class BacktestRunnerService:
         manager_webhook_auth_token: str | None = None,
         manager_chat_session_id: str | None = None,
         owner_user_id: int | str | None = None,
-        use_lessons: bool = True,
         learning_mode: str = "end_of_run",
         agent_reasoning: str | None = None,
         agent_timeout_s: float | None = None,
@@ -227,15 +226,12 @@ class BacktestRunnerService:
             env["AGENT_REASONING"] = agent_reasoning
         # Self-learning degree of the run (off | per_trade | end_of_run): the
         # runner decides which review/analysis turns to open and agent-svc
-        # which turns may write lessons.
-        env["BACKTEST_LEARNING_MODE"] = learning_mode if use_lessons else "off"
-        if not use_lessons or learning_mode == "off":
+        # which turns may write lessons. The run always reads its own
+        # playbook (possibly empty: launched from "none").
+        env["BACKTEST_LEARNING_MODE"] = learning_mode
+        if learning_mode == "off":
             # Legacy switch, still read by runner images older than the mode.
             env["BACKTEST_LESSON_REVIEW"] = "false"
-        if not use_lessons:
-            # Baseline A/B leg: no LEZIONI APPRESE injection either (agent-svc
-            # reads lessons_enabled from the runner metadata).
-            env["LESSONS_ENABLED"] = "false"
 
         labels = {
             "traefik.enable": "true",

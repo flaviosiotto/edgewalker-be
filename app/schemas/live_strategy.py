@@ -80,6 +80,10 @@ class LiveStrategyCreate(BaseModel):
     account_id: int | None = None
     # Manager agent per QUESTA sessione; None = manager della strategia.
     manager_agent_id: int | None = None
+    # Playbook agganciato alla sessione: "current" = quello corrente della
+    # strategia (default), "none" = nessuna lezione, oppure l'id di un
+    # backtest completato (il suo output). La live non scrive mai lezioni.
+    playbook: Literal["current", "none"] | int = "current"
 
 
 class LiveStrategyStartResponse(BaseModel):

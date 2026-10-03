@@ -9,13 +9,16 @@ from sqlmodel import Field, SQLModel
 
 
 class AgentLesson(SQLModel, table=True):
-    """A lesson the manager agent distilled for one strategy.
+    """A lesson of a playbook (migration 062).
 
-    Lessons are the agent's persistent playbook: written during backtest
-    reviews (or by the user), injected into the agent system message as the
-    LEZIONI APPRESE block, and revocable at any time (status=retired).
-    Every lesson carries its evidence (backtest/trade refs) so it can be
-    audited and validated against later runs.
+    A playbook is the set of rows of one run: a backtest starts from the
+    playbook chosen at launch (copied into rows with ``scope=backtest`` and
+    ``run_backtest_id`` = the run, ``parent_id`` = the input row), the agent
+    edits only those rows, and the output freezes when the run ends. Live
+    attaches to the output of one backtest and never writes. Rows with
+    ``scope=strategy`` are the strategy's initial playbook (pre-062 rows and
+    manual ones). ``backtest_id`` is the run the lesson was BORN in and
+    survives copies; ``evidence`` keeps the audit trail.
     """
 
     __tablename__ = "agent_lessons"
@@ -61,6 +64,27 @@ class AgentLesson(SQLModel, table=True):
     )
     evidence: Optional[dict[str, Any]] = Field(
         default=None, sa_column=Column(JSONB, nullable=True)
+    )
+    scope: str = Field(
+        default="strategy",
+        sa_column=Column(String(16), nullable=False, server_default="strategy"),
+    )
+    run_backtest_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("strategy_backtests.id", ondelete="CASCADE"),
+            nullable=True,
+            index=True,
+        ),
+    )
+    parent_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("agent_lessons.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
     )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -596,11 +596,12 @@ def copy_strategy(
             detail=f"Strategy name '{new_name}' conflicts with an existing one",
         ) from exc
 
+    # The copy has no backtests to point at: the source's CURRENT playbook
+    # becomes the copy's initial playbook (scope=strategy).
     from app.models.agent_lesson import AgentLesson
+    from app.services import playbook_service
 
-    lessons = session.exec(
-        select(AgentLesson).where(AgentLesson.strategy_id == source.id).order_by(AgentLesson.id)
-    ).all()
+    lessons = playbook_service.current_rows(session, source, status_filter=None)
     for lesson in lessons:
         evidence = dict(lesson.evidence or {})
         evidence["copied_from"] = {
@@ -619,6 +620,7 @@ def copy_strategy(
                 source=lesson.source,
                 backtest_id=None,  # orphaned on purpose: the backtests stay with the original
                 evidence=evidence,
+                scope=playbook_service.SCOPE_STRATEGY,
                 created_at=now,
                 updated_at=now,
             )
@@ -665,27 +667,19 @@ def create_backtest(
         )
     )
 
-    # Self-learning snapshot: which lessons were active when this run started.
-    # ab-evaluate adjusts exactly these (and only these) after comparing the
-    # lessons leg against a baseline leg.
-    from app.models.agent_lesson import AgentLesson
+    # Playbook the run starts from (docs/valutazione-playbook-lezioni.md):
+    # resolved now, copied into the run's own rows once the row has an id.
+    from app.services import playbook_service
 
+    lessons_from = payload.lessons_from
+    if lessons_from is None and not payload.use_lessons:
+        lessons_from = "none"
+    input_meta, input_rows = playbook_service.resolve_input(session, strategy, lessons_from)
     lessons_meta: dict[str, Any] = {
-        "enabled": bool(payload.use_lessons),
-        "learning_mode": (
-            (payload.learning_mode or DEFAULT_LEARNING_MODE) if payload.use_lessons else "off"
-        ),
+        **input_meta,
+        "enabled": True,
+        "learning_mode": payload.learning_mode or DEFAULT_LEARNING_MODE,
     }
-    if payload.use_lessons:
-        active_lessons = list(session.exec(
-            select(AgentLesson)
-            .where(AgentLesson.strategy_id == strategy_id)
-            .where(AgentLesson.status == "active")
-        ).all())
-        lessons_meta["active_ids"] = [l.id for l in active_lessons]
-        lessons_meta["confidence_snapshot"] = {
-            str(l.id): l.confidence for l in active_lessons
-        }
     base_parameters = payload.parameters if isinstance(payload.parameters, dict) else {}
     merged_parameters = {**base_parameters, "lessons": lessons_meta}
     if payload.agent_reasoning:
@@ -723,6 +717,16 @@ def create_backtest(
     )
     session.add(backtest)
     session.flush()
+    copies = playbook_service.copy_into_run(session, backtest, input_rows)
+    backtest.parameters = {
+        **merged_parameters,
+        "lessons": {
+            **lessons_meta,
+            "input_ids": [c.id for c in copies],
+            "parent_ids": [c.parent_id for c in copies],
+        },
+    }
+    session.add(backtest)
     # The chat is owned by the backtest (chat.backtest_id); no reverse column.
     _create_backtest_chat(session, strategy, backtest, resolved_agent_id)
     session.commit()
@@ -987,21 +991,12 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
 
         run_parameters = backtest.parameters if isinstance(backtest.parameters, dict) else {}
         lessons_cfg = run_parameters.get("lessons")
-        use_lessons = (
-            bool(lessons_cfg.get("enabled", True))
-            if isinstance(lessons_cfg, dict)
-            else True
-        )
         raw_learning_mode = (
             str(lessons_cfg.get("learning_mode") or "").strip().lower()
             if isinstance(lessons_cfg, dict)
             else ""
         )
-        learning_mode = (
-            "off"
-            if not use_lessons
-            else raw_learning_mode if raw_learning_mode in LEARNING_MODES else DEFAULT_LEARNING_MODE
-        )
+        learning_mode = raw_learning_mode if raw_learning_mode in LEARNING_MODES else DEFAULT_LEARNING_MODE
         raw_reasoning = str(run_parameters.get("agent_reasoning") or "").strip().lower()
         agent_reasoning = raw_reasoning if raw_reasoning in ("quick", "balanced", "deep") else None
         raw_agent_timeout = run_parameters.get("agent_timeout_s")
@@ -1024,7 +1019,6 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             manager_webhook_auth_token=manager_webhook_auth_token,
             manager_chat_session_id=_chat_session_id(backtest_chat),
             owner_user_id=strategy.user_id,
-            use_lessons=use_lessons,
             learning_mode=learning_mode,
             agent_timeout_s=agent_timeout_s,
             agent_reasoning=agent_reasoning,
@@ -1116,8 +1110,11 @@ def update_backtest(
 
 
 def delete_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> None:
-    """Delete a backtest and all its trades."""
+    """Delete a backtest and all its trades (and the rows of its playbook)."""
+    from app.services import playbook_service
+
     backtest = get_backtest(session, backtest_id, user_id)
+    playbook_service.assert_backtest_not_referenced(session, backtest)
     session.delete(backtest)
     session.commit()
 

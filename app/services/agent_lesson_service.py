@@ -6,7 +6,9 @@ from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
 from app.models.agent_lesson import AgentLesson
+from app.models.strategy import BacktestResult, StrategyLive
 from app.schemas.agent_lesson import AgentLessonCreate, AgentLessonUpdate
+from app.services import playbook_service
 from app.services.strategy_service import get_strategy
 
 
@@ -15,29 +17,32 @@ def list_lessons(
     strategy_id: int,
     user_id: int,
     *,
+    backtest_id: int | None = None,
+    live_id: int | None = None,
     status_filter: str | None = "active",
-    min_confidence: float | None = None,
     limit: int = 20,
 ) -> list[AgentLesson]:
-    get_strategy(session, strategy_id, user_id)
-    stmt = select(AgentLesson).where(AgentLesson.strategy_id == strategy_id)
-    if status_filter:
-        stmt = stmt.where(AgentLesson.status == status_filter)
-    if min_confidence is not None and min_confidence > 0:
-        stmt = stmt.where(AgentLesson.confidence >= min_confidence)
-    stmt = stmt.order_by(AgentLesson.confidence.desc(), AgentLesson.id.desc()).limit(limit)
-    return list(session.exec(stmt).all())
+    """The playbook of a run (``backtest_id``), of a live session
+    (``live_id``: what it attached at launch) or, by default, the strategy's
+    current one. Ordered by confidence."""
+    strategy = get_strategy(session, strategy_id, user_id)
+    if backtest_id is not None:
+        rows = playbook_service.run_rows(session, backtest_id, status_filter=status_filter)
+    elif live_id is not None:
+        live = session.get(StrategyLive, live_id)
+        if live is None or live.strategy_id != strategy.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Live session {live_id} not found")
+        rows = playbook_service.live_rows(session, live, status_filter=status_filter)
+    else:
+        rows = playbook_service.current_rows(session, strategy, status_filter=status_filter)
+    return rows[:limit]
 
 
-# ── A/B evaluation ────────────────────────────────────────────────────────
-# Compare a lessons-enabled backtest against a baseline (lessons disabled)
-# run with the same parameters, and adjust the confidence of exactly the
-# lessons that were active in the lessons leg. Coarse but honest anti-drift:
-# per-lesson attribution can refine it later.
-
-AB_CONFIDENCE_UP = 0.10
-AB_CONFIDENCE_DOWN = 0.20
-AB_RETIRE_BELOW = 0.20
+# ── A/B comparison ─────────────────────────────────────────────────────────
+# Two completed runs on the same parameters: the deltas are evidence for (or
+# against) promoting the lessons leg's playbook. Nothing is adjusted
+# automatically: confidences change only inside a run, under the agent-svc
+# guard rails, or by hand.
 
 
 def ab_evaluate(
@@ -47,7 +52,7 @@ def ab_evaluate(
     *,
     baseline_backtest_id: int,
     lessons_backtest_id: int,
-    apply: bool = True,
+    apply: bool = False,
 ) -> dict:
     from app.services.strategy_service import get_backtest
 
@@ -65,13 +70,6 @@ def ab_evaluate(
                 detail=f"Backtest {run.id} ({label}) is not completed (status={run.status})",
             )
 
-    lessons_cfg = (
-        lessons_run.parameters.get("lessons")
-        if isinstance(lessons_run.parameters, dict)
-        else None
-    ) or {}
-    active_ids = [int(i) for i in (lessons_cfg.get("active_ids") or [])]
-
     def _metric(run, name):
         value = getattr(run, name, None)
         return float(value) if value is not None else None
@@ -81,53 +79,12 @@ def ab_evaluate(
         b, l = _metric(baseline, name), _metric(lessons_run, name)
         deltas[name] = (l - b) if (b is not None and l is not None) else None
 
-    # Verdict: primary = return; tie-break = profit factor. A missing metric
-    # on either side yields no verdict (and no adjustment).
+    # Verdict: primary = return; tie-break = profit factor.
     verdict: str | None = None
     if deltas["return_pct"] is not None and deltas["return_pct"] != 0:
         verdict = "better" if deltas["return_pct"] > 0 else "worse"
     elif deltas["profit_factor"] is not None and deltas["profit_factor"] != 0:
         verdict = "better" if deltas["profit_factor"] > 0 else "worse"
-
-    adjusted: list[dict] = []
-    if apply and verdict is not None and active_ids:
-        now = datetime.now(timezone.utc)
-        for lesson_id in active_ids:
-            lesson = session.get(AgentLesson, lesson_id)
-            if lesson is None or lesson.user_id != user_id or lesson.status != "active":
-                continue
-            old_confidence = lesson.confidence
-            if verdict == "better":
-                lesson.confidence = min(1.0, lesson.confidence + AB_CONFIDENCE_UP)
-            else:
-                lesson.confidence = max(0.0, lesson.confidence - AB_CONFIDENCE_DOWN)
-            new_status = lesson.status
-            if lesson.confidence < AB_RETIRE_BELOW:
-                new_status = "retired"
-                lesson.status = new_status
-            evidence = dict(lesson.evidence or {})
-            ab_history = list(evidence.get("ab_evaluations") or [])
-            ab_history.append({
-                "baseline_backtest_id": baseline.id,
-                "lessons_backtest_id": lessons_run.id,
-                "verdict": verdict,
-                "delta_return_pct": deltas["return_pct"],
-                "delta_profit_factor": deltas["profit_factor"],
-                "confidence_before": old_confidence,
-                "confidence_after": lesson.confidence,
-                "evaluated_at": now.isoformat(),
-            })
-            evidence["ab_evaluations"] = ab_history
-            lesson.evidence = evidence
-            lesson.updated_at = now
-            session.add(lesson)
-            adjusted.append({
-                "id": lesson.id,
-                "confidence_before": old_confidence,
-                "confidence_after": lesson.confidence,
-                "status": lesson.status,
-            })
-        session.commit()
 
     return {
         "strategy_id": strategy_id,
@@ -135,9 +92,9 @@ def ab_evaluate(
         "lessons_backtest_id": lessons_run.id,
         "verdict": verdict,
         "deltas": deltas,
-        "lessons_evaluated": active_ids,
-        "applied": apply and verdict is not None,
-        "adjusted": adjusted,
+        "lessons_evaluated": [r.id for r in playbook_service.run_rows(session, lessons_run.id)],
+        "applied": False,
+        "adjusted": [],
     }
 
 
@@ -146,8 +103,27 @@ def create_lesson(
     strategy_id: int,
     user_id: int,
     payload: AgentLessonCreate,
+    *,
+    origin: str = "user",
 ) -> AgentLesson:
+    """A new row in the playbook of ``payload.backtest_id`` (the agent's path:
+    the run must still be alive) or, without a run, in the strategy's initial
+    playbook (manual rows only)."""
     strategy = get_strategy(session, strategy_id, user_id)
+    if payload.backtest_id is not None:
+        backtest = session.get(BacktestResult, payload.backtest_id)
+        if backtest is None or backtest.strategy_id != strategy.id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Backtest {payload.backtest_id} not found on strategy {strategy_id}",
+            )
+        if origin == "agent":
+            playbook_service.assert_agent_can_write(session, backtest.id)
+        scope, run_backtest_id = playbook_service.SCOPE_BACKTEST, backtest.id
+    else:
+        if origin == "agent":
+            playbook_service.assert_agent_can_write(session, None)
+        scope, run_backtest_id = playbook_service.SCOPE_STRATEGY, None
     lesson = AgentLesson(
         strategy_id=strategy_id,
         user_id=strategy.user_id,
@@ -157,6 +133,8 @@ def create_lesson(
         source=payload.source,
         backtest_id=payload.backtest_id,
         evidence=payload.evidence,
+        scope=scope,
+        run_backtest_id=run_backtest_id,
     )
     session.add(lesson)
     session.commit()
@@ -169,6 +147,8 @@ def update_lesson(
     lesson_id: int,
     user_id: int,
     payload: AgentLessonUpdate,
+    *,
+    origin: str = "user",
 ) -> AgentLesson:
     lesson = session.get(AgentLesson, lesson_id)
     if lesson is None or lesson.user_id != user_id:
@@ -176,6 +156,8 @@ def update_lesson(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lesson {lesson_id} not found",
         )
+    if origin == "agent":
+        playbook_service.assert_agent_can_write(session, lesson.run_backtest_id)
     data = payload.model_dump(exclude_unset=True)
     for key, value in data.items():
         setattr(lesson, key, value)

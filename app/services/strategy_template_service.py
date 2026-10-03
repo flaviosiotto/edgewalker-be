@@ -320,12 +320,11 @@ def classify_indicator_types(type_keys: Iterable[str]) -> tuple[set[str], set[st
 # ---------------------------------------------------------------------------
 
 def _lessons_of_strategy(session: Session, strategy_id: int) -> list[TemplateLesson]:
-    rows = session.exec(
-        select(AgentLesson)
-        .where(AgentLesson.strategy_id == strategy_id)
-        .where(AgentLesson.status == "active")
-        .order_by(AgentLesson.id)
-    ).all()
+    """The strategy's CURRENT playbook (promoted run's output, else initial rows)."""
+    from app.services import playbook_service
+
+    strategy = session.get(Strategy, strategy_id)
+    rows = playbook_service.current_rows(session, strategy) if strategy is not None else []
     return [
         TemplateLesson(lesson=r.lesson, context=r.context, confidence=float(r.confidence or 0.5))
         for r in rows

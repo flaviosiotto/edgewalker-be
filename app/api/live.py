@@ -81,6 +81,7 @@ from app.services.live_alert_service import (
     update_live_alert,
 )
 from app.services.gateway_client import GatewayClient
+from app.services import playbook_service
 from app.services.strategy_service import get_strategy
 from app.services.strategy_service import (
     post_manager_message,
@@ -372,8 +373,11 @@ async def _start_live_instance_internal(
     user_email: str | None,
     legacy_strategy_route: bool = False,
     manager_agent_id: int | None = None,
+    playbook: str | int | None = "current",
 ) -> tuple[StrategyLive, dict[str, Any]]:
     strategy = _get_strategy_or_404(session, strategy_id, user_id)
+    # Lessons the session executes with: the output of ONE backtest, frozen.
+    playbook_backtest_id = playbook_service.resolve_live_playbook(session, strategy, playbook)
 
     # Plan limit on concurrent live sessions (row lock on the subscription so
     # two simultaneous starts cannot both pass with a cap of 1).
@@ -410,6 +414,7 @@ async def _start_live_instance_internal(
         timeframe=timeframe,
         account_id=account_id,
         connection_id=connection.id,
+        playbook_backtest_id=playbook_backtest_id,
         # Snapshot with user-defined indicators pinned to their current valid
         # version (params.ew_hash) — the aggregator resolves them by hash.
         definition=inject_user_indicator_refs(
@@ -763,6 +768,7 @@ async def create_live_instance(
             user_email=current_user.email,
             legacy_strategy_route=False,
             manager_agent_id=payload.manager_agent_id,
+            playbook=payload.playbook,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

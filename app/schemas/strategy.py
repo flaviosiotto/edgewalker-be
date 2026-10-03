@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -31,6 +31,7 @@ class StrategyLiveRead(BaseModel):
     stopped_at: Optional[datetime] = None
     error_message: Optional[str] = None
     metrics: Optional[dict[str, Any]] = None
+    playbook_backtest_id: Optional[int] = None
     layout_config: Optional[dict[str, Any]] = None
     created_at: datetime
     updated_at: datetime
@@ -85,6 +86,9 @@ class StrategyRead(BaseModel):
 
     # AI Agent Manager
     manager_agent_id: Optional[int] = None
+
+    # Current playbook = output of this backtest (None: initial rows, if any)
+    playbook_backtest_id: Optional[int] = None
 
     # Account binding (single source of truth) + display labels for grouping
     account_id: int
@@ -198,8 +202,12 @@ class BacktestCreate(BaseModel):
     # Agent to execute this backtest via n8n
     agent_id: Optional[int] = None
 
-    # Self-learning: inject/record agent lessons in this run. Disable for the
-    # baseline leg of an A/B comparison.
+    # Playbook the run starts from: "none", "strategy" (the current playbook)
+    # or the id of a completed backtest (its output). The chosen rows are
+    # copied into the run. None = "strategy", unless the legacy use_lessons
+    # flag says False (then "none").
+    lessons_from: Optional[Union[Literal["none", "strategy"], int]] = None
+    # Legacy switch kept for older clients: False = lessons_from "none".
     use_lessons: bool = True
 
     # Self-learning degree of this run: "off" = apply the lessons without

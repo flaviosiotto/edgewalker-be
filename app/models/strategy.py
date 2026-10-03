@@ -139,6 +139,17 @@ class Strategy(SQLModel, table=True):
         ),
     )
 
+    # Backtest whose output playbook is the strategy's current one (migr. 062):
+    # default input of new backtests and default attachment of live.
+    playbook_backtest_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("strategy_backtests.id", ondelete="SET NULL", use_alter=True),
+            nullable=True,
+        ),
+    )
+
     # UI layout persistence (grid positions, time range, timezone)
     layout_config: Optional[Any] = Field(
         default=None,
@@ -155,6 +166,9 @@ class Strategy(SQLModel, table=True):
     backtests: list["BacktestResult"] = Relationship(
         sa_relationship=relationship(
             "BacktestResult",
+            # strategies.playbook_backtest_id adds a second FK between the two
+            # tables: the collection follows the child's strategy_id only.
+            foreign_keys="[BacktestResult.strategy_id]",
             back_populates="strategy",
             cascade="all, delete-orphan",
         )
@@ -284,6 +298,17 @@ class StrategyLive(SQLModel, table=True):
     metrics: Optional[Any] = Field(
         default=None,
         sa_column=Column(JSONB, nullable=True),
+    )
+
+    # Playbook attached at launch (migr. 062): the output of one backtest, or
+    # None. Audit only — live never writes lessons.
+    playbook_backtest_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("strategy_backtests.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
     )
 
     # UI layout persistence (grid widget positions, chart settings)
@@ -509,7 +534,9 @@ class BacktestResult(SQLModel, table=True):
     )
 
     strategy: Strategy | None = Relationship(
-        sa_relationship=relationship("Strategy", back_populates="backtests")
+        sa_relationship=relationship(
+            "Strategy", foreign_keys="[BacktestResult.strategy_id]", back_populates="backtests"
+        )
     )
 
     # This backtest's dedicated chat (chat.backtest_id -> this row). Deleting the

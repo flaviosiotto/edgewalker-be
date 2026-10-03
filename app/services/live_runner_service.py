@@ -283,6 +283,10 @@ class LiveRunnerService:
         # agent.n8n_webhook. The auth token — which the runner cannot mint —
         # is injected alongside.
         env["AGENT_WEBHOOK_URL"] = settings.AGENT_SVC_WEBHOOK_URL
+        # Live executes, it does not learn: no per-trade reviews, no synthesis
+        # (the playbook is the output of one backtest, attached at launch).
+        env["BACKTEST_LESSON_REVIEW"] = "false"
+        env["BACKTEST_LEARNING_MODE"] = "off"
         if manager_webhook_auth_token:
             env["MANAGER_WEBHOOK_AUTH_TOKEN"] = manager_webhook_auth_token
         if manager_chat_session_id:
