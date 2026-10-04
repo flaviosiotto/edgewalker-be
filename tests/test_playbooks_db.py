@@ -198,3 +198,45 @@ def test_agent_evaluation_derives_the_overall_score(session, tenant):
         AgentEvaluationWrite(scores={"edge": {"score": 80}})
     with pytest.raises(ValidationError):
         AgentEvaluationWrite(scores={k: {"score": 120} for k in scores})
+
+
+def test_runner_token_survives_completion_for_the_final_analysis(session, tenant):
+    """The final analysis turn is dispatched after the run is completed: the
+    runner must still authenticate (and get the agent its tokens) for a while."""
+    import asyncio
+
+    from app.utils.auth_utils import (
+        BACKTEST_RUNNER_GRACE,
+        backtest_runner_window_open,
+        create_user_delegated_token,
+        get_current_runner_principal,
+    )
+    from app.core.config import settings
+
+    user, _, acc = tenant
+    strategy = _strategy(session, user, acc)
+    bt = _backtest(session, strategy, user, lessons_from="none")
+    token = create_user_delegated_token(
+        session, user_id=user.id, audience=settings.RUNNER_TOKEN_AUDIENCE, purpose="runner_backend",
+        no_expiry=True, extra_claims={"strategy_id": strategy.id, "backtest_id": bt.id},
+    )
+
+    def principal():
+        return asyncio.run(get_current_runner_principal(token=token, session=session))
+
+    assert backtest_runner_window_open(bt)
+    _complete(session, bt)
+    assert principal().claims["backtest_id"] == bt.id
+    stored = session.get(type(bt), bt.id)
+    assert stored.agent_evaluation is None
+
+    _complete(session, bt, ago=BACKTEST_RUNNER_GRACE + timedelta(minutes=1))
+    with pytest.raises(HTTPException) as exc:
+        principal()
+    assert exc.value.status_code == 401
+
+    bt.status = "failed"
+    bt.completed_at = datetime.now(timezone.utc)
+    session.add(bt)
+    session.commit()
+    assert not backtest_runner_window_open(bt)

@@ -347,6 +347,24 @@ async def get_current_admin_user(
     return current_user
 
 
+# The runner outlives the run by one turn: the agent's final analysis
+# (lessons + evaluation) is dispatched right after the coordinator marks the
+# backtest completed. Its tokens stay valid for this long after completed_at.
+BACKTEST_RUNNER_GRACE = timedelta(hours=2)
+
+
+def backtest_runner_window_open(backtest: BacktestResult) -> bool:
+    """True while the runner of this backtest may still authenticate."""
+    if backtest.status in {BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value}:
+        return True
+    if backtest.status != BacktestStatus.COMPLETED.value or backtest.completed_at is None:
+        return False
+    completed_at = backtest.completed_at
+    if completed_at.tzinfo is None:
+        completed_at = completed_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - completed_at <= BACKTEST_RUNNER_GRACE
+
+
 async def get_current_runner_principal(
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session),
@@ -389,7 +407,7 @@ async def get_current_runner_principal(
     if backtest is None:
         raise _credentials_exception("Runner backtest not found")
 
-    if backtest.status not in {BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value}:
+    if not backtest_runner_window_open(backtest):
         raise _credentials_exception("Runner backtest is no longer active")
 
     strategy = session.get(Strategy, backtest.strategy_id)

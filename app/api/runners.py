@@ -12,8 +12,13 @@ from sqlmodel import Session
 
 from app.core.config import settings
 from app.db.database import get_session
-from app.models.strategy import BacktestResult, BacktestStatus, Strategy, StrategyLive
-from app.utils.auth_utils import AuthPrincipal, create_user_delegated_token, get_current_runner_principal
+from app.models.strategy import BacktestResult, Strategy, StrategyLive
+from app.utils.auth_utils import (
+    AuthPrincipal,
+    backtest_runner_window_open,
+    create_user_delegated_token,
+    get_current_runner_principal,
+)
 
 router = APIRouter(prefix="/runners", tags=["Runners"])
 
@@ -149,7 +154,7 @@ def issue_runner_agent_token_endpoint(
         backtest = session.get(BacktestResult, backtest_id)
         if backtest is None:
             raise HTTPException(status_code=404, detail="Backtest not found")
-        if backtest.status not in {BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value}:
+        if not backtest_runner_window_open(backtest):
             raise HTTPException(status_code=403, detail="Backtest is no longer active")
         strategy = session.get(Strategy, backtest.strategy_id)
         if strategy is None or strategy.user_id != runner_principal.user.id:

@@ -508,7 +508,7 @@ class BacktestResult(SQLModel, table=True):
 
     # The agent's final evaluation of the run (migr. 063): axis scores for the
     # radar, overall score_pct, diagnosis and hints.
-    agent_evaluation: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    agent_evaluation: Optional[Any] = Field(default=None, sa_column=Column(JSONB(none_as_null=True), nullable=True))
     
     # Key metrics extracted for easy querying (from edgewalker BacktestResult.stats)
     return_pct: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
