@@ -28,7 +28,15 @@ def tenant(session):
     from app.models.connection import Account, Connection
     from app.models.user import User
 
+    from sqlmodel import select
+
     now = datetime.now(timezone.utc)
+    # The embedded Postgres outlives the session: drop a leftover of a run
+    # that died before its teardown.
+    stale = session.exec(select(User).where(User.email == "pb@example.com")).first()
+    if stale is not None:
+        session.delete(stale)
+        session.commit()
     user = User(email="pb@example.com", username="user_pb", hashed_password="x")
     session.add(user)
     session.flush()
@@ -161,3 +169,32 @@ def test_backtest_copies_its_input_and_live_attaches_to_a_run(session, tenant):
         delete_backtest(session, bt1.id, user.id)
     assert exc.value.status_code == 409
     delete_backtest(session, bt3.id, user.id)
+
+
+def test_agent_evaluation_derives_the_overall_score(session, tenant):
+    from pydantic import ValidationError
+
+    from app.schemas.strategy import AgentEvaluationWrite
+    from app.services.strategy_service import get_backtest, set_backtest_agent_evaluation
+
+    user, _, acc = tenant
+    strategy = _strategy(session, user, acc)
+    bt = _backtest(session, strategy, user, lessons_from="none")
+    scores = {"edge": 80, "risk": 60, "consistency": 50, "discipline": 90, "execution": 70, "robustness": 40}
+    payload = AgentEvaluationWrite(
+        scores={k: {"score": v, "rationale": f"{k} ok"} for k, v in scores.items()},
+        summary="Edge reale ma concentrato.",
+        hints=[{"title": "Riduci la size dopo 3 loss", "detail": "serie max 6", "category": "risk", "priority": "high"}],
+        playbook_recommended=True,
+    )
+    out = set_backtest_agent_evaluation(session, bt.id, payload, user.id)
+    # 80*.25 + 60*.20 + 50*.15 + 90*.15 + 70*.15 + 40*.10
+    assert out["score_pct"] == 67.5
+    stored = get_backtest(session, bt.id, user.id).agent_evaluation
+    assert stored["scores"]["edge"] == {"score": 80.0, "rationale": "edge ok"}
+    assert stored["hints"][0]["priority"] == "high" and stored["playbook_recommended"] is True
+
+    with pytest.raises(ValidationError):
+        AgentEvaluationWrite(scores={"edge": {"score": 80}})
+    with pytest.raises(ValidationError):
+        AgentEvaluationWrite(scores={k: {"score": 120} for k in scores})

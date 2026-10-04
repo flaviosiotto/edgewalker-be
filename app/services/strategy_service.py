@@ -1253,6 +1253,43 @@ def update_backtest_chart_drawings(
     return drawings
 
 
+def set_backtest_agent_evaluation(
+    session: Session,
+    backtest_id: int,
+    payload: "AgentEvaluationWrite",
+    user_id: int | None = None,
+) -> dict[str, Any]:
+    """Store the agent's final evaluation of a run (Agent Score + Agent Hint).
+
+    The overall ``score_pct`` is derived here from the axis weights, never
+    taken from the model: the same axis scores always give the same total.
+    """
+    from app.schemas.strategy import EVALUATION_AXES
+
+    backtest = get_backtest(session, backtest_id, user_id)
+    scores = {
+        axis: {
+            "score": round(float(payload.scores[axis].score), 1),
+            "rationale": (payload.scores[axis].rationale or "").strip() or None,
+        }
+        for axis in EVALUATION_AXES
+    }
+    score_pct = round(sum(scores[axis]["score"] * weight for axis, weight in EVALUATION_AXES.items()), 1)
+    evaluation = {
+        "scores": scores,
+        "score_pct": score_pct,
+        "summary": payload.summary.strip(),
+        "hints": [hint.model_dump() for hint in payload.hints],
+        "playbook_recommended": payload.playbook_recommended,
+        "agent_id": backtest.agent_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    backtest.agent_evaluation = evaluation
+    session.add(backtest)
+    session.commit()
+    return evaluation
+
+
 def update_backtest_layout(
     session: Session,
     backtest_id: int,

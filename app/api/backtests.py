@@ -8,6 +8,7 @@ from app.db.database import get_session
 from app.models.user import User
 from app.models.strategy import BacktestStatus
 from app.schemas.strategy import (
+    AgentEvaluationWrite,
     BacktestCreateRequest,
     BacktestListPage,
     BacktestPlaybackControl,
@@ -30,6 +31,7 @@ from app.services.strategy_service import (
     list_all_backtests,
     list_trades,
     run_backtest,
+    set_backtest_agent_evaluation,
     update_backtest_chart_drawings,
     update_backtest_layout,
 )
@@ -500,6 +502,19 @@ def get_backtest_agent_calls_endpoint(
         .order_by(AgentCall.id)
     ).all()
     return {"agent_calls": [call.model_dump(mode="json") for call in calls]}
+
+
+@router.put("/{backtest_id}/agent-evaluation")
+def set_backtest_agent_evaluation_endpoint(
+    backtest_id: int,
+    payload: AgentEvaluationWrite,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Final evaluation of the run by its agent: six axis scores (radar), a
+    diagnosis and the hints. Returns the stored evaluation with the derived
+    overall ``score_pct``."""
+    return set_backtest_agent_evaluation(session, backtest_id, payload, current_user.id)
 
 
 @router.patch("/{backtest_id}/layout", response_model=BacktestRead)

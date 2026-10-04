@@ -311,10 +311,58 @@ class BacktestRead(BaseModel):
     metrics: Optional[dict[str, Any]] = None
     html_report_url: Optional[str] = None
 
+    # The agent's final evaluation (Agent Score + Agent Hint), when submitted
+    agent_evaluation: Optional[dict[str, Any]] = None
+
     # UI layout persistence
     layout_config: Optional[dict[str, Any]] = None
     
     created_at: datetime
+
+
+# ─── AGENT EVALUATION (Agent Score + Agent Hint) ───
+
+# Radar axes of the Agent Score and their weight in the overall score_pct.
+EVALUATION_AXES: dict[str, float] = {
+    "edge": 0.25,          # expectancy, profit factor, payoff vs win rate
+    "risk": 0.20,          # drawdown, loss size vs plan, risk per trade
+    "consistency": 0.15,   # stability over time, losing streaks
+    "discipline": 0.15,    # adherence to the provided context / plan
+    "execution": 0.15,     # quality of entries, exits, protections
+    "robustness": 0.10,    # sample size, dependence on few trades/periods
+}
+
+
+class AgentAxisScore(BaseModel):
+    score: float = Field(ge=0, le=100)
+    rationale: Optional[str] = Field(default=None, max_length=600)
+
+
+class AgentHint(BaseModel):
+    title: str = Field(min_length=3, max_length=160)
+    detail: str = Field(default="", max_length=1500)
+    category: Literal["strategy", "risk", "execution", "playbook", "data"] = "strategy"
+    priority: Literal["high", "medium", "low"] = "medium"
+
+
+class AgentEvaluationWrite(BaseModel):
+    """Final evaluation submitted by the agent at the end of a backtest."""
+    scores: dict[str, AgentAxisScore]
+    summary: str = Field(default="", max_length=3000)
+    hints: list[AgentHint] = Field(default_factory=list, max_length=8)
+    playbook_recommended: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def _all_axes(self) -> "AgentEvaluationWrite":
+        missing = [axis for axis in EVALUATION_AXES if axis not in self.scores]
+        unknown = [axis for axis in self.scores if axis not in EVALUATION_AXES]
+        if missing or unknown:
+            raise ValueError(
+                f"scores must have exactly the axes {list(EVALUATION_AXES)}"
+                + (f"; missing {missing}" if missing else "")
+                + (f"; unknown {unknown}" if unknown else "")
+            )
+        return self
 
 
 class BacktestUpdate(BaseModel):
