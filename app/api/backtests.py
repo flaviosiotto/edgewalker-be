@@ -101,6 +101,8 @@ def list_all_backtests_endpoint(
         item = BacktestSummary.model_validate(backtest, from_attributes=True)
         item.strategy_name = strategy_name
         item.connection_id = connection_id
+        evaluation = backtest.agent_evaluation if isinstance(backtest.agent_evaluation, dict) else {}
+        item.agent_score_pct = evaluation.get("score_pct")
         items.append(item)
     # Release the pooled DB connection before the per-row HTTP probes.
     session.close()

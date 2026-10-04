@@ -455,6 +455,8 @@ class BacktestSummary(BaseModel):
     equity_final: Optional[float] = None
     equity_peak: Optional[float] = None
     created_at: datetime
+    # Overall Agent Score (0-100) of the agent's final evaluation, when present.
+    agent_score_pct: Optional[float] = None
 
     # Live-run enrichment (pending/running rows only, when requested):
     # phase/progress come from the coordinator; stale means the DB says

@@ -194,6 +194,11 @@ def test_agent_evaluation_derives_the_overall_score(session, tenant):
     assert stored["scores"]["edge"] == {"score": 80.0, "rationale": "edge ok"}
     assert stored["hints"][0]["priority"] == "high" and stored["playbook_recommended"] is True
 
+    # the backtests listing carries the overall score, not the whole evaluation
+    from app.schemas.strategy import BacktestSummary
+
+    assert "agent_score_pct" in BacktestSummary.model_fields
+
     with pytest.raises(ValidationError):
         AgentEvaluationWrite(scores={"edge": {"score": 80}})
     with pytest.raises(ValidationError):
