@@ -47,7 +47,7 @@ from app.services.n8n_auth import (
 )
 from app.utils.auth_utils import create_user_delegated_token
 from app.utils.timeframes import normalize_simulation_timeframe
-from edgewalker.strategies.rules import validate_definition
+from edgewalker_platform.rules_dsl import validate_definition
 
 if TYPE_CHECKING:
     from sqlmodel import Session
