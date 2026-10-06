@@ -229,6 +229,9 @@ class BacktestCreate(BaseModel):
     # Data source parameters (for fetch)
     source: Optional[Literal["ibkr", "yahoo", "binance", "ctrader"]] = None
     timeframe: str = "5m"  # e.g., "1m", "5m", "15m", "1h", "1d"
+    # Replay clock finer than the strategy timeframe (fills, TP/SL, alerts and
+    # forming bars follow it); None/equal = the primary chart bars are the clock.
+    simulation_timeframe: Optional[str] = None
     asset: Literal["stock", "future", "futures", "forex", "crypto"] = "stock"
     rth: bool = True  # True = Regular Trading Hours only
     
@@ -272,6 +275,7 @@ class BacktestRead(BaseModel):
     # Data source parameters
     source: Optional[str] = None
     timeframe: Optional[str] = None
+    simulation_timeframe: Optional[str] = None
     asset: Optional[str] = None
     rth: Optional[bool] = None
     
@@ -452,6 +456,7 @@ class BacktestSummary(BaseModel):
     end_date: date
     source: Optional[str] = None
     timeframe: Optional[str] = None
+    simulation_timeframe: Optional[str] = None
     asset: Optional[str] = None
     initial_capital: Optional[float] = None
     commission: Optional[float] = None

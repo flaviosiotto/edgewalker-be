@@ -46,6 +46,8 @@ from app.services.n8n_auth import (
     issue_n8n_webhook_auth_token,
 )
 from app.utils.auth_utils import create_user_delegated_token
+from app.utils.timeframes import normalize_simulation_timeframe
+from edgewalker.strategies.rules import validate_definition
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -142,6 +144,19 @@ def _normalize_strategy_indicator_field_references(value: Any) -> Any:
             for key, item in mapping.items()
         }
     return value
+
+
+def _reject_invalid_rules(definition: Any) -> None:
+    """A rule reading a chart or an indicator that does not exist never fires,
+    silently: refuse to store such a definition (same checks the runner logs)."""
+    if not isinstance(definition, dict):
+        return
+    problems = validate_definition(definition)
+    if problems:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Regole non valide: " + "; ".join(problems),
+        )
 
 
 def _strip_rule_chat_ids(value: Any) -> Any:
@@ -335,6 +350,7 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
     # strategies owned and indicators inside this one.
     assert_within(session, user_id, LimitKey.STRATEGIES_MAX)
     assert_indicator_count(session, user_id, payload.definition)
+    _reject_invalid_rules(payload.definition)
 
     account = _get_owned_account(session, payload.account_id, user_id)
     require_configured_account(account)
@@ -418,6 +434,7 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
 
     if payload.definition is not None:
         assert_indicator_count(session, strategy.user_id, payload.definition)
+        _reject_invalid_rules(payload.definition)
         strategy.definition = _strip_rule_chat_ids(
             _normalize_strategy_indicator_field_references(payload.definition)
         )
@@ -697,6 +714,7 @@ def create_backtest(
         # Data source parameters
         source=source,
         timeframe=payload.timeframe,
+        simulation_timeframe=normalize_simulation_timeframe(payload.simulation_timeframe, payload.timeframe),
         asset=payload.asset,
         rth=payload.rth,
         # IBKR-specific parameters
@@ -1012,6 +1030,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             strategy_config=strategy_config,
             symbol=backtest.symbol,
             timeframe=backtest.timeframe or "5m",
+            simulation_timeframe=backtest.simulation_timeframe,
             broker_type=broker_type,
             position_accounting_mode=position_accounting_mode,
             contract_multiplier=contract_multiplier,

@@ -114,6 +114,7 @@ class BacktestRunnerService:
         symbol: str,
         timeframe: str,
         *,
+        simulation_timeframe: str | None = None,
         broker_type: str = "",
         position_accounting_mode: str = "netting",
         contract_multiplier: float | None = None,
@@ -172,7 +173,12 @@ class BacktestRunnerService:
             "STREAMS": f"bars:{stream_id}",
             "CONSUMER_GROUP": f"cg:backtest-runner:{backtest_id}",
             "CONSUMER_ID": f"backtest-runner-{backtest_id}",
-            "EVAL_IN_PROGRESS": "false",
+            # Rules see forming bars at the clock's cadence, like live (F2:
+            # crossings stay bar-over-bar, bars_held/cooldowns count closed bars).
+            "EVAL_IN_PROGRESS": "true",
+            # Simulation driver (migr. 064): the coordinator replays the clock on
+            # this stream and the runner follows it for fills/TP/SL/alerts.
+            "BACKTEST_DRIVER_STREAM_ID": f"{stream_id}-driver" if simulation_timeframe else "",
             "DEBUG_RULES": os.getenv("BACKTEST_DEBUG_RULES", os.getenv("DEBUG_RULES", "true")),
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
             "PYTHONPATH": "/app",

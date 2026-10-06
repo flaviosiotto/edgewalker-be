@@ -465,6 +465,8 @@ class BacktestResult(SQLModel, table=True):
     # Data source parameters (for fetch)
     source: Optional[str] = Field(default="ibkr", sa_column=Column(String(20), nullable=True))
     timeframe: Optional[str] = Field(default="5m", sa_column=Column(String(10), nullable=True))
+    # Replay clock finer than the primary chart (migr. 064); NULL = primary chart bars
+    simulation_timeframe: Optional[str] = Field(default=None, sa_column=Column(String(10), nullable=True))
     asset: Optional[str] = Field(default="stock", sa_column=Column(String(20), nullable=True))
     rth: Optional[bool] = Field(default=True, sa_column=Column(String(10), nullable=True))  # stored as string for simplicity
     
