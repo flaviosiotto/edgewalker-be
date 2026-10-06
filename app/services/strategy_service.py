@@ -763,6 +763,39 @@ def list_backtests(session: Session, strategy_id: int, user_id: int | None = Non
     )
 
 
+# Scalar columns of the global backtests listing. The full row is never
+# loaded here on purpose: ``metrics`` embeds the run ledger (one equity
+# snapshot per replayed bar, tens of MB per run as JSON text), and ``config``
+# / ``parameters`` are the strategy snapshot — none of it is shown in a list.
+_BACKTEST_SUMMARY_COLUMNS = (
+    BacktestResult.id,
+    BacktestResult.strategy_id,
+    BacktestResult.agent_id,
+    BacktestResult.symbol,
+    BacktestResult.start_date,
+    BacktestResult.end_date,
+    BacktestResult.source,
+    BacktestResult.timeframe,
+    BacktestResult.simulation_timeframe,
+    BacktestResult.asset,
+    BacktestResult.initial_capital,
+    BacktestResult.commission,
+    BacktestResult.status,
+    BacktestResult.started_at,
+    BacktestResult.completed_at,
+    BacktestResult.error_message,
+    BacktestResult.return_pct,
+    BacktestResult.sharpe_ratio,
+    BacktestResult.max_drawdown_pct,
+    BacktestResult.win_rate_pct,
+    BacktestResult.profit_factor,
+    BacktestResult.total_trades,
+    BacktestResult.equity_final,
+    BacktestResult.equity_peak,
+    BacktestResult.created_at,
+)
+
+
 def list_all_backtests(
     session: Session,
     user_id: int,
@@ -772,31 +805,57 @@ def list_all_backtests(
     symbol: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> tuple[list[tuple[BacktestResult, str, int | None]], int]:
-    """List backtests across every strategy owned by the user.
+) -> tuple[list[dict[str, Any]], int]:
+    """List backtests across every strategy owned by the user, newest first.
 
-    Returns ``([(backtest, strategy_name, connection_id), ...], total)`` where
-    ``total`` is the filtered count before pagination.
+    Returns ``(rows, total)`` where each row is a plain mapping with the
+    ``BacktestSummary`` scalar fields plus ``strategy_name``,
+    ``connection_id``, ``chat_id`` and ``agent_score_pct`` (the overall score
+    of the agent's final evaluation, pulled out of the JSONB in SQL). ``total``
+    is the filtered count before pagination.
+
+    Only scalar columns are projected: the JSONB blobs (``metrics`` with the
+    embedded ledger, ``config``, ``parameters``, ``agent_evaluation``) stay in
+    the database — a page of 50 rows used to drag >100 MB of JSON through the
+    driver to produce a 6 kB response.
     """
     from sqlalchemy import func
 
-    query = (
-        select(BacktestResult, Strategy.name, Strategy.connection_id)
-        .join(Strategy, Strategy.id == BacktestResult.strategy_id)
-        .where(Strategy.user_id == user_id)
-    )
-    if statuses:
-        query = query.where(BacktestResult.status.in_(statuses))
-    if strategy_id is not None:
-        query = query.where(BacktestResult.strategy_id == strategy_id)
-    if symbol:
-        query = query.where(BacktestResult.symbol.ilike(f"%{symbol.strip()}%"))
+    def _filtered(stmt):
+        stmt = stmt.join(Strategy, Strategy.id == BacktestResult.strategy_id).where(
+            Strategy.user_id == user_id
+        )
+        if statuses:
+            stmt = stmt.where(BacktestResult.status.in_(statuses))
+        if strategy_id is not None:
+            stmt = stmt.where(BacktestResult.strategy_id == strategy_id)
+        if symbol:
+            stmt = stmt.where(BacktestResult.symbol.ilike(f"%{symbol.strip()}%"))
+        return stmt
 
-    total = session.exec(select(func.count()).select_from(query.subquery())).one()
-    rows = session.exec(
-        query.order_by(BacktestResult.id.desc()).limit(limit).offset(offset)
-    ).all()
-    return list(rows), int(total)
+    total = session.exec(
+        select(func.count()).select_from(_filtered(select(BacktestResult.id)).subquery())
+    ).one()
+
+    # chat.backtest_id is unique (ux_chat_backtest_id), so the outer join
+    # cannot multiply rows.
+    query = (
+        _filtered(
+            select(
+                *_BACKTEST_SUMMARY_COLUMNS,
+                Strategy.name.label("strategy_name"),
+                Strategy.connection_id.label("connection_id"),
+                Chat.id.label("chat_id"),
+                BacktestResult.agent_evaluation["score_pct"].as_float().label("agent_score_pct"),
+            )
+        )
+        .outerjoin(Chat, Chat.backtest_id == BacktestResult.id)
+        .order_by(BacktestResult.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = session.execute(query).mappings().all()
+    return [dict(row) for row in rows], int(total)
 
 
 def get_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> BacktestResult:

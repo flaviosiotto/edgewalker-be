@@ -97,14 +97,10 @@ def list_all_backtests_endpoint(
         limit=limit,
         offset=offset,
     )
-    items = []
-    for backtest, strategy_name, connection_id in rows:
-        item = BacktestSummary.model_validate(backtest, from_attributes=True)
-        item.strategy_name = strategy_name
-        item.connection_id = connection_id
-        evaluation = backtest.agent_evaluation if isinstance(backtest.agent_evaluation, dict) else {}
-        item.agent_score_pct = evaluation.get("score_pct")
-        items.append(item)
+    # Rows are plain mappings of scalar columns (no JSONB blobs, no ORM
+    # entities): strategy_name / connection_id / chat_id / agent_score_pct are
+    # already projected by the query.
+    items = [BacktestSummary.model_validate(row) for row in rows]
     # Release the pooled DB connection before the per-row HTTP probes.
     session.close()
 
