@@ -300,6 +300,8 @@ class BacktestRead(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
+    # Last lines of the runner's log for failed runs (diagnostics; not for the agent).
+    runner_log_tail: Optional[str] = None
     
     # Typed metrics from edgewalker (populated on completion)
     return_pct: Optional[float] = None

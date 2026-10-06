@@ -81,6 +81,9 @@ def _required_runner_image() -> str:
     raise RuntimeError("Missing RUNNER_IMAGE for backend-spawned backtest runners")
 
 
+RUNNER_LOG_TAIL_LINES = int(os.getenv("BACKTEST_RUNNER_LOG_TAIL_LINES", "300"))
+
+
 class BacktestRunnerService:
     """Spawn and manage strategy-runner containers for backtests."""
 
@@ -758,6 +761,10 @@ class BacktestRunnerService:
         count = 0
         for container in containers:
             try:
+                self._capture_runner_log(container)
+            except Exception as exc:
+                logger.warning("Could not capture log of %s before removal: %s", container.name, exc)
+            try:
                 container.remove(force=True)
                 count += 1
             except Exception as exc:
@@ -765,6 +772,43 @@ class BacktestRunnerService:
         if count:
             logger.info("Removed %d finished backtest runner container(s)", count)
         return count
+
+    def _capture_runner_log(self, container: Container, tail: int = RUNNER_LOG_TAIL_LINES) -> None:
+        """Save the log tail of an exited runner whose backtest failed (or that
+        exited abnormally) on the backtest row, so a failure can still be
+        diagnosed after the container is gone."""
+        raw_id = (container.labels or {}).get("edgewalker.backtest_id")
+        try:
+            backtest_id = int(raw_id or 0)
+        except (TypeError, ValueError):
+            return
+        if backtest_id <= 0:
+            return
+        try:
+            container.reload()
+            exit_code = int((container.attrs.get("State") or {}).get("ExitCode") or 0)
+        except Exception:
+            exit_code = 0
+
+        from app.db.database import get_session_context
+        from app.models.strategy import BacktestResult
+
+        with get_session_context() as session:
+            backtest = session.get(BacktestResult, backtest_id)
+            if backtest is None:
+                return
+            if str(backtest.status) not in ("failed", "error") and exit_code == 0:
+                return
+            if backtest.runner_log_tail:
+                return
+            text = container.logs(tail=tail, timestamps=True).decode("utf-8", errors="replace")
+            header = f"[{container.name} exit_code={exit_code} last {tail} lines]\n"
+            backtest.runner_log_tail = header + text
+            session.add(backtest)
+            logger.warning(
+                "Backtest %s runner %s exited (code %s); saved the last %d log lines on the backtest",
+                backtest_id, container.name, exit_code, tail,
+            )
 
 
 backtest_runner_service = BacktestRunnerService()

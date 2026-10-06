@@ -503,6 +503,11 @@ class BacktestResult(SQLModel, table=True):
         default=None,
         sa_column=Column(Text, nullable=True),
     )
+    # Tail of the runner container's log, captured by the backend reaper
+    # before it removes an exited runner of a failed run (migr. 065): the
+    # container is gone minutes after the failure and with it the only
+    # evidence of what the runner was doing.
+    runner_log_tail: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
 
     # ── OUTPUT (populated on completion by n8n workflow) ──
     # Raw stats dict from edgewalker/backtesting.py
