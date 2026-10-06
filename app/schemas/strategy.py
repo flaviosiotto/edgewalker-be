@@ -1,7 +1,7 @@
 from datetime import datetime, date
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.chat import ChatRead
 from app.schemas.live_strategy import LiveStrategySummaryRead
@@ -307,9 +307,15 @@ class BacktestRead(BaseModel):
     equity_final: Optional[float] = None
     equity_peak: Optional[float] = None
     
-    # Extra metrics (JSONB for additional data)
+    # Scalar indicators of the stored metrics. The ledger embedded in the
+    # column (orders, fills, one equity snapshot per bar) is never returned
+    # here: it is served by /runtime/orders, /runtime/equity and /trades.
     metrics: Optional[dict[str, Any]] = None
     html_report_url: Optional[str] = None
+
+    # Fixed-size statistics of a finished run (trade distribution, drawdown
+    # episodes, exposure, time segments, concentration); detail endpoint only.
+    analysis: Optional[dict[str, Any]] = None
 
     # The agent's final evaluation (Agent Score + Agent Hint), when submitted
     agent_evaluation: Optional[dict[str, Any]] = None
@@ -318,6 +324,13 @@ class BacktestRead(BaseModel):
     layout_config: Optional[dict[str, Any]] = None
     
     created_at: datetime
+
+    @field_validator("metrics", mode="before")
+    @classmethod
+    def _scalar_metrics_only(cls, value: Any) -> Any:
+        from app.services.backtest_analysis import scalar_metrics
+
+        return scalar_metrics(value)
 
 
 # ─── AGENT EVALUATION (Agent Score + Agent Hint) ───

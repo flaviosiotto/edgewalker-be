@@ -22,6 +22,7 @@ from app.schemas.strategy import (
     ChartDrawingsUpdate,
 )
 from app.schemas.chat import ChatRead
+from app.services.backtest_analysis import analyze_backtest
 from app.services.strategy_service import (
     create_backtest,
     delete_backtest,
@@ -138,11 +139,18 @@ def get_backtest_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
-    """Get backtest details including status and results if completed."""
+    """Get backtest details including status and results if completed.
+
+    The response does not grow with the length of the run: ``metrics`` holds
+    the scalar indicators and ``analysis`` the statistics derived from the
+    ledger and the trades.
+    """
     backtest = get_backtest(session, backtest_id, current_user.id)
     read = BacktestRead.model_validate(backtest, from_attributes=True)
     strategy = get_strategy(session, backtest.strategy_id, current_user.id)
     read.connection_id = strategy.connection_id
+    if backtest.status not in _ACTIVE_STATUSES:
+        read.analysis = analyze_backtest(backtest.metrics, list_trades(session, backtest_id, current_user.id))
     return read
 
 
