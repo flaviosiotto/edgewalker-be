@@ -182,6 +182,7 @@ class BacktestRunnerService:
             # Simulation driver (migr. 064): the coordinator replays the clock on
             # this stream and the runner follows it for fills/TP/SL/alerts.
             "BACKTEST_DRIVER_STREAM_ID": f"{stream_id}-driver" if simulation_timeframe else "",
+            "BACKTEST_SIMULATION_TIMEFRAME": simulation_timeframe or "",
             "DEBUG_RULES": os.getenv("BACKTEST_DEBUG_RULES", os.getenv("DEBUG_RULES", "true")),
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
             "PYTHONPATH": "/app",
