@@ -1,4 +1,5 @@
 from __future__ import annotations
+from edgewalker_platform.brokers import default_position_accounting_mode, source_names
 
 import copy
 import logging
@@ -79,9 +80,7 @@ def _resolve_backtest_position_accounting_mode(connection: Connection | None) ->
         if mode:
             return mode
     broker_type = str(connection.broker_type if connection else "").strip().lower()
-    if broker_type in {"ctrader", "spotware"}:
-        return "ticket_based"
-    return "netting"
+    return default_position_accounting_mode(broker_type)
 
 
 def _with_backtest_accounting_snapshot(
@@ -660,7 +659,7 @@ def create_backtest(
     """
     strategy = get_strategy(session, strategy_id, user_id)
     require_configured_account(session.get(Account, strategy.account_id))
-    allowed_sources = {"ibkr", "yahoo", "binance", "ctrader"}
+    allowed_sources = set(source_names())
     source = str(payload.source or "").strip().lower()
     connection_source = ""
     if strategy.connection_id is not None:

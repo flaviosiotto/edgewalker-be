@@ -1,3 +1,4 @@
+from edgewalker_platform.brokers import source_names as _source_names
 from datetime import datetime, date
 from typing import Any, Literal, Optional, Union
 
@@ -12,6 +13,10 @@ LiveStatus = Literal["stopped", "starting", "running", "paused", "stopping", "er
 
 
 # ─── STRATEGY LIVE (RUNTIME) SCHEMA ───
+
+
+# Historical/backtest sources: brokers + data providers of the shared registry.
+BacktestSource = Literal[_source_names()]  # type: ignore[valid-type]
 
 
 class StrategyLiveRead(BaseModel):
@@ -227,7 +232,7 @@ class BacktestCreate(BaseModel):
     agent_reasoning: Optional[Literal["quick", "balanced", "deep"]] = None
 
     # Data source parameters (for fetch)
-    source: Optional[Literal["ibkr", "yahoo", "binance", "ctrader"]] = None
+    source: Optional[BacktestSource] = None
     timeframe: str = "5m"  # e.g., "1m", "5m", "15m", "1h", "1d"
     # Replay clock finer than the strategy timeframe (fills, TP/SL, alerts and
     # forming bars follow it); None/equal = the primary chart bars are the clock.

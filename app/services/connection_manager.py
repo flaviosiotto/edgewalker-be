@@ -15,6 +15,7 @@ New brokers are registered in ``GATEWAY_REGISTRY`` — no code changes
 required in ConnectionManager itself.
 """
 from __future__ import annotations
+from edgewalker_platform.brokers import config_error as broker_config_error, gateway_broker_types
 
 import asyncio
 import httpx
@@ -441,8 +442,9 @@ def _spawn_container_user() -> str | None:
 # ── Gateway Registry ─────────────────────────────────────────────────
 # Each broker type maps to its Docker image, container prefix, label,
 # and a function that builds the environment dict from Connection.config.
-# To add a new broker, add an entry here — no other code changes needed
-# in ConnectionManager.
+# To add a new broker: describe it in edgewalker_platform.brokers (the shared
+# registry: traits, config schema, validation) and add its env mapper + spec
+# here. ``_check_registry_alignment`` fails fast when the two disagree.
 
 def _ibkr_env(config: dict[str, Any]) -> dict[str, str]:
     """Build env vars for a gateway IBKR container.
@@ -580,6 +582,20 @@ GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
         app_dir="gateway/app",
     ),
 }
+
+
+def _check_registry_alignment() -> None:
+    """Every available gateway broker in the shared registry needs a spec here, and vice versa."""
+    expected = set(gateway_broker_types())
+    actual = set(GATEWAY_REGISTRY)
+    if expected != actual:
+        raise RuntimeError(
+            "GATEWAY_REGISTRY out of sync with edgewalker_platform.brokers: "
+            f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+        )
+
+
+_check_registry_alignment()
 
 
 def get_gateway_spec(broker_type: str) -> GatewaySpec | None:
@@ -1770,14 +1786,17 @@ class ConnectionManager:
             broker_type = conn.broker_type
             config = dict(conn.config or {})
 
-            if broker_type == "ctrader":
-                ctrader_config_error = _ctrader_config_error(config)
-                if ctrader_config_error:
-                    conn.status = ConnectionStatus.ERROR.value
-                    conn.status_message = ctrader_config_error
-                    conn.updated_at = datetime.now(timezone.utc)
-                    session.commit()
-                    return ConnectorResult(success=False, message=ctrader_config_error)
+            # Registry-driven validation (required fields, enums, planned brokers)
+            # plus the cTrader-specific OAuth check that needs server env.
+            config_error = broker_config_error(broker_type, config)
+            if config_error is None and broker_type == "ctrader":
+                config_error = _ctrader_config_error(config)
+            if config_error:
+                conn.status = ConnectionStatus.ERROR.value
+                conn.status_message = config_error
+                conn.updated_at = datetime.now(timezone.utc)
+                session.commit()
+                return ConnectorResult(success=False, message=config_error)
 
             if get_gateway_spec(broker_type) is None:
                 return ConnectorResult(

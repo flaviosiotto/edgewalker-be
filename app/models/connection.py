@@ -17,11 +17,17 @@ from sqlmodel import Field, Relationship, SQLModel
 
 
 class BrokerType(str, Enum):
-    """Supported broker/exchange types."""
+    """Broker/exchange types (documentation only: the column is a free string).
+
+    The authoritative list, with traits and config schema, is
+    ``edgewalker_platform.brokers``; ``connection_service.create_connection``
+    validates against it.
+    """
     IBKR = "ibkr"
     YAHOO = "yahoo"
     BINANCE = "binance"
     CTRADER = "ctrader"
+    OKX = "okx"
 
 
 class ConnectionStatus(str, Enum):

@@ -2,6 +2,7 @@
 Connection & Account service layer.
 """
 from __future__ import annotations
+from edgewalker_platform.brokers import get_broker
 
 import logging
 from datetime import datetime, timezone
@@ -82,6 +83,16 @@ def create_connection(
     ).first()
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connection name already exists")
+
+    descriptor = get_broker(broker_type)
+    if descriptor is None or not descriptor.has_gateway:
+        planned = get_broker(broker_type, include_planned=True)
+        detail = (
+            f"{planned.label} support is not available yet"
+            if planned is not None
+            else f"Unsupported broker type: {broker_type!r}"
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
     safe_config = sanitize_connection_config(broker_type, config)
 

@@ -18,6 +18,7 @@ Usage::
     results = await client.search_symbols("NQ", asset_type="futures")
 """
 from __future__ import annotations
+from edgewalker_platform.brokers import gateway_prefixes
 
 import logging
 from typing import Any
@@ -32,15 +33,9 @@ GATEWAY_PORT = 8080
 DEFAULT_TIMEOUT = 30.0
 FETCH_TIMEOUT = 300.0  # Historical fetches can be slow
 
-# Prefix map: broker_type → container name prefix.
-# Must stay in sync with GATEWAY_PREFIXES in shared/constants.py
-# (runtime services) and GATEWAY_REGISTRY in connection_manager.py.
-# All broker types now use the unified gateway image.
-GATEWAY_PREFIXES: dict[str, str] = {
-    "ibkr": "gw-",
-    "binance": "gw-",
-    "ctrader": "gw-",
-}
+# Prefix map: broker_type → container name prefix, from the broker registry
+# (edgewalker_platform.brokers) shared with the runtime services.
+GATEWAY_PREFIXES: dict[str, str] = gateway_prefixes()
 
 
 def gateway_url_for(connection_id: int | str, broker_type: str) -> str:

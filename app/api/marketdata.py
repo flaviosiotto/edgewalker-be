@@ -1,5 +1,6 @@
 """Market Data API - symbols and indicator catalog."""
 from __future__ import annotations
+from edgewalker_platform.brokers import has_gateway
 
 import logging
 from typing import Optional
@@ -66,7 +67,7 @@ def search_symbols_endpoint(
             with get_session_context() as session:
                 conn = session.get(Connection, connection_id)
 
-            if conn and conn.broker_type in ("ibkr", "binance", "ctrader"):
+            if conn and has_gateway(conn.broker_type):
                 from app.services.symbol_sync_handler import search_gateway_symbols_by_id
 
                 results = search_gateway_symbols_by_id(

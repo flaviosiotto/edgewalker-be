@@ -29,6 +29,7 @@ from app.api.runners import router as runners_router
 from app.api.accounts import router as accounts_router
 from app.api.agent_lessons import router as agent_lessons_router
 from app.api.connections import router as connections_router
+from app.api.brokers import router as brokers_router
 from app.api.tws_launch import router as tws_launch_router
 from app.api.pats import router as pats_router
 from app.api.lab import router as lab_router
@@ -198,6 +199,7 @@ app.include_router(runners_router)
 app.include_router(accounts_router)
 app.include_router(agent_lessons_router)
 app.include_router(connections_router, dependencies=[Depends(get_current_active_user)])
+app.include_router(brokers_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(pats_router)
 # Studio Lab launch: interactive-session-only mint of the JupyterHub URL.
 app.include_router(lab_router)
