@@ -494,6 +494,27 @@ def _ctrader_env(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _okx_env(config: dict[str, Any]) -> dict[str, str]:
+    """Build env vars for a gateway OKX container (see gateway/app/broker/okx/settings.py)."""
+    market_type = str(config.get("market_type", "swap") or "swap").strip().lower()
+    if market_type not in {"spot", "swap"}:
+        raise ValueError("OKX market_type must be 'spot' or 'swap'")
+    region = str(config.get("region", "global") or "global").strip().lower()
+    if region not in {"global", "eea", "us"}:
+        raise ValueError("OKX region must be 'global', 'eea' or 'us'")
+    data_only = bool(config.get("data_only"))
+    return {
+        "OKX_API_KEY": "" if data_only else str(config.get("api_key", "")),
+        "OKX_API_SECRET": "" if data_only else str(config.get("api_secret", "")),
+        "OKX_PASSPHRASE": "" if data_only else str(config.get("passphrase", "")),
+        "OKX_REGION": region,
+        "OKX_DEMO": str(bool(config.get("demo", True))).lower(),
+        "OKX_MARKET_TYPE": market_type,
+        "OKX_TD_MODE": str(config.get("td_mode", "cross") or "cross").strip().lower(),
+        "OKX_ACCOUNT_CCY": str(config.get("account_ccy", "USDT") or "USDT").strip().upper(),
+    }
+
+
 def _ctrader_config_error(config: dict[str, Any]) -> str | None:
     """Return a user-facing cTrader configuration error before spawning a gateway."""
     environment = str(config.get("environment", "demo") or "demo").strip().lower()
@@ -557,6 +578,7 @@ _DEFAULT_GATEWAY_IMAGE = os.getenv("GATEWAY_IMAGE", "edgewalker-devops-gateway:l
 _IBKR_GATEWAY_IMAGE = os.getenv("IBKR_GATEWAY_IMAGE", _DEFAULT_GATEWAY_IMAGE)
 _BINANCE_GATEWAY_IMAGE = os.getenv("BINANCE_GATEWAY_IMAGE", _DEFAULT_GATEWAY_IMAGE)
 _CTRADER_GATEWAY_IMAGE = os.getenv("CTRADER_GATEWAY_IMAGE", _DEFAULT_GATEWAY_IMAGE)
+_OKX_GATEWAY_IMAGE = os.getenv("OKX_GATEWAY_IMAGE", _DEFAULT_GATEWAY_IMAGE)
 
 GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
     "ibkr": GatewaySpec(
@@ -579,6 +601,13 @@ GATEWAY_REGISTRY: dict[str, GatewaySpec] = {
         prefix="gw-",
         label="gateway",
         env_mapper=_ctrader_env,
+        app_dir="gateway/app",
+    ),
+    "okx": GatewaySpec(
+        image=_OKX_GATEWAY_IMAGE,
+        prefix="gw-",
+        label="gateway",
+        env_mapper=_okx_env,
         app_dir="gateway/app",
     ),
 }
