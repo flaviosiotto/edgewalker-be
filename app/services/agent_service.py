@@ -13,7 +13,28 @@ DEFAULT_CHAT_NAME = "Default"
 DEFAULT_CHAT_DESCRIPTION = "Chat predefinita"
 
 
-def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[Agent, Chat]:
+def is_hosted_agent(agent: Agent) -> bool:
+    return (getattr(agent, "kind", None) or "hosted") == "hosted"
+
+
+def require_hosted_agent(agent: Agent, *, role: str = "manager") -> Agent:
+    """v1 rule of the agent bridge (decision D1): only hosted agents run
+    strategies. An external agent (the identity of an agent living in the
+    user's orchestrator) cannot be the manager of a strategy, a live or a
+    backtest, nor answer an ``ask_agent`` rule. Enforced here, never by a
+    schema constraint, so the scenario can be opened later."""
+    if not is_hosted_agent(agent):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Agent '{agent.agent_name}' is external and cannot be the {role}: "
+                "in EdgeWalker trading is done by hosted agents through strategies"
+            ),
+        )
+    return agent
+
+
+def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[Agent, Chat | None]:
     existing = session.exec(
         select(Agent)
         .where(Agent.user_id == user_id)
@@ -28,9 +49,11 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
     agent = Agent(
         user_id=user_id,
         agent_name=payload.agent_name,
+        kind=payload.kind,
         # Legacy column: always the agent-svc endpoint, payload value ignored.
         n8n_webhook=settings.AGENT_SVC_WEBHOOK_URL,
-        is_default=payload.is_default,
+        # An external agent is never preselected: it cannot run anything.
+        is_default=payload.is_default and payload.kind == "hosted",
         avatar=payload.avatar,
         accent_color=payload.accent_color,
         avatar_url=payload.avatar_url,
@@ -42,6 +65,10 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
     session.add(agent)
     session.commit()
     session.refresh(agent)
+
+    if payload.kind != "hosted":
+        # No chat for an identity that never answers a turn.
+        return agent, None
 
     chat = Chat(
         user_id=user_id,
@@ -98,7 +125,7 @@ def update_agent(session: Session, agent_id: int, payload: AgentUpdate, user_id:
     # payload.n8n_webhook is accepted for API compatibility but ignored: the
     # execution endpoint is always AGENT_SVC_WEBHOOK_URL.
     if payload.is_default is not None:
-        agent.is_default = payload.is_default
+        agent.is_default = payload.is_default and is_hosted_agent(agent)
     if payload.avatar is not None:
         agent.avatar = payload.avatar
     if payload.accent_color is not None:

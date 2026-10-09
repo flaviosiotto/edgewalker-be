@@ -1,10 +1,17 @@
 from fastapi import APIRouter, Depends, status
 from sqlmodel import Session
 
+from app.core.actor import actor_from_claims
 from app.db.database import get_session
+from app.schemas.pat import ActorRead
 from app.schemas.user import UserCreate, UserRead
 from app.services.user_service import create_user, list_users
-from app.utils.auth_utils import get_current_active_user, get_current_admin_user
+from app.utils.auth_utils import (
+    AuthPrincipal,
+    get_current_active_principal,
+    get_current_active_user,
+    get_current_admin_user,
+)
 from app.models.user import User
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -33,3 +40,16 @@ def read_users(
 @router.get("/me", response_model=UserRead)
 def read_current_user(current_user: User = Depends(get_current_active_user)):
     return current_user
+
+
+@router.get("/me/actor", response_model=ActorRead)
+def read_current_actor(principal: AuthPrincipal = Depends(get_current_active_principal)):
+    """Who the caller acts as: the user, or one of their agents through a
+    bound personal access token. Read-only; reachable with any PAT (scope
+    read), so an MCP client can show which identity its token carries."""
+    actor = actor_from_claims(principal.user.id, principal.claims)
+    scopes = principal.claims.get("scopes")
+    return ActorRead(
+        **actor.as_dict(),
+        scopes=list(scopes) if isinstance(scopes, (list, tuple)) else [],
+    )

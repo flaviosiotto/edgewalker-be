@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field, field_validator
 # by the FE and shipped to n8n as `metadata.agent`.
 RiskProfile = Literal["conservative", "balanced", "aggressive"]
 
+# migr. 066: hosted = runs in agent-svc; external = identity of an agent that
+# runs in the user's orchestrator and uses EdgeWalker through MCP / the API
+# with a PAT bound to it (never trades, never a manager — v1).
+AgentKind = Literal["hosted", "external"]
+
 # Keys of the FE's inline SVG avatar set (AgentAvatar.vue). Not validated as an
 # enum on purpose: the FE falls back to initials on an unknown key, and a new
 # avatar must not require a backend deploy.
@@ -68,6 +73,9 @@ class AgentPersonaFields(BaseModel):
 
 class AgentCreate(AgentPersonaFields):
     agent_name: str
+    # Immutable after creation: a hosted agent has chats, lessons and runs
+    # that an external one cannot have, and vice versa.
+    kind: AgentKind = "hosted"
     # Execution engine address. Optional since phase 3: the backend assigns
     # AGENT_SVC_WEBHOOK_URL; only legacy/admin callers still pass an URL.
     n8n_webhook: Optional[str] = None
@@ -77,6 +85,7 @@ class AgentCreate(AgentPersonaFields):
 class AgentRead(AgentPersonaFields):
     id_agent: int
     agent_name: str
+    kind: AgentKind = "hosted"
     n8n_webhook: str
     is_default: bool
 
@@ -114,6 +123,7 @@ def build_agent_persona_block(agent: Any) -> dict[str, Any]:
     return {
         "id": agent.id_agent,
         "name": agent.agent_name,
+        "kind": getattr(agent, "kind", None) or "hosted",
         "avatar": getattr(agent, "avatar", None) or DEFAULT_AVATAR,
         "accent_color": getattr(agent, "accent_color", None) or DEFAULT_ACCENT_COLOR,
         "avatar_url": getattr(agent, "avatar_url", None),

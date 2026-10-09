@@ -97,6 +97,9 @@ class Strategy(SQLModel, table=True):
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
+    # Who made the last change (migr. 066): the user from the UI, an agent
+    # through a bound PAT, the hosted agent from a turn. See core/actor.py.
+    updated_by: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
 
     # ── ACCOUNT BINDING (single source of truth, mandatory from birth) ──
     # The trading account this strategy belongs to. Live sessions inherit it;
@@ -287,6 +290,8 @@ class StrategyLive(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Who started the session (migr. 066), see core/actor.py.
+    started_by: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
     stopped_at: Optional[datetime] = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),

@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
+from app.core.actor import current_actor_dict
 from app.core.config import settings
 from app.models.agent import Agent, Chat
 from app.models.connection import Account, Connection
@@ -30,6 +31,7 @@ from app.schemas.strategy import (
     ChartDrawingsUpdate,
 )
 from app.schemas.chat import ChatCreate
+from app.services.agent_service import require_hosted_agent
 from app.services.chat_service import stamp_unattributed_agent_rows
 from app.services.entitlement_service import (
     assert_indicator_count,
@@ -181,14 +183,51 @@ def _strip_rule_chat_ids(value: Any) -> Any:
     return value
 
 
-def _get_owned_agent(session: Session, agent_id: int, user_id: int | None = None) -> Agent:
+def _get_owned_agent(
+    session: Session,
+    agent_id: int,
+    user_id: int | None = None,
+    *,
+    role: str = "manager",
+) -> Agent:
+    """The user's agent, which must be *hosted*: every caller binds the agent
+    to a run (manager of the strategy, a live or a backtest, answerer of an
+    ``ask_agent`` rule) and in v1 only hosted agents run strategies."""
     agent = session.get(Agent, agent_id)
     if not agent or (user_id is not None and agent.user_id != user_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Agent with id {agent_id} not found",
         )
-    return agent
+    return require_hosted_agent(agent, role=role)
+
+
+def _rule_agent_ids(definition: Any) -> set[int]:
+    """The ``agent_id`` values referenced by the rules of a definition
+    (``ask_agent`` rules, both wrapped and bare shapes)."""
+    if not isinstance(definition, dict):
+        return set()
+    strategy = definition.get("strategy") if isinstance(definition.get("strategy"), dict) else definition
+    rules = strategy.get("rules") if isinstance(strategy, dict) else None
+    found: set[int] = set()
+    for rule in rules or []:
+        if not isinstance(rule, dict):
+            continue
+        raw = rule.get("agent_id")
+        if raw in (None, "", 0):
+            continue
+        try:
+            found.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return found
+
+
+def _reject_external_rule_agents(session: Session, definition: Any, user_id: int | None) -> None:
+    """An ``ask_agent`` rule delegates a trading decision to an agent at
+    runtime: only a hosted agent can answer it (decision D1)."""
+    for agent_id in sorted(_rule_agent_ids(definition)):
+        _get_owned_agent(session, agent_id, user_id, role="agent of an ask_agent rule")
 
 
 def _get_owned_connection(session: Session, connection_id: int, user_id: int | None = None) -> Connection:
@@ -366,6 +405,7 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
 
     if payload.manager_agent_id is not None:
         _get_owned_agent(session, payload.manager_agent_id, user_id)
+    _reject_external_rule_agents(session, payload.definition, user_id)
 
     now = datetime.now(timezone.utc)
     strategy = Strategy(
@@ -380,6 +420,7 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
         connection_id=account.connection_id,
         created_at=now,
         updated_at=now,
+        updated_by=current_actor_dict(),
     )
     session.add(strategy)
     session.commit()
@@ -434,6 +475,7 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
     if payload.definition is not None:
         assert_indicator_count(session, strategy.user_id, payload.definition)
         _reject_invalid_rules(payload.definition)
+        _reject_external_rule_agents(session, payload.definition, strategy.user_id)
         strategy.definition = _strip_rule_chat_ids(
             _normalize_strategy_indicator_field_references(payload.definition)
         )
@@ -450,6 +492,9 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
             strategy.manager_agent_id = None
 
     strategy.updated_at = datetime.now(timezone.utc)
+    actor = current_actor_dict()
+    if actor is not None:
+        strategy.updated_by = actor
 
     session.add(strategy)
     session.commit()

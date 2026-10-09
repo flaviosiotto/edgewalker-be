@@ -40,12 +40,14 @@ def create_pat(
         name=payload.name,
         scopes=payload.scopes,
         expires_in_days=payload.expires_in_days,
+        agent_id=payload.agent_id,
     )
     return PatCreated(
         id=pat.id,
         name=pat.name,
         token_prefix=pat.token_prefix,
         scopes=pat.scopes,
+        agent_id=pat.agent_id,
         expires_at=pat.expires_at,
         last_used_at=pat.last_used_at,
         revoked_at=pat.revoked_at,

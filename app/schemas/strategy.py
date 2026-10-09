@@ -33,6 +33,8 @@ class StrategyLiveRead(BaseModel):
     connection_id: Optional[int] = None
     definition: Optional[Any] = None
     started_at: Optional[datetime] = None
+    # Who started the session (migr. 066): {via, user_id, agent_id?, ...}
+    started_by: Optional[dict[str, Any]] = None
     stopped_at: Optional[datetime] = None
     error_message: Optional[str] = None
     metrics: Optional[dict[str, Any]] = None
@@ -91,6 +93,9 @@ class StrategyRead(BaseModel):
 
     # AI Agent Manager
     manager_agent_id: Optional[int] = None
+
+    # Who made the last change (migr. 066): {via, user_id, agent_id?, ...}
+    updated_by: Optional[dict[str, Any]] = None
 
     # Current playbook = output of this backtest (None: initial rows, if any)
     playbook_backtest_id: Optional[int] = None

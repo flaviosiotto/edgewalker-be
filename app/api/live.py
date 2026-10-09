@@ -16,8 +16,10 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.db.database import get_session
+from app.core.actor import current_actor_dict
 from app.core.config import settings
 from app.models.agent import Agent, Chat
+from app.services.agent_service import require_hosted_agent
 from app.models.connection import Account, Connection
 from app.models.live_trading import LiveFill, LivePosition, PositionStatus
 from app.models.strategy import LiveStatus, Strategy, StrategyLive
@@ -392,6 +394,11 @@ async def _start_live_instance_internal(
         owned_agent = session.get(Agent, manager_agent_id)
         if owned_agent is None or owned_agent.user_id != user_id:
             raise ValueError(f"Agent {manager_agent_id} not found")
+    if resolved_manager_agent_id is not None:
+        # v1 of the agent bridge (D1): only a hosted agent manages a live.
+        manager = session.get(Agent, resolved_manager_agent_id)
+        if manager is not None:
+            require_hosted_agent(manager, role="manager of a live session")
 
     # The trading account is a property of the strategy (bound at creation):
     # live sessions inherit it, they never choose it.
@@ -409,6 +416,7 @@ async def _start_live_instance_internal(
     sl = StrategyLive(
         strategy_id=strategy_id,
         manager_agent_id=resolved_manager_agent_id,
+        started_by=current_actor_dict(),
         status=LiveStatus.STARTING.value,
         symbol=symbol,
         timeframe=timeframe,

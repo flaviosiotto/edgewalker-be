@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
+from app.core.actor import current_actor_dict
 from app.db.database import get_session
 from app.models.user import User
 from app.schemas.connection import AccountListResponse, AccountRead
@@ -174,6 +175,14 @@ async def place_account_order_endpoint(
 
     from app.services.order_command_service import place_account_order
 
+    # Attribution travels with the command (gateway -> order-aggregator ->
+    # orders.extra): who sent the order — the user, a bound-agent PAT, the
+    # hosted agent of a live turn.
+    extra = dict(payload.extra or {})
+    actor = current_actor_dict()
+    if actor is not None and "actor" not in extra:
+        extra["actor"] = actor
+
     try:
         return await place_account_order(
             session,
@@ -187,7 +196,7 @@ async def place_account_order_endpoint(
             take_profit_price=payload.take_profit_price,
             stop_loss_price=payload.stop_loss_price,
             strategy_live_id=payload.strategy_live_id,
-            extra=payload.extra,
+            extra=extra or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

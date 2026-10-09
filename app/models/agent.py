@@ -42,6 +42,20 @@ class Agent(SQLModel, table=True):
     agent_name: str = Field(sa_column=Column(String(255), nullable=False))
     n8n_webhook: str = Field(sa_column=Column(String(512), nullable=False))
     is_default: bool = Field(sa_column=Column(Boolean, nullable=False, server_default="false"))
+    # --- Kind (migr. 066, agent bridge F1) ----------------------------------
+    # hosted   = runs in agent-svc and trades through strategies (the only kind
+    #            that can be the manager of a strategy / live / backtest);
+    # external = the identity of an agent running in the user's own
+    #            orchestrator (OpenClaw, Hermes, Claude Code, Paperclip…) that
+    #            reaches EdgeWalker through MCP / the API with a PAT bound to
+    #            it. In v1 it designs, backtests and reads; it never trades.
+    # Enforced by the services (agent_service.require_hosted_agent), never by
+    # a schema constraint: the scenario "external agent with a strategy" must
+    # stay openable without a migration (docs/valutazione-agent-bridge.md D2).
+    kind: str = Field(
+        default="hosted",
+        sa_column=Column(String(16), nullable=False, server_default="hosted"),
+    )
 
     # --- Persona (migr. 049) ---------------------------------------------
     # There is no agent_kind any more: every agent can both design a strategy

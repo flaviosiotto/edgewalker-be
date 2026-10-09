@@ -19,6 +19,7 @@ from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
 from app.core.config import settings
+from app.models.agent import Agent
 from app.models.personal_access_token import PersonalAccessToken
 from app.models.user import User
 
@@ -48,6 +49,28 @@ def hash_pat_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
+def _resolve_bound_agent(session: Session, user: User, agent_id: Optional[int], scopes: list[str]) -> Optional[Agent]:
+    """The agent a token acts as, validated (migr. 066).
+
+    The agent must belong to the user. An *external* agent (one running in
+    the user's own orchestrator) never receives ``trade``: in v1 trading is
+    done by hosted agents through strategies only (agent bridge, decision
+    D1/D3). The rule is deliberately here, in the service, not in a schema
+    constraint.
+    """
+    if agent_id is None:
+        return None
+    agent = session.get(Agent, agent_id)
+    if agent is None or agent.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    if getattr(agent, "kind", "hosted") == "external" and SCOPE_TRADE in scopes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An external agent cannot receive the 'trade' scope: trading is done by EdgeWalker agents through strategies",
+        )
+    return agent
+
+
 def mint_personal_access_token(
     session: Session,
     *,
@@ -55,11 +78,13 @@ def mint_personal_access_token(
     name: str,
     scopes: list[str],
     expires_in_days: Optional[int] = None,
+    agent_id: Optional[int] = None,
 ) -> tuple[str, PersonalAccessToken]:
     """Create a PAT and return ``(raw_token, record)``.
 
     The raw token exists only in this return value: the caller must surface it
-    to the user immediately, it cannot be recovered later.
+    to the user immediately, it cannot be recovered later. With ``agent_id``
+    the token acts as that agent (attribution + the external-agent rules).
     """
     cleaned_name = name.strip()
     if not cleaned_name:
@@ -83,6 +108,8 @@ def mint_personal_access_token(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="expires_in_days must be positive")
         expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
 
+    bound_agent = _resolve_bound_agent(session, user, agent_id, normalized_scopes)
+
     raw_token = PAT_TOKEN_PREFIX + secrets.token_urlsafe(32)
     pat = PersonalAccessToken(
         user_id=user.id,
@@ -91,6 +118,7 @@ def mint_personal_access_token(
         token_prefix=raw_token[:12],
         scopes=normalized_scopes,
         expires_at=expires_at,
+        agent_id=bound_agent.id_agent if bound_agent is not None else None,
     )
     session.add(pat)
     session.commit()
@@ -178,7 +206,10 @@ def required_scope_for(method: str, path: str) -> Optional[str]:
     if path.startswith(_FORBIDDEN_PREFIXES):
         return None
     if path.startswith("/users"):
-        return SCOPE_READ if path == "/users/me" and method in _READ_METHODS else None
+        # Only the caller's own profile and its sub-resources (/users/me/actor,
+        # /users/me/studio-token), read-only. Never other users, never writes.
+        own_profile = path == "/users/me" or path.startswith("/users/me/")
+        return SCOPE_READ if own_profile and method in _READ_METHODS else None
 
     if method in _READ_METHODS:
         return SCOPE_READ

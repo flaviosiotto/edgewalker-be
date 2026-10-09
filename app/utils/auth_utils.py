@@ -7,7 +7,9 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
 
+from app.core.actor import actor_from_claims, set_current_actor
 from app.core.config import settings
+from app.models.agent import Agent
 from app.models.strategy import BacktestResult, BacktestStatus, LiveStatus, Strategy, StrategyLive
 from app.models.user import User
 from app.db.database import get_session
@@ -170,6 +172,7 @@ def _load_principal_from_payload(
     if user is None:
         raise credentials_exception
 
+    set_current_actor(actor_from_claims(user.id, payload))
     return AuthPrincipal(user=user, claims=payload)
 
 
@@ -208,6 +211,15 @@ def _try_pat_principal(
         "pat_id": pat.id,
         "pat_name": pat.name,
     }
+    # A token bound to an agent acts as that agent (migr. 066): attribution
+    # for the services, identity for ``GET /users/me/actor``.
+    if pat.agent_id is not None:
+        agent = session.get(Agent, pat.agent_id)
+        if agent is not None and agent.user_id == user.id:
+            claims["agent_id"] = agent.id_agent
+            claims["agent_name"] = agent.agent_name
+            claims["agent_kind"] = getattr(agent, "kind", "hosted")
+    set_current_actor(actor_from_claims(user.id, claims))
     return AuthPrincipal(user=user, claims=claims)
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.core.actor import reset_current_actor, set_current_actor
 from app.core.config import settings
 from app.observability import init_telemetry, instrument_app
 from app.db.database import create_db_and_tables, get_session_context
@@ -169,6 +170,31 @@ class TrackIDMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(TrackIDMiddleware)
+
+
+# ── Actor scope (attribution, core/actor.py) ──
+class ActorScopeMiddleware:
+    """Start every request with no actor; the auth dependencies set it.
+
+    Pure ASGI (no BaseHTTPMiddleware task hop) so the contextvar token is
+    reset on the very context the request ran in.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        token = set_current_actor(None)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            reset_current_actor(token)
+
+
+app.add_middleware(ActorScopeMiddleware)
 
 app.include_router(auth_router)
 app.include_router(onboarding_router)

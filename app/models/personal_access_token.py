@@ -41,6 +41,18 @@ class PersonalAccessToken(SQLModel, table=True):
     revoked_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
+    # The agent this token acts *as* (migr. 066). Requests made with the
+    # token are attributed to the agent (``core.actor``); for an external
+    # agent the ``trade`` scope is refused at mint time. NULL = the user.
+    agent_id: int | None = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("agent.id_agent", ondelete="CASCADE"),
+            nullable=True,
+            index=True,
+        ),
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),
