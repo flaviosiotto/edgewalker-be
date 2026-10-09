@@ -678,6 +678,19 @@ def _notify_thresholds(
     if kind is None:
         return
     session.add(period)
+    if kind == "exhausted":
+        # Outbound webhook (agent bridge F2): an orchestrator can react before
+        # the user reads the e-mail. Rides the same commit as the flag.
+        from app.services.webhook_service import emit_event
+
+        emit_event(
+            session,
+            user_id=user_id,
+            event_type="credits.exhausted",
+            data={"source": "ai_credits", "period_key": str(period.period_key), "limit": int(granted), "used": int(used),
+                  "renews_on": period.period_end},
+            dedupe_key=f"credits:ai:{period.period_key}",
+        )
     session.commit()
     user = session.get(User, user_id)
     if user is None:

@@ -253,6 +253,17 @@ def notify_balance(
     if kind is None:
         return
     session.add(wallet)
+    if kind == "exhausted":
+        from app.services.webhook_service import emit_event
+
+        emit_event(
+            session,
+            user_id=user_id,
+            event_type="credits.exhausted",
+            data={"source": "wallet", "period_key": str(ai_period_key), "limit": None, "used": None,
+                  "balance_cents": balance},
+            dedupe_key=f"credits:wallet:{ai_period_key}",
+        )
     session.commit()
     user = session.get(User, user_id)
     if user is None:

@@ -3,11 +3,15 @@ from contextlib import asynccontextmanager
 import logging
 import os
 import uuid
+import contextlib
+import asyncio
 from pathlib import Path
 
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.actor import reset_current_actor, set_current_actor
+from app.services.webhook_dispatcher import dispatcher_loop
+from app.services.webhook_sources import start_webhook_sources, stop_webhook_sources
 from app.core.config import settings
 from app.observability import init_telemetry, instrument_app
 from app.db.database import create_db_and_tables, get_session_context
@@ -33,6 +37,7 @@ from app.api.connections import router as connections_router
 from app.api.brokers import router as brokers_router
 from app.api.tws_launch import router as tws_launch_router
 from app.api.pats import router as pats_router
+from app.api.webhooks import router as webhooks_router
 from app.api.lab import router as lab_router
 from app.api.secrets import router as secrets_router
 from app.api.studio_access import router as studio_access_router
@@ -96,9 +101,20 @@ async def lifespan(app: FastAPI):
     await start_billing_sweeper()
     logging.getLogger(__name__).info("Started billing sweeper")
 
+    # Outbound webhooks (migr. 067): the NOTIFY listener turns table writes
+    # into deliveries, the dispatcher POSTs them with retries.
+    start_webhook_sources()
+    webhook_stop = asyncio.Event()
+    webhook_task = asyncio.create_task(dispatcher_loop(webhook_stop), name="webhook-dispatcher")
+    logging.getLogger(__name__).info("Started webhook sources listener and dispatcher")
+
     yield
 
     # Cleanup
+    webhook_stop.set()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(webhook_task, timeout=15)
+    stop_webhook_sources()
     await stop_billing_sweeper()
     stop_chat_realtime()
     await stop_backtest_runner_monitor()
@@ -227,6 +243,7 @@ app.include_router(agent_lessons_router)
 app.include_router(connections_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(brokers_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(pats_router)
+app.include_router(webhooks_router)
 # Studio Lab launch: interactive-session-only mint of the JupyterHub URL.
 app.include_router(lab_router)
 app.include_router(secrets_router)
