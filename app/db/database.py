@@ -36,6 +36,7 @@ def create_db_and_tables():
     from app.models.password_reset_token import PasswordResetToken  # noqa: F401
     from app.models.personal_access_token import PersonalAccessToken  # noqa: F401
     from app.models.webhook import WebhookDelivery, WebhookSubscription  # noqa: F401
+    from app.models.agent_model import AgentActionRequest, AgentMemory, AgentRun, AgentSkill  # noqa: F401
     from app.models.access_control import (  # noqa: F401
         AccessAllowlist,
         EmailVerificationToken,

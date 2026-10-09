@@ -87,6 +87,18 @@ EVENT_CATALOG: dict[str, tuple[str, list[str]]] = {
         "A broker connection stopped reporting (health check stale) or disconnected.",
         ["connection_id", "connection_name", "broker_type", "status", "last_checked_at"],
     ),
+    "agent.action.requested": (
+        "A hosted agent proposed a trading action that needs an approval (tool policy 'ask'): approve or reject it in the UI, or with decide_action_request over MCP.",
+        ["request_id", "agent_id", "agent_name", "tool_name", "args", "rationale", "summary", "chat_id", "live_id", "account_id", "expires_at"],
+    ),
+    "agent.run.completed": (
+        "A task handed to a hosted agent from outside (REST, Paperclip, A2A) finished: answer, usage and credits.",
+        ["run_id", "agent_id", "agent_name", "source", "external_run_id", "scope", "strategy_id", "status", "result", "usage", "cost_credits", "error"],
+    ),
+    "agent.action.decided": (
+        "An action request was approved (and executed), rejected or expired.",
+        ["request_id", "agent_id", "agent_name", "tool_name", "summary", "status", "decided_by", "result", "error"],
+    ),
 }
 
 _DELIVERY_STATUS_PENDING = "pending"

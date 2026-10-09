@@ -1,7 +1,10 @@
+import re
 from datetime import datetime
 from sqlmodel import Session, select
 from fastapi import HTTPException, status
 from sqlalchemy.orm import selectinload
+
+from edgewalker_platform import agent_tools
 
 from app.core.config import settings
 from app.models.agent import Agent, Chat
@@ -34,6 +37,52 @@ def require_hosted_agent(agent: Agent, *, role: str = "manager") -> Agent:
     return agent
 
 
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(name: str) -> str:
+    base = _SLUG_RE.sub("-", str(name or "").lower()).strip("-")
+    return base[:56] or "agent"
+
+
+def unique_slug(session: Session, user_id: int, name: str, *, exclude_id: int | None = None) -> str:
+    """A slug unique among the user's agents: the slugified name, with a
+    numeric suffix when taken. Stable once assigned (renames keep it)."""
+    base = slugify(name)
+    taken = {
+        row.slug
+        for row in session.exec(select(Agent).where(Agent.user_id == user_id)).all()
+        if row.slug and row.id_agent != exclude_id
+    }
+    if base not in taken:
+        return base
+    n = 2
+    while f"{base}-{n}" in taken:
+        n += 1
+    return f"{base}-{n}"
+
+
+def policy_for_kind(policy: dict[str, str] | None, kind: str) -> dict[str, str]:
+    """An external agent never trades (D1/D3): a policy that tries to allow a
+    trade-scoped tool or group for it is refused, not silently ignored."""
+    clean = agent_tools.normalize_policy(policy or {})
+    if kind == "hosted":
+        return clean
+    offending = []
+    for key, value in clean.items():
+        if value == "off":
+            continue
+        spec = agent_tools.get_tool(key)
+        if (spec is not None and spec.scope == "trade") or key in ("trading", "live"):
+            offending.append(key)
+    if offending:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"An external agent never trades: {', '.join(offending)} can only be 'off'",
+        )
+    return clean
+
+
 def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[Agent, Chat | None]:
     existing = session.exec(
         select(Agent)
@@ -61,6 +110,10 @@ def create_agent(session: Session, payload: AgentCreate, user_id: int) -> tuple[
         risk_profile=payload.risk_profile,
         persona=payload.persona or {},
         settings=payload.settings.model_dump(),
+        tool_policy=policy_for_kind(payload.tool_policy, payload.kind),
+        skills=list(payload.skills or []),
+        budget_credits_month=payload.budget_credits_month,
+        slug=unique_slug(session, user_id, payload.agent_name),
     )
     session.add(agent)
     session.commit()
@@ -145,6 +198,15 @@ def update_agent(session: Session, agent_id: int, payload: AgentUpdate, user_id:
         # PATCH semantics: keys left out keep their current value.
         current = AgentSettings.model_validate(agent.settings or {}).model_dump()
         agent.settings = {**current, **payload.settings.model_dump(exclude_unset=True)}
+    if payload.tool_policy is not None:
+        # The whole document is replaced: a group left out goes back to the default.
+        agent.tool_policy = policy_for_kind(payload.tool_policy, agent.kind or "hosted")
+    if payload.skills is not None:
+        agent.skills = list(payload.skills)
+    if "budget_credits_month" in payload.model_fields_set:
+        agent.budget_credits_month = payload.budget_credits_month
+    if not agent.slug:
+        agent.slug = unique_slug(session, agent.user_id, agent.agent_name, exclude_id=agent.id_agent)
 
     session.add(agent)
     session.commit()

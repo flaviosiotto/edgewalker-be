@@ -1,7 +1,9 @@
 import re
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
+
+from edgewalker_platform import agent_tools
 
 # The agent has no `kind` any more (migr. 049): every agent can both design a
 # strategy and trade it. What it has instead is an identity — an avatar preset,
@@ -30,6 +32,29 @@ def _validate_accent_color(value: Optional[str]) -> Optional[str]:
     if not _HEX_COLOR_RE.match(normalized):
         raise ValueError("accent_color must be a hex colour in the form #RRGGBB")
     return normalized.lower()
+
+
+def _validate_tool_policy(value: Optional[dict[str, str]]) -> dict[str, str]:
+    if value is None:
+        return {}
+    try:
+        return agent_tools.normalize_policy(value)
+    except ValueError as exc:
+        raise ValueError(f"tool_policy: {exc}") from exc
+
+
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def _validate_skill_names(value: Optional[list[str]]) -> list[str]:
+    names: list[str] = []
+    for raw in value or []:
+        name = str(raw or "").strip().lower()
+        if not _SKILL_NAME_RE.match(name):
+            raise ValueError(f"skills: '{raw}' is not a valid skill name (lowercase letters, digits and dashes)")
+        if name not in names:
+            names.append(name)
+    return names
 
 
 # User-facing behaviour knobs (migr. 058). The reasoning level is the only
@@ -64,11 +89,28 @@ class AgentPersonaFields(BaseModel):
     risk_profile: RiskProfile = "balanced"
     persona: dict[str, Any] = Field(default_factory=dict)
     settings: AgentSettings = Field(default_factory=AgentSettings)
+    # migr. 068: {"<tool|group>": "allow"|"ask"|"off"} (edgewalker_platform.agent_tools);
+    # empty = defaults derived from settings.autonomy. Allowlist of the user's
+    # skill names the agent loads (empty = all).
+    tool_policy: dict[str, str] = Field(default_factory=dict)
+    skills: list[str] = Field(default_factory=list)
+    # migr. 069: monthly credit cap for the runs handed to this agent from outside.
+    budget_credits_month: Optional[int] = Field(default=None, ge=0, le=1_000_000)
 
     @field_validator("accent_color")
     @classmethod
     def _check_accent_color(cls, value: str) -> str:
         return _validate_accent_color(value)
+
+    @field_validator("tool_policy")
+    @classmethod
+    def _check_tool_policy(cls, value: dict[str, str]) -> dict[str, str]:
+        return _validate_tool_policy(value)
+
+    @field_validator("skills")
+    @classmethod
+    def _check_skills(cls, value: list[str]) -> list[str]:
+        return _validate_skill_names(value)
 
 
 class AgentCreate(AgentPersonaFields):
@@ -86,8 +128,16 @@ class AgentRead(AgentPersonaFields):
     id_agent: int
     agent_name: str
     kind: AgentKind = "hosted"
+    slug: Optional[str] = None
     n8n_webhook: str
     is_default: bool
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tool_policy_effective(self) -> dict[str, str]:
+        """One value per policy group (allow | ask | off | mixed) after the
+        defaults of kind and autonomy are applied: what the UI shows."""
+        return agent_tools.group_policy(self.tool_policy, kind=self.kind, autonomy=self.settings.autonomy)
 
 
 class AgentUpdate(BaseModel):
@@ -101,11 +151,24 @@ class AgentUpdate(BaseModel):
     risk_profile: Optional[RiskProfile] = None
     persona: Optional[dict[str, Any]] = None
     settings: Optional[AgentSettings] = None
+    tool_policy: Optional[dict[str, str]] = None
+    skills: Optional[list[str]] = None
+    budget_credits_month: Optional[int] = Field(default=None, ge=0, le=1_000_000)
 
     @field_validator("accent_color")
     @classmethod
     def _check_accent_color(cls, value: Optional[str]) -> Optional[str]:
         return _validate_accent_color(value)
+
+    @field_validator("tool_policy")
+    @classmethod
+    def _check_tool_policy(cls, value: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        return None if value is None else _validate_tool_policy(value)
+
+    @field_validator("skills")
+    @classmethod
+    def _check_skills(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        return None if value is None else _validate_skill_names(value)
 
 
 class AgentReadWithMeta(AgentRead):
@@ -131,4 +194,9 @@ def build_agent_persona_block(agent: Any) -> dict[str, Any]:
         "risk_profile": getattr(agent, "risk_profile", None) or "balanced",
         "persona": persona if isinstance(persona, dict) else {},
         "settings": AgentSettings.model_validate(getattr(agent, "settings", None) or {}).model_dump(),
+        # F3: the policy travels with the persona so agent-svc applies it
+        # without a second lookup; the allowlist of skills likewise.
+        "tool_policy": dict(getattr(agent, "tool_policy", None) or {}),
+        "skills": list(getattr(agent, "skills", None) or []),
+        "slug": getattr(agent, "slug", None),
     }

@@ -100,6 +100,24 @@ class Agent(SQLModel, table=True):
         default_factory=dict,
         sa_column=Column(JSONB, nullable=False, server_default="{}"),
     )
+    # --- Agent model (migr. 068, agent bridge F3) ---------------------------
+    # tool_policy: {"<tool|group>": "allow"|"ask"|"off"}, validated with the
+    # shared catalogue (edgewalker_platform.agent_tools). Empty = defaults
+    # derived from settings.autonomy; an external agent never trades.
+    tool_policy: dict = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default="{}"),
+    )
+    # Allowlist of agent_skill.name this agent loads (empty = all).
+    skills: list = Field(
+        default_factory=list,
+        sa_column=Column(JSONB, nullable=False, server_default="[]"),
+    )
+    # Stable public name, unique per user (Agent Card / run endpoint).
+    slug: Optional[str] = Field(default=None, sa_column=Column(String(64), nullable=True))
+    # migr. 069: monthly cap on the AI credits spent by external runs
+    # (POST /agents/{id}/runs, Paperclip, A2A). NULL = only the wallet limits.
+    budget_credits_month: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
 
 
 

@@ -38,6 +38,9 @@ from app.api.brokers import router as brokers_router
 from app.api.tws_launch import router as tws_launch_router
 from app.api.pats import router as pats_router
 from app.api.webhooks import router as webhooks_router
+from app.api.agent_model import action_router, agents_ext_router, skills_router
+from app.api.agent_runs import a2a_router, runs_router
+from app.services.agent_action_service import sweeper_loop as action_sweeper_loop
 from app.api.lab import router as lab_router
 from app.api.secrets import router as secrets_router
 from app.api.studio_access import router as studio_access_router
@@ -107,6 +110,8 @@ async def lifespan(app: FastAPI):
     webhook_stop = asyncio.Event()
     webhook_task = asyncio.create_task(dispatcher_loop(webhook_stop), name="webhook-dispatcher")
     logging.getLogger(__name__).info("Started webhook sources listener and dispatcher")
+    # Agent action requests (migr. 068): pending approvals expire after their TTL.
+    action_task = asyncio.create_task(action_sweeper_loop(webhook_stop), name="action-request-sweeper")
 
     yield
 
@@ -114,6 +119,8 @@ async def lifespan(app: FastAPI):
     webhook_stop.set()
     with contextlib.suppress(Exception):
         await asyncio.wait_for(webhook_task, timeout=15)
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(action_task, timeout=5)
     stop_webhook_sources()
     await stop_billing_sweeper()
     stop_chat_realtime()
@@ -244,6 +251,11 @@ app.include_router(connections_router, dependencies=[Depends(get_current_active_
 app.include_router(brokers_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(pats_router)
 app.include_router(webhooks_router)
+app.include_router(skills_router)
+app.include_router(agents_ext_router)
+app.include_router(action_router)
+app.include_router(runs_router)
+app.include_router(a2a_router)
 # Studio Lab launch: interactive-session-only mint of the JupyterHub URL.
 app.include_router(lab_router)
 app.include_router(secrets_router)
