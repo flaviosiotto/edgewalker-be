@@ -3,7 +3,8 @@
 * ``POST /agents/{id}/runs`` — hand a task to a hosted agent (202, the run
   executes in the background; poll ``GET /runs/{id}`` or give a callback).
 * ``POST /agents/{id}/paperclip`` — the Paperclip ``http`` adapter target:
-  202 ``{status: accepted, executionId}``, then the callback to Paperclip.
+  202 ``{status: accepted, executionId}``; the outcome is reported on the
+  Paperclip issue (comment + status) through the Paperclip API.
 * ``/a2a/agents/{id}`` — minimal A2A: Agent Card + JSON-RPC ``message/send``
   and ``tasks/get``.
 
@@ -103,19 +104,22 @@ def paperclip_heartbeat_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Target URL of a Paperclip ``http`` adapter. Configure in Paperclip:
-    ``url`` = this endpoint, ``headers.Authorization`` = ``Bearer <PAT>``,
-    ``payloadTemplate`` with ``paperclipApiUrl`` and ``paperclipApiKey`` (for
-    the callback) and optionally ``task``/``instructions``, ``scope``,
-    ``strategy_id``. The headers ``X-Paperclip-Api-Url`` / ``X-Paperclip-Api-Key``
-    are accepted too."""
+    """Target URL of a Paperclip ``http`` adapter (fire-and-forget: our 2xx
+    closes its heartbeat run). Configure in Paperclip: ``url`` = this
+    endpoint, ``headers.Authorization`` = ``Bearer <PAT with write>``,
+    ``payloadTemplate`` with ``paperclipApiUrl`` and ``paperclipApiKey`` (the
+    Paperclip agent's own API key: used to read the issue and to post the
+    answer as a comment + status) and optionally ``paperclipDoneStatus``
+    (``done`` | ``in_review`` | ``comment``), ``task``/``instructions``,
+    ``scope``, ``strategy_id``. The headers ``X-Paperclip-Api-Url`` /
+    ``X-Paperclip-Api-Key`` are accepted too."""
     if not beat.paperclipApiUrl:
         beat.paperclipApiUrl = request.headers.get("x-paperclip-api-url")
     if not beat.paperclipApiKey:
         beat.paperclipApiKey = request.headers.get("x-paperclip-api-key")
     run = runs.run_from_paperclip(session, user_id=current_user.id, agent_id=agent_id, beat=beat, created_by=current_actor_dict())
     background.add_task(_execute_in_background, run.id)
-    return {"status": "accepted", "executionId": str(run.id), "runId": beat.runId, "callback": bool(run.callback_url)}
+    return {"status": "accepted", "executionId": str(run.id), "runId": beat.runId, "reportsTo": run.callback_url}
 
 
 # ── A2A ─────────────────────────────────────────────────────────────────────

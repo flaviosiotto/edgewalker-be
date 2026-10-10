@@ -3,8 +3,9 @@
 A run is a task handed to a HOSTED agent from outside:
 
 * ``POST /agents/{id}/runs`` (REST, any orchestrator, optional callback);
-* the Paperclip ``http`` adapter (``POST /agents/{id}/paperclip`` → 202, then
-  ``POST {paperclipApiUrl}/api/heartbeat-runs/{runId}/callback``);
+* the Paperclip ``http`` adapter (``POST /agents/{id}/paperclip`` → 202; the
+  adapter is fire-and-forget, so the outcome goes back through the Paperclip
+  API as a comment + status on the issue the agent was woken for);
 * A2A ``message/send`` on ``/a2a/agents/{id}`` (``tasks/get`` to poll).
 
 It is executed as ONE turn in a chat of the agent — its own chat for
@@ -370,29 +371,8 @@ def _finish(
 # ── callbacks ───────────────────────────────────────────────────────────────
 
 
-def _paperclip_usage(usage: Optional[dict[str, Any]]) -> dict[str, Any]:
-    u = usage or {}
-    return {
-        "inputTokens": int(u.get("input_tokens") or 0),
-        "outputTokens": int(u.get("output_tokens") or 0),
-        "cachedInputTokens": int(u.get("tokens_cached") or u.get("cached_tokens") or 0),
-    }
-
-
 def callback_body(run: AgentRun, agent: Agent | None) -> dict[str, Any]:
-    if run.source == "paperclip":
-        body: dict[str, Any] = {
-            "status": "succeeded" if run.status == "succeeded" else "failed",
-            "result": run.result,
-            "usage": _paperclip_usage(run.usage),
-            "provider": "edgewalker",
-        }
-        if run.status != "succeeded":
-            body["errorMessage"] = run.error or "run failed"
-        cents = (run.usage or {}).get("wallet_cents")
-        if isinstance(cents, (int, float)):
-            body["costUsd"] = round(float(cents) / 100.0, 4)
-        return body
+    """What is POSTed to a generic ``callback_url`` (source api / mcp / a2a)."""
     return {
         "run_id": run.id,
         "external_run_id": run.external_run_id,
@@ -408,6 +388,9 @@ def callback_body(run: AgentRun, agent: Agent | None) -> dict[str, Any]:
 
 
 def _callback(session: Session, run: AgentRun, agent: Agent | None) -> None:
+    if run.source == "paperclip":
+        _paperclip_report(session, run, agent)
+        return
     headers = {"Content-Type": "application/json"}
     auth = _decrypt(run.callback_auth)
     if auth:
@@ -429,52 +412,192 @@ def _callback(session: Session, run: AgentRun, agent: Agent | None) -> None:
 
 
 # ── Paperclip ───────────────────────────────────────────────────────────────
+#
+# The Paperclip ``http`` adapter is fire-and-forget: it POSTs one request per
+# heartbeat and a 2xx answer closes its run as succeeded, whatever we reply.
+# There is no completion callback; an external agent reports through the
+# Paperclip API with its own agent key: read the issue it was woken for,
+# comment on it and move its status (docs.paperclip.ing/reference/api/issues).
+
+PAPERCLIP_TIMEOUT_S = 8.0
+PAPERCLIP_COMMENTS = 6
+PAPERCLIP_CHECKOUT_STATUSES = ["todo", "backlog", "blocked", "in_review", "in_progress"]
+PAPERCLIP_DEFAULT_DONE_STATUS = "done"
 
 
-def paperclip_task_text(beat: PaperclipHeartbeat) -> str:
+def _paperclip_headers(api_key: Optional[str], run_id: Optional[str]) -> dict[str, str]:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = api_key if api_key.lower().startswith("bearer ") else f"Bearer {api_key}"
+    if run_id:
+        headers["X-Paperclip-Run-Id"] = run_id
+    return headers
+
+
+def fetch_paperclip_issue(api_url: str, api_key: str, *, run_id: Optional[str], issue_id: str) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
+    """Issue (title, description, status…) and its latest comments, oldest
+    first. Failures are logged and leave the run with the bare ids: a
+    heartbeat must never fail because Paperclip is slow to answer."""
+    base = api_url.rstrip("/")
+    headers = _paperclip_headers(api_key, run_id)
+    issue: Optional[dict[str, Any]] = None
+    comments: list[dict[str, Any]] = []
+    try:
+        with httpx.Client(timeout=PAPERCLIP_TIMEOUT_S, follow_redirects=False) as client:
+            response = client.get(f"{base}/api/issues/{issue_id}", headers=headers)
+            if response.status_code == 200 and isinstance(response.json(), dict):
+                issue = response.json()
+            else:
+                logger.warning("paperclip: issue %s not readable (HTTP %s)", issue_id, response.status_code)
+            response = client.get(f"{base}/api/issues/{issue_id}/comments", params={"order": "desc", "limit": PAPERCLIP_COMMENTS}, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                rows = data if isinstance(data, list) else data.get("comments") or data.get("items") or []
+                comments = [c for c in rows if isinstance(c, dict) and isinstance(c.get("body"), str)]
+                comments.reverse()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("paperclip: cannot read issue %s: %s", issue_id, exc)
+    return issue, comments
+
+
+def _issue_label(issue: Optional[dict[str, Any]], issue_id: str) -> str:
+    if issue and isinstance(issue.get("identifier"), str) and issue["identifier"]:
+        return issue["identifier"]
+    return issue_id
+
+
+def paperclip_task_text(beat: PaperclipHeartbeat, issue: Optional[dict[str, Any]] = None, comments: Optional[list[dict[str, Any]]] = None) -> str:
+    """The message the agent receives: who woke it and why, the issue as
+    Paperclip shows it, the latest comments, then the explicit instructions
+    of the payloadTemplate (if any)."""
     explicit = (beat.task or beat.instructions or "").strip()
     reason = beat.wakeReason or "heartbeat"
+    issue_id = beat.issue_ref
     refs = []
-    if beat.taskId:
-        refs.append(f"task {beat.taskId}")
-    if beat.issueId and beat.issueId != beat.taskId:
-        refs.append(f"issue {beat.issueId}")
-    others = [i for i in beat.issueIds if i not in (beat.taskId, beat.issueId)]
+    if issue_id:
+        refs.append(f"task {_issue_label(issue, issue_id)}")
+    others = [i for i in beat.issueIds if i != issue_id]
     if others:
-        refs.append("issues " + ", ".join(others))
-    header = f"Richiesta da Paperclip ({reason}" + ((": " + ", ".join(refs)) if refs else "") + ")."
+        refs.append("altri task " + ", ".join(others))
+    lines = ["Richiesta da Paperclip (" + reason + ((": " + ", ".join(refs)) if refs else "") + ")."]
+    if issue:
+        title = (issue.get("title") or "").strip()
+        description = (issue.get("description") or "").strip()
+        meta = [str(issue.get(k)) for k in ("status", "priority") if issue.get(k)]
+        lines.append("")
+        lines.append(f"Task: {title}" if title else "Task senza titolo")
+        if meta:
+            lines.append("Stato/priorità: " + " · ".join(meta))
+        if description:
+            lines.append("Descrizione:")
+            lines.append(description[:6000])
+    if comments:
+        lines.append("")
+        lines.append("Ultimi commenti (dal più vecchio):")
+        for c in comments[-PAPERCLIP_COMMENTS:]:
+            who = "agente" if c.get("authorAgentId") else "umano"
+            flag = " ← nuovo" if beat.commentId and c.get("id") == beat.commentId else ""
+            lines.append(f"- [{who}]{flag} {str(c.get('body')).strip()[:1500]}")
+    lines.append("")
     if explicit:
-        return header + "\n" + explicit
-    if reason == "task_assigned":
-        return header + "\nTi e stato assegnato un task: leggi il contesto, fai cio che chiede con gli strumenti della piattaforma e rispondi con un riepilogo di quanto fatto e dei risultati."
-    if reason in ("comment", "mention", "wake_comment"):
-        return header + "\nC e un nuovo commento che ti riguarda: rispondi nel merito usando i dati della piattaforma."
-    return header + "\nFai un briefing breve: stato delle live, risultati recenti, cosa merita attenzione, cosa proponi."
+        lines.append(explicit)
+    elif reason == "issue_assigned" or (issue and not comments):
+        lines.append("Ti è stato assegnato questo task: fai ciò che chiede con gli strumenti della piattaforma e rispondi con un riepilogo di quanto fatto e dei risultati. La risposta viene pubblicata come commento sul task.")
+    elif reason in ("issue_commented", "comment", "mention", "wake_comment") or comments:
+        lines.append("C'è un nuovo commento sul task: rispondi nel merito usando i dati della piattaforma. La risposta viene pubblicata come commento sul task.")
+    elif issue_id:
+        lines.append("Riprendi il task: verifica lo stato e completa quanto manca, poi riepiloga.")
+    else:
+        lines.append("Fai un briefing breve: stato delle live, risultati recenti, cosa merita attenzione, cosa proponi.")
+    return "\n".join(lines).strip()
 
 
 def run_from_paperclip(session: Session, *, user_id: int, agent_id: int, beat: PaperclipHeartbeat, created_by: Optional[dict[str, Any]] = None) -> AgentRun:
     api_url = (beat.paperclipApiUrl or "").rstrip("/")
-    callback_url = f"{api_url}/api/heartbeat-runs/{beat.runId}/callback" if api_url else None
+    api_key = beat.paperclipApiKey or None
+    issue_id = beat.issue_ref
+    issue, comments = (None, [])
+    if api_url and api_key and issue_id:
+        issue, comments = fetch_paperclip_issue(api_url, api_key, run_id=beat.runId, issue_id=issue_id)
+    # the outcome goes back as a comment (+ status) on the issue: nothing to
+    # report when the heartbeat is not about an issue (timer, manual wake)
+    callback_url = f"{api_url}/api/issues/{issue_id}" if api_url and api_key and issue_id else None
     extra = {k: v for k, v in (beat.model_extra or {}).items() if v not in (None, "", [], {})}
     context: dict[str, Any] = {
         "paperclip": {
             "runId": beat.runId, "agentId": beat.agentId, "companyId": beat.companyId, "taskId": beat.taskId,
-            "issueId": beat.issueId, "wakeReason": beat.wakeReason, "issueIds": beat.issueIds,
-            **{k: v for k, v in beat.context.items() if k != "paperclipWorkspace"},
+            "issueId": beat.issueId, "wakeReason": beat.wakeReason, "commentId": beat.commentId, "issueIds": beat.issueIds,
+            "doneStatus": beat.paperclipDoneStatus or PAPERCLIP_DEFAULT_DONE_STATUS,
+            "issue": {k: issue.get(k) for k in ("id", "identifier", "title", "status", "priority", "projectId") if issue and issue.get(k) is not None} if issue else None,
+            **{k: v for k, v in beat.context.items() if k not in ("paperclipWorkspace", "connectionInstructions")},
         },
         **extra,
     }
     payload = RunCreate(
-        task=paperclip_task_text(beat),
+        task=paperclip_task_text(beat, issue, comments),
         scope=beat.scope or ("strategy" if beat.strategy_id else "agent"),
         strategy_id=beat.strategy_id,
         context=context,
         external_run_id=beat.runId,
         callback_url=callback_url,
-        callback_auth=beat.paperclipApiKey,
+        callback_auth=api_key,
         source="paperclip",
     )
     return create_run(session, user_id=user_id, agent_id=agent_id, payload=payload, created_by=created_by)
+
+
+def paperclip_comment_body(run: AgentRun, agent: Agent | None) -> str:
+    """Markdown comment posted on the Paperclip issue when the run ends."""
+    name = agent.agent_name if agent else "EdgeWalker"
+    if run.status == "succeeded":
+        text = (run.result or "").strip() or "_(nessuna risposta)_"
+    else:
+        text = f"**Run EdgeWalker fallito**: {run.error or 'errore sconosciuto'}"
+    usage = run.usage or {}
+    bits = [f"EdgeWalker · {name} · run #{run.id}"]
+    if run.cost_credits is not None:
+        bits.append(f"{float(run.cost_credits):g} crediti")
+    tokens_in, tokens_out = usage.get("input_tokens"), usage.get("output_tokens")
+    if tokens_in or tokens_out:
+        bits.append(f"token {int(tokens_in or 0)} in / {int(tokens_out or 0)} out")
+    return text + "\n\n---\n_" + " · ".join(bits) + "_"
+
+
+def _paperclip_report(session: Session, run: AgentRun, agent: Agent | None) -> None:
+    """Report the outcome on the issue: checkout (idempotent for the agent
+    itself), then comment + status. ``callback_url`` is the issue URL."""
+    pc = (run.context or {}).get("paperclip") or {}
+    headers = _paperclip_headers(_decrypt(run.callback_auth), run.external_run_id)
+    done_status = pc.get("doneStatus") or PAPERCLIP_DEFAULT_DONE_STATUS
+    body = paperclip_comment_body(run, agent)
+    steps: list[str] = []
+    try:
+        with httpx.Client(timeout=PAPERCLIP_TIMEOUT_S, follow_redirects=False) as client:
+            if pc.get("agentId"):
+                checkout = client.post(f"{run.callback_url}/checkout", json={"agentId": pc["agentId"], "expectedStatuses": PAPERCLIP_CHECKOUT_STATUSES}, headers=headers)
+                steps.append(f"checkout {checkout.status_code}")
+            if run.status == "succeeded" and done_status == "comment":
+                response = client.post(f"{run.callback_url}/comments", json={"body": body}, headers=headers)
+                steps.append(f"comment {response.status_code}")
+            else:
+                new_status = done_status if run.status == "succeeded" else "blocked"
+                response = client.patch(run.callback_url, json={"status": new_status, "comment": body}, headers=headers)
+                steps.append(f"{new_status} {response.status_code}")
+                if response.status_code >= 400:
+                    # status change refused (e.g. another owner): at least leave the comment
+                    response = client.post(f"{run.callback_url}/comments", json={"body": body}, headers=headers)
+                    steps.append(f"comment {response.status_code}")
+        if 200 <= response.status_code < 300:
+            run.callback_status = "delivered"
+            run.callback_error = None
+        else:
+            run.callback_status = "failed"
+            run.callback_error = f"HTTP {response.status_code}: {response.text[:300]} ({', '.join(steps)})"
+    except httpx.HTTPError as exc:
+        run.callback_status = "failed"
+        run.callback_error = f"{str(exc)[:400]} ({', '.join(steps)})"
+    session.add(run)
+    session.commit()
 
 
 # ── A2A (minimal: message/send + tasks/get) ─────────────────────────────────

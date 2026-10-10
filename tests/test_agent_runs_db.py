@@ -1,6 +1,6 @@
 """Runs (migr. 069, bridge F4) against an embedded Postgres: creation and
 chat resolution, budget, execution as a chat turn (dispatch monkeypatched),
-Paperclip heartbeat + callback, A2A task mapping.
+Paperclip heartbeat (issue read + comment/status report), A2A task mapping.
 Run: ``venv/bin/python -m pytest tests/test_agent_runs_db.py``.
 """
 from __future__ import annotations
@@ -169,7 +169,7 @@ def test_execute_run_copies_answer_usage_and_emits_event(session, tenant, monkey
     assert runs.execute_run(session, run2.id).status == "failed"  # idempotent: not queued any more
 
 
-def test_paperclip_heartbeat_and_callback(session, tenant, monkeypatch):
+def test_paperclip_heartbeat_reads_issue_and_reports_on_it(session, tenant, monkeypatch):
     import httpx
 
     from app.schemas.agent_run import PaperclipHeartbeat
@@ -178,7 +178,7 @@ def test_paperclip_heartbeat_and_callback(session, tenant, monkeypatch):
     user, _, _ = tenant
     agent, _ = _agent(session, user)
     _fake_dispatch(monkeypatch, answer="Task PC-12 completato.")
-    posted = []
+    calls = []
 
     class FakeClient:
         def __init__(self, **kw):
@@ -190,47 +190,85 @@ def test_paperclip_heartbeat_and_callback(session, tenant, monkeypatch):
         def __exit__(self, *a):
             return False
 
+        def get(self, url, params=None, headers=None):
+            calls.append(("GET", url, params, headers))
+            if url.endswith("/comments"):
+                return httpx.Response(200, json=[
+                    {"id": "c2", "body": "Puoi usare il conto demo?", "authorUserId": "u1"},
+                    {"id": "c1", "body": "Parto dal backtest.", "authorAgentId": "ag_1"},
+                ])
+            return httpx.Response(200, json={"id": "task_9", "identifier": "PC-12", "title": "Backtest strategia 3", "description": "Ultimo mese, conto demo.", "status": "todo", "priority": "high"})
+
         def post(self, url, json=None, headers=None):
-            posted.append((url, json, headers))
+            calls.append(("POST", url, json, headers))
+            return httpx.Response(200, json={"ok": True})
+
+        def patch(self, url, json=None, headers=None):
+            calls.append(("PATCH", url, json, headers))
             return httpx.Response(200, json={"ok": True})
 
     monkeypatch.setattr(runs.httpx, "Client", FakeClient)
+    # real adapter body: payloadTemplate keys at the root, run context nested
     beat = PaperclipHeartbeat.model_validate({
-        "runId": "run_abc", "agentId": "ag_1", "companyId": "co_1", "taskId": "task_9", "issueId": "task_9", "wakeReason": "task_assigned",
-        "issueIds": ["task_9"], "context": {"taskId": "task_9", "wakeReason": "task_assigned", "paperclipWorkspace": {"cwd": "/w"}},
-        "paperclipApiUrl": "https://paperclip.example/", "paperclipApiKey": "pk_secret", "task": "Fai un backtest della strategia 3 sull ultimo mese.",
-        "priority": "high",
+        "agentId": "ag_1", "runId": "run_abc",
+        "context": {"taskId": "task_9", "wakeReason": "issue_commented", "commentId": "c2", "companyId": "co_1", "paperclipWorkspace": {"cwd": "/w"}},
+        "connectionInstructions": None,
+        "paperclipApiUrl": "https://paperclip.example/", "paperclipApiKey": "pk_secret", "paperclipDoneStatus": "in_review", "priority": "high",
     })
+    assert beat.taskId == "task_9" and beat.wakeReason == "issue_commented" and beat.commentId == "c2" and beat.companyId == "co_1"
     run = runs.run_from_paperclip(session, user_id=user.id, agent_id=agent.id_agent, beat=beat)
     assert run.source == "paperclip" and run.external_run_id == "run_abc"
-    assert run.callback_url == "https://paperclip.example/api/heartbeat-runs/run_abc/callback"
+    assert run.callback_url == "https://paperclip.example/api/issues/task_9"
     assert run.callback_auth and run.callback_auth != "pk_secret" and runs._decrypt(run.callback_auth) == "pk_secret"
-    assert run.task.startswith("Richiesta da Paperclip (task_assigned: task task_9)") and "Fai un backtest" in run.task
-    assert run.context["paperclip"]["taskId"] == "task_9" and "paperclipWorkspace" not in run.context["paperclip"] and run.context["priority"] == "high"
+    # the issue was read with the agent key and the run id
+    reads = [c for c in calls if c[0] == "GET"]
+    assert [c[1] for c in reads] == ["https://paperclip.example/api/issues/task_9", "https://paperclip.example/api/issues/task_9/comments"]
+    assert reads[0][3]["Authorization"] == "Bearer pk_secret" and reads[0][3]["X-Paperclip-Run-Id"] == "run_abc"
+    assert run.task.startswith("Richiesta da Paperclip (issue_commented: task PC-12).")
+    assert "Task: Backtest strategia 3" in run.task and "Ultimo mese, conto demo." in run.task
+    assert run.task.index("Parto dal backtest.") < run.task.index("Puoi usare il conto demo?") and "← nuovo" in run.task
+    assert "nuovo commento" in run.task
+    pc = run.context["paperclip"]
+    assert pc["taskId"] == "task_9" and pc["doneStatus"] == "in_review" and pc["issue"]["identifier"] == "PC-12"
+    assert "paperclipWorkspace" not in pc and run.context["priority"] == "high" and "connectionInstructions" not in run.context
 
     done = runs.execute_run(session, run.id)
-    assert done.status == "succeeded" and done.callback_status == "delivered"
-    url, body, headers = posted[0]
-    assert url == run.callback_url and headers["Authorization"] == "Bearer pk_secret"
-    assert body["status"] == "succeeded" and body["result"] == "Task PC-12 completato." and body["provider"] == "edgewalker"
-    assert body["usage"] == {"inputTokens": 120, "outputTokens": 40, "cachedInputTokens": 10} and body["costUsd"] == 0.03
-    assert "errorMessage" not in body
+    assert done.status == "succeeded" and done.callback_status == "delivered", done.callback_error
+    writes = [c for c in calls if c[0] in ("POST", "PATCH")]
+    assert writes[0][:2] == ("POST", "https://paperclip.example/api/issues/task_9/checkout")
+    assert writes[0][2] == {"agentId": "ag_1", "expectedStatuses": runs.PAPERCLIP_CHECKOUT_STATUSES}
+    method, url, body, headers = writes[1]
+    assert (method, url) == ("PATCH", "https://paperclip.example/api/issues/task_9")
+    assert body["status"] == "in_review" and body["comment"].startswith("Task PC-12 completato.") and "run #" in body["comment"] and "0.7 crediti" in body["comment"]
+    assert headers["Authorization"] == "Bearer pk_secret" and headers["X-Paperclip-Run-Id"] == "run_abc"
 
-    # no api url → no callback, heartbeat without an explicit task gets a default text
-    beat2 = PaperclipHeartbeat(runId="run_2", wakeReason="heartbeat")
+    # timer heartbeat (no issue): default briefing text, nothing to report back
+    calls.clear()
+    beat2 = PaperclipHeartbeat.model_validate({"runId": "run_2", "agentId": "ag_1", "context": {"wakeReason": "scheduled"}, "paperclipApiUrl": "https://paperclip.example", "paperclipApiKey": "pk_secret"})
     run2 = runs.run_from_paperclip(session, user_id=user.id, agent_id=agent.id_agent, beat=beat2)
-    assert run2.callback_url is None and "briefing" in run2.task
+    assert run2.callback_url is None and "briefing" in run2.task and calls == []
     done2 = runs.execute_run(session, run2.id)
-    assert done2.callback_status is None and len(posted) == 1
+    assert done2.callback_status is None and calls == []
 
-    # generic callback body for API runs
+    # assignment + explicit instructions; a failed run moves the issue to blocked
     _fake_dispatch(monkeypatch, raise_exc=RuntimeError("boom"))
+    beat3 = PaperclipHeartbeat.model_validate({"runId": "run_3", "agentId": "ag_1", "context": {"taskId": "task_10", "wakeReason": "issue_assigned"}, "paperclipApiUrl": "https://paperclip.example", "paperclipApiKey": "pk_secret", "task": "Fai un backtest della strategia 3."})
+    run3 = runs.run_from_paperclip(session, user_id=user.id, agent_id=agent.id_agent, beat=beat3)
+    assert run3.task.endswith("Fai un backtest della strategia 3.") and run3.context["paperclip"]["doneStatus"] == "done"
+    calls.clear()
+    done3 = runs.execute_run(session, run3.id)
+    assert done3.status == "failed" and done3.callback_status == "delivered"
+    patch = [c for c in calls if c[0] == "PATCH"][0]
+    assert patch[2]["status"] == "blocked" and "boom" in patch[2]["comment"]
+
+    # generic callback body for API runs is untouched
     from app.schemas.agent_run import RunCreate
 
-    run3 = runs.create_run(session, user_id=user.id, agent_id=agent.id_agent, payload=RunCreate(task="x", callback_url="https://me.example/cb", callback_auth="Bearer tok"))
-    done3 = runs.execute_run(session, run3.id)
-    assert done3.status == "failed" and posted[-1][2]["Authorization"] == "Bearer tok"
-    assert posted[-1][1]["status"] == "failed" and posted[-1][1]["error"] == "boom" and posted[-1][1]["run_id"] == run3.id
+    run4 = runs.create_run(session, user_id=user.id, agent_id=agent.id_agent, payload=RunCreate(task="x", callback_url="https://me.example/cb", callback_auth="Bearer tok"))
+    done4 = runs.execute_run(session, run4.id)
+    post = [c for c in calls if c[0] == "POST" and c[1] == "https://me.example/cb"][0]
+    assert done4.status == "failed" and post[3]["Authorization"] == "Bearer tok"
+    assert post[2]["status"] == "failed" and post[2]["error"] == "boom" and post[2]["run_id"] == run4.id
 
 
 def test_a2a_task_and_agent_card(session, tenant, monkeypatch):

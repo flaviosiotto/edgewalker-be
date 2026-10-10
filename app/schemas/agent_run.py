@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 RunScope = Literal["agent", "strategy"]
 RunSource = Literal["api", "paperclip", "a2a", "mcp"]
@@ -69,11 +69,21 @@ class RunCallbackPayload(BaseModel):
     finished_at: Optional[datetime] = None
 
 
+PaperclipDoneStatus = Literal["done", "in_review", "comment"]
+
+
 class PaperclipHeartbeat(BaseModel):
-    """The body of the Paperclip ``http`` adapter (docs.paperclip.ing/reference/adapters/http).
-    Keys of ``payloadTemplate`` land at the root: ``task`` / ``instructions``
-    give the text, ``scope`` / ``strategy_id`` the EdgeWalker scope, and
-    ``paperclipApiUrl`` / ``paperclipApiKey`` where to call back."""
+    """The body sent by the Paperclip ``http`` adapter
+    (``server/src/adapters/http/execute.ts``): ``{...payloadTemplate, agentId,
+    runId, context, connectionInstructions}``. The run context (``taskId``,
+    ``issueId``, ``wakeReason`` such as ``issue_assigned`` / ``issue_commented``,
+    ``commentId``…) lives inside ``context``; the same keys are accepted at the
+    root too. Keys of ``payloadTemplate`` land at the root: ``task`` /
+    ``instructions`` give the text, ``scope`` / ``strategy_id`` the EdgeWalker
+    scope, ``paperclipApiUrl`` / ``paperclipApiKey`` where to report the
+    outcome (comment + status on the issue) and ``paperclipDoneStatus`` which
+    status to set when the run succeeds (``done`` default, ``in_review``, or
+    ``comment`` to only comment)."""
 
     runId: str
     agentId: Optional[str] = None
@@ -81,6 +91,7 @@ class PaperclipHeartbeat(BaseModel):
     taskId: Optional[str] = None
     issueId: Optional[str] = None
     wakeReason: Optional[str] = None
+    commentId: Optional[str] = None
     wakeCommentId: Optional[str] = None
     approvalId: Optional[str] = None
     approvalStatus: Optional[str] = None
@@ -92,5 +103,25 @@ class PaperclipHeartbeat(BaseModel):
     strategy_id: Optional[int] = None
     paperclipApiUrl: Optional[str] = None
     paperclipApiKey: Optional[str] = None
+    paperclipDoneStatus: Optional[PaperclipDoneStatus] = None
 
     model_config = {"extra": "allow"}
+
+    @model_validator(mode="after")
+    def _lift_context(self) -> "PaperclipHeartbeat":
+        """Paperclip nests the run context under ``context``: mirror the
+        well-known keys at the root when they are not already there."""
+        ctx = self.context or {}
+        for key in ("agentId", "companyId", "taskId", "issueId", "wakeReason", "commentId", "wakeCommentId", "approvalId", "approvalStatus"):
+            if getattr(self, key) in (None, "") and isinstance(ctx.get(key), str) and ctx.get(key):
+                setattr(self, key, ctx[key])
+        if not self.issueIds and isinstance(ctx.get("issueIds"), list):
+            self.issueIds = [i for i in ctx["issueIds"] if isinstance(i, str)]
+        if not self.commentId and self.wakeCommentId:
+            self.commentId = self.wakeCommentId
+        return self
+
+    @property
+    def issue_ref(self) -> Optional[str]:
+        """The issue this heartbeat is about (Paperclip calls it task)."""
+        return self.taskId or self.issueId or None
