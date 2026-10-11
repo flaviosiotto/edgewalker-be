@@ -301,7 +301,10 @@ def _snapshot_at_or_before(session: Session, account_id: int, at: datetime | Non
     stmt = select(AccountSnapshot).where(AccountSnapshot.account_id == account_id)
     if at is not None:
         stmt = stmt.where(AccountSnapshot.observed_at <= at)
-    stmt = stmt.order_by(AccountSnapshot.observed_at.desc(), AccountSnapshot.id.desc())  # type: ignore[union-attr]
+    # LIMIT 1 is essential: without it ``.first()`` still makes the driver
+    # fetch and the ORM hydrate every snapshot of the account (355k rows for
+    # account 1 on 11/10/2026: ~7 s and ~700 MB per call, 4 ms with the limit).
+    stmt = stmt.order_by(AccountSnapshot.observed_at.desc(), AccountSnapshot.id.desc()).limit(1)  # type: ignore[union-attr]
     return session.exec(stmt).first()
 
 
@@ -311,6 +314,7 @@ def _snapshot_at_or_after(session: Session, account_id: int, at: datetime) -> Ac
         .where(AccountSnapshot.account_id == account_id)
         .where(AccountSnapshot.observed_at >= at)
         .order_by(AccountSnapshot.observed_at.asc(), AccountSnapshot.id.asc())  # type: ignore[union-attr]
+        .limit(1)
     )
     return session.exec(stmt).first()
 
