@@ -337,3 +337,33 @@ def test_paperclip_run_skills_are_ephemeral_and_visible_to_the_turn(session, ten
         PaperclipHeartbeat.model_validate({"runId": "r", "skills": [{"name": "has space", "body": "x"}]})
     with pytest.raises(pydantic.ValidationError):
         PaperclipHeartbeat.model_validate({"runId": "r", "skills": [{"name": f"s{i}", "body": "x"} for i in range(21)]})
+
+
+
+def test_paperclip_context_is_filtered_and_rendered_as_lines(session, tenant):
+    """Paperclip sends its whole runtime context (scratch dirs, workspace
+    realization, environment…): only the who/why survives, and the agent
+    never gets a raw dump of nested objects."""
+    from app.schemas.agent_run import PaperclipHeartbeat
+    from app.services import agent_run_service as runs
+
+    user, _, _ = tenant
+    agent, _ = _agent(session, user)
+    beat = PaperclipHeartbeat.model_validate({
+        "runId": "run_ctx_1", "agentId": "ag_pc", "companyId": "co_1",
+        "context": {
+            "wakeSource": "on_demand", "triggeredBy": "board", "responsibleUserId": "u1", "wakeTriggerDetail": "manual",
+            "paperclipScratch": {"dir": "/tmp/x", "cleanupPolicy": "terminal_run"},
+            "paperclipEnvironment": {"id": "env1", "driver": "local", "workspaceRealization": {"mode": "copy"}},
+            "paperclipWorkspaces": [], "issueIds": [],
+        },
+        "skills": [{"name": "brief", "body": "# B"}],
+    })
+    run = runs.run_from_paperclip(session, user_id=user.id, agent_id=agent.id_agent, beat=beat)
+    pc = run.context["paperclip"]
+    assert "paperclipScratch" not in pc and "paperclipEnvironment" not in pc and "paperclipWorkspaces" not in pc
+    assert pc["wakeSource"] == "on_demand" and pc["triggeredBy"] == "board"
+    text = runs._task_message(run)
+    assert "{" not in text and "paperclipScratch" not in text and "# B" not in text and "skills" not in text
+    assert "- paperclip: " in text and "runId=run_ctx_1" in text and "wakeSource=on_demand" in text
+    assert "doneStatus=done" in text

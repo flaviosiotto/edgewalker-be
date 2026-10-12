@@ -210,15 +210,50 @@ def list_runs(session: Session, *, user_id: int, agent_id: Optional[int] = None,
 # ── execution ───────────────────────────────────────────────────────────────
 
 
+#: context keys never shown to the agent (served elsewhere or internal)
+_CONTEXT_HIDDEN_KEYS = {"skills"}
+_CONTEXT_LINE_MAX = 300
+
+
+def _context_value(value: Any) -> Optional[str]:
+    """One line for a context value: scalars as they are, short lists of
+    scalars, dicts reduced to their scalar children. Nested structures and
+    empty values are dropped (the agent reads prose, not dumps)."""
+    if isinstance(value, bool):
+        return "sì" if value else "no"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value.strip()[:_CONTEXT_LINE_MAX] or None
+    if isinstance(value, list):
+        items = [str(v).strip() for v in value if isinstance(v, (str, int, float)) and str(v).strip()]
+        return (", ".join(items[:10]) + (" …" if len(items) > 10 else "")) if items else None
+    if isinstance(value, dict):
+        parts = []
+        for k, v in value.items():
+            if isinstance(v, bool):
+                parts.append(f"{k}={'sì' if v else 'no'}")
+            elif isinstance(v, (int, float)) or (isinstance(v, str) and v.strip()):
+                parts.append(f"{k}={str(v).strip()[:120]}")
+        return ("; ".join(parts))[:_CONTEXT_LINE_MAX] if parts else None
+    return None
+
+
 def _task_message(run: AgentRun) -> str:
-    """The text the agent receives: the task, then the caller's context."""
+    """The text the agent receives: the task, then the caller's context, one
+    line per key (never a raw dump of nested objects)."""
     lines = [run.task.strip()]
-    ctx = {k: v for k, v in (run.context or {}).items() if v not in (None, "", [], {})}
-    if ctx:
+    rendered = []
+    for key, value in (run.context or {}).items():
+        if key in _CONTEXT_HIDDEN_KEYS:
+            continue
+        line = _context_value(value)
+        if line:
+            rendered.append(f"- {key}: {line}")
+    if rendered:
         lines.append("")
         lines.append(f"[Contesto del task #{run.id} da {run.source}" + (f", riferimento {run.external_run_id}" if run.external_run_id else "") + "]")
-        for key, value in ctx.items():
-            lines.append(f"- {key}: {value}")
+        lines.extend(rendered)
     return "\n".join(lines)
 
 
@@ -423,6 +458,11 @@ PAPERCLIP_TIMEOUT_S = 8.0
 PAPERCLIP_COMMENTS = 6
 PAPERCLIP_CHECKOUT_STATUSES = ["todo", "backlog", "blocked", "in_review", "in_progress"]
 PAPERCLIP_DEFAULT_DONE_STATUS = "done"
+#: keys of the Paperclip run context worth keeping (the rest is runtime plumbing)
+PAPERCLIP_CONTEXT_KEYS = frozenset({
+    "wakeSource", "triggeredBy", "wakeTriggerDetail", "responsibleUserId", "actorId",
+    "projectId", "routineId", "approvalId", "approvalStatus",
+})
 
 
 def _paperclip_headers(api_key: Optional[str], run_id: Optional[str]) -> dict[str, str]:
@@ -529,7 +569,9 @@ def run_from_paperclip(session: Session, *, user_id: int, agent_id: int, beat: P
             "issueId": beat.issueId, "wakeReason": beat.wakeReason, "commentId": beat.commentId, "issueIds": beat.issueIds,
             "doneStatus": beat.paperclipDoneStatus or PAPERCLIP_DEFAULT_DONE_STATUS,
             "issue": {k: issue.get(k) for k in ("id", "identifier", "title", "status", "priority", "projectId") if issue and issue.get(k) is not None} if issue else None,
-            **{k: v for k, v in beat.context.items() if k not in ("paperclipWorkspace", "connectionInstructions")},
+            # only the who/why of the wake: Paperclip also sends its scratch
+            # dirs, workspace realization, environment… (noise for the agent)
+            **{k: v for k, v in beat.context.items() if k in PAPERCLIP_CONTEXT_KEYS and v not in (None, "", [], {})},
         },
         **extra,
         # ephemeral skills of this run (served to the turn by GET /skills?run_id=)
