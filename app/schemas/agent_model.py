@@ -46,27 +46,16 @@ class SkillUpdate(BaseModel):
     body: Optional[str] = Field(default=None, min_length=1, max_length=SKILL_BODY_MAX_CHARS)
 
 
-class SkillFromPlaybook(BaseModel):
-    """Promote the playbook of a strategy (current, or the one of a backtest)
-    to a skill: an explicit action of the user (decision D10)."""
-
-    name: str = Field(max_length=64)
-    strategy_id: int
-    backtest_id: Optional[int] = None
-    description: Optional[str] = Field(default=None, max_length=1024)
-
-    @field_validator("name")
-    @classmethod
-    def _name(cls, value: str) -> str:
-        return validate_skill_name(value)
-
-
 class SkillSummary(BaseModel):
+    #: 0 for a system skill (shipped with the platform) or a run skill
     id: int
     name: str
     description: str
     version: int
+    #: user | system | paperclip (shipped with one run) | import
     origin: str
+    #: system and run skills cannot be edited or deleted
+    read_only: bool = False
     source_strategy_id: Optional[int] = None
     source_backtest_id: Optional[int] = None
     updated_at: datetime

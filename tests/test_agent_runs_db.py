@@ -319,9 +319,10 @@ def test_paperclip_run_skills_are_ephemeral_and_visible_to_the_turn(session, ten
     assert [s["name"] for s in run.context["skills"]] == ["trading-room-brief", "risk"]
     assert run.context["skills"][0]["version"] == "v7"
 
+    SYSTEM = ["backtest-review", "live-risk-review", "morning-briefing", "strategy-design"]
     rows = skills.list_skills_for_turn(session, user.id, run_id=run.id)
-    assert [(r["name"] if isinstance(r, dict) else r.name) for r in rows] == ["trading-room-brief", "risk", "cot-report"]
-    assert rows[0]["origin"] == "paperclip" and rows[0]["id"] == 0
+    assert [(r["name"] if isinstance(r, dict) else r.name) for r in rows] == ["trading-room-brief", "risk", *SYSTEM, "cot-report"]
+    assert rows[0]["origin"] == "paperclip" and rows[0]["id"] == 0 and rows[0]["read_only"] is True
     # the run's skill shadows the user's skill with the same name, for this run only
     assert skills.get_skill_for_turn(session, user.id, "risk", run_id=run.id)["body"] == "# Risk (paperclip)"
     assert skills.get_skill_for_turn(session, user.id, "risk").body == "# Risk (user)"
@@ -330,8 +331,8 @@ def test_paperclip_run_skills_are_ephemeral_and_visible_to_the_turn(session, ten
     assert names == ["trading-room-brief", "risk", "cot-report"]
     # nothing persisted
     assert {r.name for r in skills.list_skills(session, user.id)} == {"cot-report", "risk"}
-    # unknown run → just the user's skills
-    assert [r.name for r in skills.list_skills_for_turn(session, user.id, run_id=999999)] == ["cot-report", "risk"]
+    # unknown run → system + the user's skills
+    assert [(r["name"] if isinstance(r, dict) else r.name) for r in skills.list_skills_for_turn(session, user.id, run_id=999999)] == [*SYSTEM, "cot-report", "risk"]
 
     with pytest.raises(pydantic.ValidationError):
         PaperclipHeartbeat.model_validate({"runId": "r", "skills": [{"name": "has space", "body": "x"}]})

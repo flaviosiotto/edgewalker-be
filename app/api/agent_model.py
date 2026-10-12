@@ -30,7 +30,6 @@ from app.schemas.agent_model import (
     MemoryRead,
     MemoryUpdate,
     SkillCreate,
-    SkillFromPlaybook,
     SkillRead,
     SkillSummary,
     SkillUpdate,
@@ -72,15 +71,6 @@ def create_skill_endpoint(
     current_user: User = Depends(get_current_active_user),
 ):
     return agent_skill_service.create_skill(session, current_user.id, payload)
-
-
-@skills_router.post("/from-playbook", response_model=SkillRead, status_code=status.HTTP_201_CREATED)
-def skill_from_playbook_endpoint(
-    payload: SkillFromPlaybook,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
-):
-    return agent_skill_service.skill_from_playbook(session, current_user.id, payload)
 
 
 @skills_router.get("/{name}", response_model=SkillRead)

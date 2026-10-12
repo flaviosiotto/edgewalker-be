@@ -100,12 +100,9 @@ def test_agent_policy_slug_and_external_rules(session, tenant):
     update_agent(session, ext.id_agent, AgentUpdate(tool_policy={"trading": "off", "strategies": "allow"}), user.id)
 
 
-def test_skills_crud_and_from_playbook(session, tenant):
-    from app.models.agent_lesson import AgentLesson
-    from app.schemas.agent_model import SkillCreate, SkillFromPlaybook, SkillUpdate
-    from app.schemas.strategy import StrategyCreate
+def test_skills_crud_and_system_skills(session, tenant):
+    from app.schemas.agent_model import SkillCreate, SkillUpdate
     from app.services import agent_skill_service as skills
-    from app.services.strategy_service import create_strategy
 
     user, conn, acc = tenant
     row = skills.create_skill(session, user.id, SkillCreate(name="morning-routine", description="How I start", body="# Routine\n1. dashboard"))
@@ -118,27 +115,25 @@ def test_skills_crud_and_from_playbook(session, tenant):
     assert skills.render_skill_markdown(row).startswith("---\nname: morning-routine\ndescription: How I start\n---\n")
     assert [s.name for s in skills.list_skills(session, user.id, names=["morning-routine", "nope"])] == ["morning-routine"]
 
-    definition = {"strategy": {
-        "name": "pb", "symbol": "BTCUSDT", "asset": "crypto", "timeframe": "5m", "timezone": "UTC", "params": {},
-        "indicators": [], "charts": [{"id": "main", "symbol": "BTCUSDT", "asset": "crypto", "timeframe": "5m", "indicators": []}], "rules": [],
-    }}
-    strategy = create_strategy(session, StrategyCreate(name="PB", definition=definition, account_id=acc.id), user.id)
-    # agent_lessons is created by the lessons migration, not by create_all
-    AgentLesson.__table__.create(session.get_bind(), checkfirst=True)
+    # system skills: shipped with the kit, listed before the user's, read-only, name reserved
+    rows = skills.list_skills_for_turn(session, user.id)
+    names = [r["name"] if isinstance(r, dict) else r.name for r in rows]
+    assert names[:4] == ["backtest-review", "live-risk-review", "morning-briefing", "strategy-design"] and names[-1] == "morning-routine"
+    assert all(r["read_only"] and r["origin"] == "system" and r["id"] == 0 for r in rows[:4])
+    assert skills.get_skill_for_turn(session, user.id, "Morning-Briefing")["body"].startswith("# Briefing del mattino")
     with pytest.raises(HTTPException) as exc:
-        skills.skill_from_playbook(session, user.id, SkillFromPlaybook(name="pb-skill", strategy_id=strategy.id))
-    assert exc.value.status_code == 404
-    session.add(AgentLesson(strategy_id=strategy.id, user_id=user.id, lesson="Non inseguire il breakout.", context="apertura", confidence=0.7, source="backtest", scope="strategy"))
-    session.add(AgentLesson(strategy_id=strategy.id, user_id=user.id, lesson="Ipotesi: ATR basso = niente.", confidence=0.4, source="backtest", scope="strategy"))
-    session.commit()
-    skill = skills.skill_from_playbook(session, user.id, SkillFromPlaybook(name="pb-skill", strategy_id=strategy.id))
-    assert skill.origin == "playbook" and skill.source_strategy_id == strategy.id
-    assert "[validated, confidence 0.70] Non inseguire il breakout. — when: apertura" in skill.body
-    assert "[hypothesis, confidence 0.40]" in skill.body
+        skills.create_skill(session, user.id, SkillCreate(name="morning-briefing", body="mine"))
+    assert exc.value.status_code == 409
+    for action in (lambda: skills.update_skill(session, user.id, "morning-briefing", SkillUpdate(body="x")), lambda: skills.delete_skill(session, user.id, "morning-briefing")):
+        with pytest.raises(HTTPException) as exc:
+            action()
+        assert exc.value.status_code == 403
+    # the agent allowlist filters system and user skills alike
+    assert [r["name"] if isinstance(r, dict) else r.name for r in skills.list_skills_for_turn(session, user.id, names=["strategy-design", "morning-routine"])] == ["strategy-design", "morning-routine"]
 
-    skills.delete_skill(session, user.id, "pb-skill")
+    skills.delete_skill(session, user.id, "morning-routine")
     with pytest.raises(HTTPException):
-        skills.get_skill(session, user.id, "pb-skill")
+        skills.get_skill(session, user.id, "morning-routine")
 
 
 def test_memory_upsert_and_limits(session, tenant):
