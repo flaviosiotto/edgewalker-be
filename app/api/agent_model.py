@@ -57,11 +57,12 @@ action_router = APIRouter(prefix="/action-requests", tags=["Action requests"])
 @skills_router.get("", response_model=list[SkillSummary])
 def list_skills_endpoint(
     names: Optional[str] = Query(default=None, description="comma-separated allowlist"),
+    run_id: Optional[int] = Query(default=None, description="also the ephemeral skills shipped with this run (Paperclip)"),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     wanted = [n.strip() for n in names.split(",") if n.strip()] if names else None
-    return agent_skill_service.list_skills(session, current_user.id, names=wanted)
+    return agent_skill_service.list_skills_for_turn(session, current_user.id, names=wanted, run_id=run_id)
 
 
 @skills_router.post("", response_model=SkillRead, status_code=status.HTTP_201_CREATED)
@@ -85,10 +86,11 @@ def skill_from_playbook_endpoint(
 @skills_router.get("/{name}", response_model=SkillRead)
 def get_skill_endpoint(
     name: str,
+    run_id: Optional[int] = Query(default=None, description="also the ephemeral skills shipped with this run (Paperclip)"),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
-    return agent_skill_service.get_skill(session, current_user.id, name)
+    return agent_skill_service.get_skill_for_turn(session, current_user.id, name, run_id=run_id)
 
 
 @skills_router.get("/{name}/SKILL.md", response_class=Response)

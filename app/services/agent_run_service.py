@@ -532,6 +532,8 @@ def run_from_paperclip(session: Session, *, user_id: int, agent_id: int, beat: P
             **{k: v for k, v in beat.context.items() if k not in ("paperclipWorkspace", "connectionInstructions")},
         },
         **extra,
+        # ephemeral skills of this run (served to the turn by GET /skills?run_id=)
+        **({"skills": [skill.model_dump() for skill in beat.skills]} if beat.skills else {}),
     }
     payload = RunCreate(
         task=paperclip_task_text(beat, issue, comments),

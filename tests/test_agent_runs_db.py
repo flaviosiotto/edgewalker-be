@@ -290,3 +290,50 @@ def test_a2a_task_and_agent_card(session, tenant, monkeypatch):
     task = runs.a2a_task(done)
     assert task["status"]["state"] == "completed" and task["artifacts"][0]["parts"][0]["text"] == "Risposta A2A"
     assert json.dumps(task)  # JSON-safe
+
+
+def test_paperclip_run_skills_are_ephemeral_and_visible_to_the_turn(session, tenant):
+    """Skills shipped by the Paperclip adapter live in the run context and are
+    served to that run's turn by GET /skills?run_id= next to the user's own
+    skills; nothing lands in agent_skill."""
+    import pydantic
+
+    from app.schemas.agent_model import SkillCreate
+    from app.schemas.agent_run import PaperclipHeartbeat
+    from app.services import agent_run_service as runs
+    from app.services import agent_skill_service as skills
+
+    user, _, _ = tenant
+    agent, _ = _agent(session, user)
+    skills.create_skill(session, user.id, SkillCreate(name="cot-report", description="COT", body="# COT\nRead it."))
+    skills.create_skill(session, user.id, SkillCreate(name="risk", description="mine", body="# Risk (user)"))
+
+    beat = PaperclipHeartbeat.model_validate({
+        "runId": "run_sk_1", "agentId": "ag_pc", "context": {"wakeReason": "manual"},
+        "skills": [
+            {"name": "trading-room-brief", "description": "Daily brief", "body": "# Brief\nThree bullets.", "version": "v7"},
+            {"name": "risk", "body": "# Risk (paperclip)"},
+        ],
+    })
+    run = runs.run_from_paperclip(session, user_id=user.id, agent_id=agent.id_agent, beat=beat)
+    assert [s["name"] for s in run.context["skills"]] == ["trading-room-brief", "risk"]
+    assert run.context["skills"][0]["version"] == "v7"
+
+    rows = skills.list_skills_for_turn(session, user.id, run_id=run.id)
+    assert [(r["name"] if isinstance(r, dict) else r.name) for r in rows] == ["trading-room-brief", "risk", "cot-report"]
+    assert rows[0]["origin"] == "paperclip" and rows[0]["id"] == 0
+    # the run's skill shadows the user's skill with the same name, for this run only
+    assert skills.get_skill_for_turn(session, user.id, "risk", run_id=run.id)["body"] == "# Risk (paperclip)"
+    assert skills.get_skill_for_turn(session, user.id, "risk").body == "# Risk (user)"
+    # the agent allowlist still applies to the user's skills, never to the run's
+    names = [(r["name"] if isinstance(r, dict) else r.name) for r in skills.list_skills_for_turn(session, user.id, names=["cot-report"], run_id=run.id)]
+    assert names == ["trading-room-brief", "risk", "cot-report"]
+    # nothing persisted
+    assert {r.name for r in skills.list_skills(session, user.id)} == {"cot-report", "risk"}
+    # unknown run → just the user's skills
+    assert [r.name for r in skills.list_skills_for_turn(session, user.id, run_id=999999)] == ["cot-report", "risk"]
+
+    with pytest.raises(pydantic.ValidationError):
+        PaperclipHeartbeat.model_validate({"runId": "r", "skills": [{"name": "has space", "body": "x"}]})
+    with pytest.raises(pydantic.ValidationError):
+        PaperclipHeartbeat.model_validate({"runId": "r", "skills": [{"name": f"s{i}", "body": "x"} for i in range(21)]})

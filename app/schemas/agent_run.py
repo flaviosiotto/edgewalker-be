@@ -4,7 +4,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.schemas.agent_model import SKILL_BODY_MAX_CHARS
 
 RunScope = Literal["agent", "strategy"]
 RunSource = Literal["api", "paperclip", "a2a", "mcp"]
@@ -72,6 +74,29 @@ class RunCallbackPayload(BaseModel):
 PaperclipDoneStatus = Literal["done", "in_review", "comment"]
 
 
+class RunSkill(BaseModel):
+    """A skill shipped with one run (Paperclip adapter: the company skills
+    enabled for the agent, read from their SKILL.md at run time). Ephemeral:
+    lives in ``run.context["skills"]`` and is visible to that run's turn
+    only (``GET /skills?run_id=``), never copied into ``agent_skill``."""
+
+    name: str = Field(min_length=1, max_length=64)
+    description: str = Field(default="", max_length=1024)
+    body: str = Field(min_length=1, max_length=SKILL_BODY_MAX_CHARS)
+    version: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if not cleaned or any(ch.isspace() for ch in cleaned):
+            raise ValueError("skill name must be a single lowercase token")
+        return cleaned
+
+
+RUN_SKILLS_MAX = 20
+
+
 class PaperclipHeartbeat(BaseModel):
     """The body sent by the Paperclip ``http`` adapter
     (``server/src/adapters/http/execute.ts``): ``{...payloadTemplate, agentId,
@@ -104,6 +129,8 @@ class PaperclipHeartbeat(BaseModel):
     paperclipApiUrl: Optional[str] = None
     paperclipApiKey: Optional[str] = None
     paperclipDoneStatus: Optional[PaperclipDoneStatus] = None
+    #: skills enabled for the agent in Paperclip, sent with every run (≤ 20)
+    skills: list[RunSkill] = Field(default_factory=list, max_length=RUN_SKILLS_MAX)
 
     model_config = {"extra": "allow"}
 
