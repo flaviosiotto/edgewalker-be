@@ -75,8 +75,8 @@ def _fake_dispatch(monkeypatch, *, answer="Fatto: le live vanno bene.", credits=
 
     calls = []
 
-    def fake(session, *, chat_id, user_id, text, metadata=None, sender_kind="user", sender_label=None):
-        calls.append({"chat_id": chat_id, "text": text, "metadata": metadata, "sender_kind": sender_kind, "sender_label": sender_label})
+    def fake(session, *, chat_id, user_id, text, metadata=None, sender_kind="user", sender_label=None, turn_timeout_seconds=None):
+        calls.append({"chat_id": chat_id, "text": text, "metadata": metadata, "sender_kind": sender_kind, "sender_label": sender_label, "turn_timeout_seconds": turn_timeout_seconds})
         if raise_exc:
             raise raise_exc
         request_id = f"req-{len(calls)}"
@@ -154,6 +154,10 @@ def test_execute_run_copies_answer_usage_and_emits_event(session, tenant, monkey
     run = runs.create_run(session, user_id=user.id, agent_id=agent.id_agent, payload=RunCreate(task="Come stanno le live?", context={"issue": "PC-12"}, external_run_id="ext-1"))
     done = runs.execute_run(session, run.id)
     assert done.status == "succeeded" and done.result == "Fatto: le live vanno bene."
+    # the run's own deadline, not the chat's 120 s
+    from app.core.config import settings
+
+    assert calls[0]["turn_timeout_seconds"] == float(settings.AGENT_RUN_TURN_TIMEOUT_SECONDS)
     assert float(done.cost_credits) == 0.7 and done.usage["input_tokens"] == 120 and done.request_id == "req-1"
     assert calls[0]["sender_kind"] == "external_agent" and calls[0]["sender_label"] == "API · run #%d" % run.id
     assert calls[0]["text"].startswith("Come stanno le live?") and "- issue: PC-12" in calls[0]["text"]

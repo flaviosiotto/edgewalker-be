@@ -17,12 +17,12 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
 from app.core.actor import current_actor_dict
-from app.db.database import get_session, get_session_context
+from app.db.database import get_session
 from app.models.agent import Agent
 from app.models.user import User
 from app.schemas.agent_run import PaperclipHeartbeat, RunCreate, RunRead
@@ -34,16 +34,6 @@ runs_router = APIRouter(tags=["Agent runs"])
 a2a_router = APIRouter(prefix="/a2a", tags=["A2A"])
 
 
-def _execute_in_background(run_id: int) -> None:
-    with get_session_context() as session:
-        try:
-            runs.execute_run(session, run_id)
-        except Exception:  # noqa: BLE001
-            import logging
-
-            logging.getLogger(__name__).exception("run %s crashed", run_id)
-
-
 def _read(session: Session, run) -> RunRead:
     agent = session.get(Agent, run.agent_id)
     return runs.to_read(run, agent_name=agent.agent_name if agent else None)
@@ -53,14 +43,13 @@ def _read(session: Session, run) -> RunRead:
 def create_run_endpoint(
     agent_id: int,
     payload: RunCreate,
-    background: BackgroundTasks,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
     if payload.source in ("paperclip", "a2a"):
         payload.source = "api"
     run = runs.create_run(session, user_id=current_user.id, agent_id=agent_id, payload=payload, created_by=current_actor_dict())
-    background.add_task(_execute_in_background, run.id)
+    runs.submit_run(run.id)
     return _read(session, run)
 
 
@@ -99,7 +88,6 @@ def get_run_endpoint(
 def paperclip_heartbeat_endpoint(
     agent_id: int,
     beat: PaperclipHeartbeat,
-    background: BackgroundTasks,
     request: Request,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
@@ -118,7 +106,7 @@ def paperclip_heartbeat_endpoint(
     if not beat.paperclipApiKey:
         beat.paperclipApiKey = request.headers.get("x-paperclip-api-key")
     run = runs.run_from_paperclip(session, user_id=current_user.id, agent_id=agent_id, beat=beat, created_by=current_actor_dict())
-    background.add_task(_execute_in_background, run.id)
+    runs.submit_run(run.id)
     return {"status": "accepted", "executionId": str(run.id), "runId": beat.runId, "reportsTo": run.callback_url}
 
 
@@ -153,7 +141,6 @@ def _rpc_error(req_id: Any, code: int, message: str, http_status: int = 200) -> 
 async def a2a_rpc_endpoint(
     agent_id: int,
     request: Request,
-    background: BackgroundTasks,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -185,7 +172,7 @@ async def a2a_rpc_endpoint(
                 source="a2a",
             )
             run = runs.create_run(session, user_id=current_user.id, agent_id=agent_id, payload=payload, created_by=current_actor_dict())
-            background.add_task(_execute_in_background, run.id)
+            runs.submit_run(run.id)
             return {"jsonrpc": "2.0", "id": req_id, "result": runs.a2a_task(run)}
         if method == "tasks/get":
             try:

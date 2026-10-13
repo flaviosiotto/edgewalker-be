@@ -20,6 +20,7 @@ callback is configured, pushed to the caller.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -34,6 +35,7 @@ from app.models.agent_model import AgentRun
 from app.models.strategy import Strategy
 from app.schemas.agent_run import PaperclipHeartbeat, RunCreate, RunRead
 from app.schemas.chat import ChatCreate
+from app.core.config import settings
 from app.services.agent_service import get_agent, require_hosted_agent
 from app.services.webhook_service import _encrypt, _fernet, emit_event
 
@@ -297,9 +299,39 @@ def _content_text(message: dict[str, Any]) -> str:
     return str(content or "")
 
 
+_executor: ThreadPoolExecutor | None = None
+
+
+def _run_executor() -> ThreadPoolExecutor:
+    global _executor
+    if _executor is None:
+        _executor = ThreadPoolExecutor(max_workers=max(1, settings.AGENT_RUN_WORKERS), thread_name_prefix="agent-run")
+    return _executor
+
+
+def _execute_detached(run_id: int) -> AgentRun | None:
+    from app.db.database import get_session_context
+
+    with get_session_context() as session:
+        try:
+            return execute_run(session, run_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("run %s crashed", run_id)
+            return None
+
+
+def submit_run(run_id: int) -> Future[AgentRun | None]:
+    """Execute a queued run on the run thread pool, in its own DB session,
+    detached from the HTTP request that created it. Never a FastAPI
+    background task: FastAPI tears the request's dependencies down (closing
+    its DB session) only after the background tasks, so the request's
+    pooled connection would stay checked out for the whole turn."""
+    return _run_executor().submit(_execute_detached, run_id)
+
+
 def execute_run(session: Session, run_id: int) -> AgentRun:
     """Run the task as a chat turn and record the outcome. Blocking (the
-    turn takes seconds to minutes): called from a background task."""
+    turn takes seconds to minutes): called from the run thread pool."""
     from app.services.chat_service import send_chat_message
 
     run = session.get(AgentRun, run_id)
@@ -332,20 +364,29 @@ def execute_run(session: Session, run_id: int) -> AgentRun:
             metadata={"run_id": run.id, "run_source": run.source, "external_run_id": run.external_run_id},
             sender_kind="external_agent",
             sender_label=f"{label} · run #{run.id}",
+            turn_timeout_seconds=float(settings.AGENT_RUN_TURN_TIMEOUT_SECONDS),
         )
         request_id = response.request_id
+        timed_out: str | None = None
     except HTTPException as exc:
-        return _finish(session, run, agent, status_="failed", error=str(exc.detail))
+        if exc.status_code != status.HTTP_504_GATEWAY_TIMEOUT:
+            return _finish(session, run, agent, status_="failed", error=str(exc.detail))
+        # Deadline passed: the turn goes on in agent-svc. Its answer may have
+        # landed in the chat meanwhile (last look below), otherwise the run
+        # fails with a message that says where the answer will appear.
+        request_id = None
+        timed_out = str(exc.detail)
     except Exception as exc:  # noqa: BLE001
         logger.exception("run %s: dispatch failed", run.id)
         return _finish(session, run, agent, status_="failed", error=str(exc)[:1000])
     # send_chat_message closes the session before the webhook call: re-fetch.
     run = session.get(AgentRun, run_id)  # type: ignore[assignment]
     chat = session.get(Chat, chat.id)  # type: ignore[assignment]
-    run.request_id = request_id
+    if request_id:
+        run.request_id = request_id
     answer = (_answer_row(session, chat, request_id) if request_id else None) or _latest_ai_row_after(session, chat, int(last_row_id))
     if answer is None:
-        return _finish(session, run, agent, status_="failed", error="the agent produced no answer")
+        return _finish(session, run, agent, status_="failed", error=timed_out or "the agent produced no answer")
     usage = ((answer.get("response_metadata") or {}).get("edgewalker") or {}).get("turn_usage")
     usage = usage if isinstance(usage, dict) else None
     credits = usage.get("credits") if usage else None

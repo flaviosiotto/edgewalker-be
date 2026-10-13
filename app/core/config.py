@@ -17,6 +17,17 @@ class Settings(BaseSettings):
     # valore in scrittura. Va passato anche ai runner (AGENT_WEBHOOK_URL).
     # In prod: http://edgewalker-agent-svc-xpsadu:8080/webhook/edgewalker-agent
     AGENT_SVC_WEBHOOK_URL: str = "http://agent-svc:8080/webhook/edgewalker-agent"
+    # Agent runs (Paperclip / A2A / MCP / API): a run is one agent turn that can
+    # last minutes (deep reasoning + tools: 13/10 a turn took 403 s while the
+    # chat path gave up at 120 s and the run was reported failed although the
+    # agent finished and acted). Total deadline of the turn, in seconds; the
+    # Paperclip adapter waits a little longer than this (its `timeoutSec`).
+    AGENT_RUN_TURN_TIMEOUT_SECONDS: int = 900
+    # Runs execute on a dedicated bounded thread pool, never as FastAPI
+    # background tasks: those run before the request's dependencies are torn
+    # down, so the request DB session (and its pooled connection) would stay
+    # checked out for the whole turn (13/10 incident).
+    AGENT_RUN_WORKERS: int = 4
 
     # Interactive IB Gateway (TWS) launch flow. The browser is redirected to
     # the per-connection noVNC container under

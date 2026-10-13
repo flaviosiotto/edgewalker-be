@@ -4,6 +4,7 @@ import asyncio
 import codecs
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import date, datetime
@@ -36,6 +37,120 @@ logger = logging.getLogger(__name__)
 MAX_CHAT_PAGE_SIZE = 100
 DEFAULT_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=60.0)
 DEFAULT_SEND_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+# Redis channel of the live agent-turn display events of a chat session
+# (``turn_start`` / ``delta`` / ``tool_call`` / ``turn_end`` / ``turn_error``),
+# relayed to clients by ``GET /chats/{id}/events``. Runners publish their own
+# turns on it; agent runs (Paperclip, A2A, MCP) are published by ``_post_turn``.
+CHAT_STREAM_CHANNEL_PREFIX = "chat-stream:"
+
+
+class TurnRelay:
+    """Best-effort publisher of the live events of one agent turn: display
+    only, never authoritative (a failed publish must not fail the turn)."""
+
+    def __init__(self, session_id: str, request_id: str):
+        self.session_id = str(session_id)
+        self.request_id = request_id
+        self._buffer = ""
+        self.full_len = 0
+
+    def _publish(self, payload: dict[str, Any]) -> None:
+        from app.utils.redis_client import get_redis
+
+        client = get_redis()
+        if client is None:
+            return
+        try:
+            client.publish(f"{CHAT_STREAM_CHANNEL_PREFIX}{self.session_id}", json.dumps({"v": 1, "request_id": self.request_id, **payload}, default=str))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("chat-stream publish failed (non-critical): %s", exc)
+
+    def feed(self, text: str) -> None:
+        """Consume agent-svc NDJSON (``{"type": "begin"|"item"|"end", ...}``, one per line)."""
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._line(line)
+
+    def _line(self, line: str) -> None:
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            return
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(payload, dict):
+            return
+        kind = payload.get("type")
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        if kind == "begin":
+            self._publish({"type": "turn_start", "session_id": self.session_id, "source": "run", "ts": int(time.time() * 1000)})
+        elif kind == "item":
+            tool = metadata.get("tool_call")
+            if isinstance(tool, str) and tool:
+                self._publish({"type": "tool_call", "name": tool})
+            content = payload.get("content")
+            if isinstance(content, str) and content:
+                self.full_len += len(content)
+                self._publish({"type": "delta", "delta": content})
+        elif kind == "end":
+            self._publish({"type": "turn_end", "full_len": self.full_len})
+
+    def error(self, detail: str) -> None:
+        self._publish({"type": "turn_error", "detail": detail})
+
+
+class AgentTurnDeadlineExceeded(Exception):
+    """The agent turn did not finish within the caller's deadline. The turn
+    keeps running in agent-svc and its answer still lands in the chat."""
+
+    def __init__(self, seconds: float):
+        super().__init__(f"the agent turn did not finish within {seconds:.0f}s")
+        self.seconds = seconds
+
+
+def _post_turn(
+    webhook_url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    *,
+    turn_timeout_seconds: float | None,
+    relay: TurnRelay | None = None,
+) -> str:
+    """Hand the turn to agent-svc and wait for it. Without a deadline this is
+    the chat's 120 s call. With one (agent runs), the response is drained as a
+    stream under a *total* deadline: agent-svc streams the turn, and a read
+    timeout alone would only bound the silence between two chunks (the first
+    token of a deep turn can take minutes). ``relay`` republishes the streamed
+    events live (``GET /chats/{id}/events`` subscribers: the EdgeWalker chat
+    page, the Paperclip adapter's run transcript)."""
+    if turn_timeout_seconds is None:
+        with httpx.Client(timeout=DEFAULT_SEND_TIMEOUT) as client:
+            response = client.post(webhook_url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.text or ""
+    deadline = time.monotonic() + turn_timeout_seconds
+    timeout = httpx.Timeout(connect=10.0, read=turn_timeout_seconds, write=60.0, pool=60.0)
+    chunks: list[bytes] = []
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            with client.stream("POST", webhook_url, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                for chunk in response.iter_bytes():
+                    chunks.append(chunk)
+                    if relay is not None:
+                        relay.feed(decoder.decode(chunk))
+                    if time.monotonic() > deadline:
+                        raise AgentTurnDeadlineExceeded(turn_timeout_seconds)
+    except httpx.ReadTimeout:
+        raise AgentTurnDeadlineExceeded(turn_timeout_seconds)
+    except Exception as exc:
+        if relay is not None:
+            relay.error(str(exc)[:500])
+        raise
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def _json_default(value: Any) -> str:
@@ -659,7 +774,13 @@ def send_chat_message(
     metadata: dict[str, Any] | None = None,
     sender_kind: str = "user",
     sender_label: str | None = None,
+    turn_timeout_seconds: float | None = None,
 ) -> ChatSendMessageResponse:
+    """Persist the asker's message and run one agent turn (blocking).
+
+    ``turn_timeout_seconds``: total deadline of the turn for agent runs
+    (default: the chat's 120 s call). Past it a 504 is raised; the turn
+    itself is not cancelled and its answer still lands in the chat."""
     normalized_text = text.strip()
     if not normalized_text:
         raise HTTPException(
@@ -719,21 +840,22 @@ def send_chat_message(
     # strategia e il testo on demand (tool get_studio_document).
     session.close()
 
+    relay = TurnRelay(session_id, request_id) if turn_timeout_seconds is not None else None
     try:
-        with httpx.Client(timeout=DEFAULT_SEND_TIMEOUT) as client:
-            response = client.post(
-                webhook_url,
-                json=webhook_payload,
-                headers=headers,
-            )
-            response.raise_for_status()
-            _record_turn_estimate(
-                user_id=chat_user_id,
-                request_id=request_id,
-                session_id=session_id,
-                prompt_chars=len(normalized_text),
-                response_chars=len(response.text or ""),
-            )
+        response_text = _post_turn(webhook_url, webhook_payload, headers, turn_timeout_seconds=turn_timeout_seconds, relay=relay)
+        _record_turn_estimate(
+            user_id=chat_user_id,
+            request_id=request_id,
+            session_id=session_id,
+            prompt_chars=len(normalized_text),
+            response_chars=len(response_text),
+        )
+    except AgentTurnDeadlineExceeded as exc:
+        logger.warning("chat %s request %s: %s (%s)", resolved_chat_id, request_id, exc, webhook_url)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"{exc}: the agent keeps working and its answer will appear in the chat",
+        )
     except httpx.ConnectError as exc:
         logger.warning("chat %s request %s: cannot connect to %s: %s", resolved_chat_id, request_id, webhook_url, exc)
         raise HTTPException(

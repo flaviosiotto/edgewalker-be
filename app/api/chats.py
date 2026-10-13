@@ -41,10 +41,11 @@ CHAT_EVENT_HEARTBEAT_SECONDS = 15.0
 # Redis channel where runners publish streamed agent-turn chunks
 # (see strategy-runner ChatStreamPublisher). Payload types map 1:1 onto the
 # SSE events emitted to the frontend.
-CHAT_STREAM_CHANNEL_PREFIX = "chat-stream:"
+from app.services.chat_service import CHAT_STREAM_CHANNEL_PREFIX  # noqa: E402
 _AGENT_TURN_EVENT_MAP = {
     "turn_start": "agent_turn_start",
     "delta": "agent_delta",
+    "tool_call": "agent_tool_call",
     "turn_end": "agent_turn_end",
     "turn_error": "agent_turn_error",
 }
