@@ -25,7 +25,7 @@ from sqlmodel import Session, select
 
 from app.models.connection import Connection
 from app.models.live_trading import LivePosition
-from app.services.gateway_client import GatewayClient
+from app.services.gateway_client import GatewayClient, GatewayError
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,8 @@ async def _close_via_gateway(
             symbol=symbol,
             extra=extra,
         )
+    except GatewayError:
+        raise  # the broker's own reason, typed for the HTTP layer
     except Exception as exc:
         raise RuntimeError(f"Gateway position close failed: {exc}") from exc
 
@@ -228,6 +230,8 @@ async def amend_account_position_protection(
             account=str(account.account_id) if account.account_id else None,
             symbol=resolved_symbol,
         )
+    except GatewayError:
+        raise  # the broker's own reason, typed for the HTTP layer
     except Exception as exc:
         raise RuntimeError(f"Gateway position amend failed: {exc}") from exc
     return {"venue": "gateway", "connection_id": connection.id, "result": result}

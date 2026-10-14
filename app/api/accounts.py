@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from app.core.actor import current_actor_dict
+from app.services.gateway_client import GatewayRejectedError
 from app.db.database import get_session
 from app.models.user import User
 from app.schemas.connection import AccountListResponse, AccountRead
@@ -200,8 +201,13 @@ async def place_account_order_endpoint(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GatewayRejectedError as exc:
+        # The broker's own reason: a caller error, shown as is.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Never 502: the edge proxy replaces 502/504 with its own page and
+        # the reason would not reach the client.
+        raise HTTPException(status_code=424, detail=str(exc)) from exc
 
 
 @router.delete("/{account_id}/orders/{order_id}")
@@ -222,8 +228,13 @@ async def cancel_account_order_endpoint(
         return await cancel_account_order(session, account, order_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GatewayRejectedError as exc:
+        # The broker's own reason: a caller error, shown as is.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Never 502: the edge proxy replaces 502/504 with its own page and
+        # the reason would not reach the client.
+        raise HTTPException(status_code=424, detail=str(exc)) from exc
 
 
 class AccountFillsRereadRequest(BaseModel):
@@ -467,8 +478,13 @@ async def close_account_position_endpoint(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GatewayRejectedError as exc:
+        # The broker's own reason: a caller error, shown as is.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Never 502: the edge proxy replaces 502/504 with its own page and
+        # the reason would not reach the client.
+        raise HTTPException(status_code=424, detail=str(exc)) from exc
 
 
 class AccountAmendPositionRequest(BaseModel):
@@ -516,5 +532,7 @@ async def amend_account_position_endpoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ProtectionUnsupportedError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except GatewayRejectedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=424, detail=str(exc)) from exc

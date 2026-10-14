@@ -38,6 +38,67 @@ FETCH_TIMEOUT = 300.0  # Historical fetches can be slow
 GATEWAY_PREFIXES: dict[str, str] = gateway_prefixes()
 
 
+class GatewayError(RuntimeError):
+    """A command the gateway could not carry out. ``detail`` is the gateway's
+    own ``detail`` payload (string or structured), ``status_code`` its HTTP
+    status when there was a response."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, detail: Any = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail
+
+
+class GatewayRejectedError(GatewayError):
+    """The gateway, or the broker behind it, refused the command (4xx): the
+    request or the account is at fault, not the platform. The message is
+    the broker's own reason and is meant to be shown as is."""
+
+
+class GatewayUnavailableError(GatewayError):
+    """The gateway could not be reached, timed out, or failed while carrying
+    the command out (transport error or 5xx)."""
+
+
+def format_gateway_detail(detail: Any) -> str:
+    """Flatten a gateway ``detail`` into one human-readable line.
+
+    Adapters raise ``BrokerAPIError.to_detail()`` dicts (``message``, ``code``,
+    ``broker``); FastAPI validation errors are lists of ``{"msg", "loc"}``.
+    """
+    if detail is None:
+        return ""
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail.get("msg") or detail.get("detail") or "")
+        if not message:
+            return str(detail)
+        code = detail.get("code")
+        return f"{message} (code {code})" if code not in (None, "") else message
+    if isinstance(detail, list):
+        parts = [format_gateway_detail(item) for item in detail]
+        return "; ".join(part for part in parts if part)
+    return str(detail)
+
+
+def _translate_command_error(exc: httpx.HTTPError, base_url: str) -> GatewayError:
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        detail = payload.get("detail") if isinstance(payload, dict) else payload
+        message = format_gateway_detail(detail) or (response.text or "").strip()[:300] or f"HTTP {response.status_code}"
+        if response.status_code < 500:
+            return GatewayRejectedError(message, status_code=response.status_code, detail=detail)
+        return GatewayUnavailableError(
+            f"Gateway error {response.status_code}: {message}", status_code=response.status_code, detail=detail
+        )
+    return GatewayUnavailableError(f"Gateway {base_url} unreachable: {exc}")
+
+
 def gateway_url_for(connection_id: int | str, broker_type: str) -> str:
     """Build the gateway base URL for a given connection.
 
@@ -73,6 +134,17 @@ class GatewayClient:
         return self._base_url
 
     # ── Low-level helpers ─────────────────────────────────────────────────
+
+    async def _command(self, call: Any) -> dict:
+        """Run a trading command and surface the gateway's reason as a typed error.
+
+        Only the order/position commands go through here: the read paths keep
+        raising ``httpx`` errors, which their callers already handle.
+        """
+        try:
+            return await call()
+        except httpx.HTTPError as exc:
+            raise _translate_command_error(exc, self._base_url) from exc
 
     async def _get(self, path: str, params: dict | None = None, timeout: float | None = None) -> dict:
         async with httpx.AsyncClient(
@@ -305,14 +377,14 @@ class GatewayClient:
         ):
             if value:
                 payload[key] = value
-        return await self._post("/orders", json=payload)
+        return await self._command(lambda: self._post("/orders", json=payload))
 
     async def cancel_order(self, order_id: str | int, *, symbol: str | None = None) -> dict:
         """Cancel a working order by its broker order id."""
         path = f"/orders/{quote(str(order_id), safe='')}"
         if symbol:
             path = f"{path}?symbol={quote(symbol, safe='')}"
-        return await self._delete(path)
+        return await self._command(lambda: self._delete(path))
 
     async def close_position(
         self,
@@ -331,7 +403,7 @@ class GatewayClient:
             payload["symbol"] = symbol
         if extra:
             payload["extra"] = extra
-        return await self._post(f"/positions/{position_id}/close", json=payload)
+        return await self._command(lambda: self._post(f"/positions/{position_id}/close", json=payload))
 
     async def amend_position_protection(
         self,
@@ -357,7 +429,7 @@ class GatewayClient:
             payload["account"] = account
         if symbol:
             payload["symbol"] = symbol
-        return await self._patch(f"/positions/{position_id}", json=payload)
+        return await self._command(lambda: self._patch(f"/positions/{position_id}", json=payload))
 
     async def reread_positions(
         self,

@@ -34,6 +34,7 @@ from app.models.agent_model import AgentActionRequest
 from app.models.strategy import StrategyLive
 from app.schemas.agent_model import ActionRequestCreate, ActionRequestRead
 from app.services.agent_service import get_agent, require_hosted_agent
+from app.services.gateway_client import GatewayRejectedError
 from app.services.webhook_service import emit_event
 
 logger = logging.getLogger(__name__)
@@ -438,8 +439,10 @@ async def _execute(session: Session, row: AgentActionRequest, agent: Agent | Non
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"No executor for {row.tool_name}")
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except GatewayRejectedError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_424_FAILED_DEPENDENCY, detail=str(exc)) from exc
     finally:
         reset_current_actor(token)
     encoded = jsonable_encoder(result)

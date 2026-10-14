@@ -24,7 +24,7 @@ from sqlmodel import Session, select
 from app.models.connection import Connection
 from app.models.live_trading import LiveOrder
 from app.models.strategy import StrategyLive
-from app.services.gateway_client import GatewayClient
+from app.services.gateway_client import GatewayClient, GatewayError
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +131,8 @@ async def place_account_order(
             order_ref=order_ref,
             extra=command_extra,
         )
+    except GatewayError:
+        raise  # the broker's own reason, typed for the HTTP layer
     except Exception as exc:
         raise RuntimeError(f"Gateway order placement failed: {exc}") from exc
     return {
@@ -183,6 +185,8 @@ async def cancel_account_order(
     )
     try:
         result = await client.cancel_order(broker_order_id, symbol=symbol)
+    except GatewayError:
+        raise  # the broker's own reason, typed for the HTTP layer
     except Exception as exc:
         raise RuntimeError(f"Gateway order cancel failed: {exc}") from exc
     return {"venue": "gateway", "connection_id": connection.id, "result": result}
