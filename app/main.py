@@ -38,6 +38,7 @@ from app.api.brokers import router as brokers_router
 from app.api.tws_launch import router as tws_launch_router
 from app.api.pats import router as pats_router
 from app.api.webhooks import router as webhooks_router
+from app.api.user_events import router as user_events_router
 from app.api.agent_model import action_router, agents_ext_router, skills_router
 from app.api.agent_runs import a2a_router, runs_router
 from app.services.agent_action_service import sweeper_loop as action_sweeper_loop
@@ -251,6 +252,7 @@ app.include_router(connections_router, dependencies=[Depends(get_current_active_
 app.include_router(brokers_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(pats_router)
 app.include_router(webhooks_router)
+app.include_router(user_events_router)
 app.include_router(skills_router)
 app.include_router(agents_ext_router)
 app.include_router(action_router)

@@ -207,7 +207,7 @@ async def connection_events_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    """SSE stream of ``connections_changed`` events for the current user.
+    """SSE stream of ``connections_changed`` and ``user_event`` events for the current user.
 
     Relays the Redis channel ``connection-events:{user_id}`` published by the
     ORM hooks in ``connection_events``; degrades to heartbeat-only when Redis
@@ -254,9 +254,13 @@ async def connection_events_endpoint(
                     payload = json.loads(message.get("data") or "")
                 except (TypeError, ValueError):
                     continue
-                if payload.get("type") != "connections_changed":
+                # ``user_event`` (migr. 070): a task outcome landed in user_event;
+                # the client refetches GET /events. Same channel, so the FE
+                # holds one stream per session.
+                kind = payload.get("type")
+                if kind not in ("connections_changed", "user_event"):
                     continue
-                yield f"event: connections_changed\ndata: {json.dumps(payload)}\n\n"
+                yield f"event: {kind}\ndata: {json.dumps(payload)}\n\n"
         finally:
             if pubsub is not None:
                 await close_pubsub(pubsub)

@@ -24,6 +24,7 @@ import httpx
 from sqlalchemy import text
 from sqlmodel import Session
 
+from app.services import user_events
 from app.db.database import engine, get_session_context
 from app.models.webhook import WebhookDelivery, WebhookSubscription
 from app.services import webhook_service
@@ -156,11 +157,22 @@ async def requeue_stuck(max_age_s: float = 10 * WEBHOOK_TIMEOUT_S) -> int:
     return await asyncio.to_thread(_run)
 
 
+async def purge_user_events() -> int:
+    """Retention of the Activity page rows (migr. 070): piggybacks on this
+    loop so there is no second sweeper to start and stop."""
+    def _run() -> int:
+        with get_session_context() as session:
+            return user_events.purge_old(session)
+
+    return await asyncio.to_thread(_run)
+
+
 async def dispatcher_loop(stop: asyncio.Event) -> None:
     """The lifespan task. Never raises: a bad tick is logged and retried."""
     logger.info("webhook dispatcher started (tick %.0fs, batch %s)", TICK_SECONDS, BATCH_SIZE)
     async with httpx.AsyncClient(timeout=httpx.Timeout(WEBHOOK_TIMEOUT_S, connect=5.0), follow_redirects=False) as client:
         last_requeue = 0.0
+        last_purge = 0.0
         while not stop.is_set():
             try:
                 if time.monotonic() - last_requeue > 60:
@@ -168,6 +180,11 @@ async def dispatcher_loop(stop: asyncio.Event) -> None:
                     if stuck:
                         logger.warning("webhook dispatcher: requeued %s stuck deliveries", stuck)
                     last_requeue = time.monotonic()
+                if time.monotonic() - last_purge > 3600:
+                    purged = await purge_user_events()
+                    if purged:
+                        logger.info("user_event retention: purged %s rows older than %s days", purged, user_events.RETENTION_DAYS)
+                    last_purge = time.monotonic()
                 claimed = await run_once(client)
                 if claimed >= BATCH_SIZE:
                     continue  # more may be due: no sleep

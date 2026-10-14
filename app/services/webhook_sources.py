@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 import psycopg2
 import psycopg2.extensions
+from sqlalchemy import text
 from sqlmodel import Session
 
 from app.core.config import settings
@@ -34,6 +35,7 @@ from app.models.agent_turn import AgentTurn
 from app.models.connection import Account, Connection
 from app.models.live_trading import LiveTrade
 from app.models.strategy import BacktestResult, LiveAlert, Strategy, StrategyLive
+from app.services import user_events
 from app.services.webhook_service import emit_event
 
 logger = logging.getLogger(__name__)
@@ -71,14 +73,31 @@ def _links(**paths: str) -> dict[str, str]:
 # ── handlers ───────────────────────────────────────────────────────────────
 
 
-def on_strategy_live(session: Session, live_id: int) -> int:
+def on_strategy_live(session: Session, live_id: int, old_status: Optional[str] = None) -> int:
     live = session.get(StrategyLive, live_id)
-    if live is None or live.status not in _LIVE_STATUSES_OF_INTEREST:
+    if live is None:
         return 0
     strategy = _strategy_of_live(session, live)
     if strategy is None:
         return 0
     stamp = _aware(live.updated_at) if getattr(live, "updated_at", None) else datetime.now(timezone.utc)
+    minute = (stamp or datetime.now(timezone.utc)).strftime('%Y%m%d%H%M')
+    outcome = user_events.classify("strategy_live", old_status, live.status)
+    if outcome is not None:
+        user_events.record(
+            session,
+            user_id=strategy.user_id,
+            event_type=outcome,
+            entity_id=live.id,
+            entity_name=strategy.name,
+            message=live.error_message if outcome is user_events.UserEventType.LIVE_FAILED else None,
+            data={"live_id": live.id, "strategy_id": strategy.id, "symbol": live.symbol, "timeframe": live.timeframe,
+                  "status": live.status, "previous_status": old_status},
+            links={"ui": f"/live/instances/{live.id}"},
+            dedupe_key=f"live:{live.id}:{outcome.value}:{minute}",
+        )
+    if live.status not in _LIVE_STATUSES_OF_INTEREST:
+        return 0
     rows = emit_event(
         session,
         user_id=strategy.user_id,
@@ -88,7 +107,7 @@ def on_strategy_live(session: Session, live_id: int) -> int:
             "strategy_id": strategy.id,
             "strategy_name": strategy.name,
             "status": live.status,
-            "previous_status": None,
+            "previous_status": old_status,
             "symbol": live.symbol,
             "timeframe": live.timeframe,
             "account_id": live.account_id,
@@ -98,18 +117,36 @@ def on_strategy_live(session: Session, live_id: int) -> int:
         },
         links=_links(live=f"/strategies/{strategy.id}?live={live.id}"),
         # one event per (live, status, minute): a flapping status does not spam
-        dedupe_key=f"live:{live.id}:{live.status}:{(stamp or datetime.now(timezone.utc)).strftime('%Y%m%d%H%M')}",
+        dedupe_key=f"live:{live.id}:{live.status}:{minute}",
         commit=True,
     )
     return len(rows)
 
 
-def on_strategy_backtest(session: Session, backtest_id: int) -> int:
+def on_strategy_backtest(session: Session, backtest_id: int, old_status: Optional[str] = None) -> int:
     bt = session.get(BacktestResult, backtest_id)
-    if bt is None or bt.status not in {"completed", "failed"}:
+    if bt is None:
         return 0
     strategy = session.get(Strategy, bt.strategy_id)
     if strategy is None:
+        return 0
+    outcome = user_events.classify("strategy_backtests", old_status, bt.status)
+    if outcome is not None:
+        user_events.record(
+            session,
+            user_id=strategy.user_id,
+            event_type=outcome,
+            entity_id=bt.id,
+            entity_name=strategy.name,
+            message=bt.error_message if outcome is user_events.UserEventType.BACKTEST_FAILED else None,
+            details=getattr(bt, "runner_log_tail", None) if outcome is user_events.UserEventType.BACKTEST_FAILED else None,
+            data={"backtest_id": bt.id, "strategy_id": strategy.id, "symbol": bt.symbol, "timeframe": bt.timeframe,
+                  "start_date": bt.start_date, "end_date": bt.end_date, "status": bt.status,
+                  "return_pct": bt.return_pct, "max_drawdown_pct": bt.max_drawdown_pct},
+            links={"ui": f"/strategies/{strategy.id}/backtests/{bt.id}"},
+            dedupe_key=f"backtest:{bt.id}:{outcome.value}",
+        )
+    if bt.status not in {"completed", "failed"}:
         return 0
     if bt.status == "completed":
         metrics = bt.metrics if isinstance(bt.metrics, dict) else {}
@@ -236,11 +273,27 @@ def on_trade(session: Session, trade_id: int) -> int:
     return len(rows)
 
 
-def on_connection(session: Session, connection_id: int) -> int:
+def on_connection(session: Session, connection_id: int, old_status: Optional[str] = None) -> int:
     conn = session.get(Connection, connection_id)
-    if conn is None or str(conn.status or "").lower() not in _CONNECTION_ALERT_STATUSES:
+    if conn is None:
         return 0
     stamp = _aware(conn.updated_at) or datetime.now(timezone.utc)
+    outcome = user_events.classify("connections", old_status, conn.status)
+    if outcome is not None:
+        user_events.record(
+            session,
+            user_id=conn.user_id,
+            event_type=outcome,
+            entity_id=conn.id,
+            entity_name=conn.name,
+            message=None if outcome is user_events.UserEventType.CONNECTION_CONNECTED else conn.status_message,
+            data={"connection_id": conn.id, "broker_type": conn.broker_type, "status": conn.status,
+                  "previous_status": old_status},
+            links={"ui": "/settings?tab=connections"},
+            dedupe_key=f"connection:{conn.id}:{outcome.value}:{stamp.strftime('%Y%m%d%H%M')}",
+        )
+    if str(conn.status or "").lower() not in _CONNECTION_ALERT_STATUSES:
+        return 0
     rows = emit_event(
         session,
         user_id=conn.user_id,
@@ -298,6 +351,40 @@ def on_agent_turn(session: Session, turn_id: str) -> int:
     return len(rows)
 
 
+def on_studio_run(session: Session, run_id: int, old_status: Optional[str] = None) -> int:
+    """studio_run is written by studio-svc (same database, no backend model):
+    read it raw. Outcome only, no webhook event (not in the 067 catalogue)."""
+    row = session.execute(
+        text(
+            "SELECT r.id, r.status, r.error, r.trigger_id, r.queued_at, r.started_at, r.finished_at, "
+            "s.id AS studio_id, s.name AS studio_name, s.user_id, t.type AS trigger_type "
+            "FROM studio_run r JOIN studio s ON s.id = r.studio_id "
+            "LEFT JOIN studio_trigger t ON t.id = r.trigger_id WHERE r.id = :id"
+        ),
+        {"id": run_id},
+    ).mappings().first()
+    if row is None:
+        return 0
+    outcome = user_events.classify("studio_run", old_status, row["status"])
+    if outcome is None:
+        return 0
+    user_events.record(
+        session,
+        user_id=int(row["user_id"]),
+        event_type=outcome,
+        entity_id=int(row["id"]),
+        entity_name=row["studio_name"],
+        message=row["error"] if outcome is user_events.UserEventType.STUDIO_RUN_FAILED else None,
+        data={"run_id": row["id"], "studio_id": row["studio_id"], "status": row["status"],
+              "origin": "trigger" if row["trigger_id"] is not None else "manual",
+              "trigger_type": row["trigger_type"], "queued_at": row["queued_at"],
+              "started_at": row["started_at"], "finished_at": row["finished_at"]},
+        links={"ui": f"/studi/{row['studio_id']}?tab=runs"},
+        dedupe_key=f"studio_run:{row['id']}:{outcome.value}",
+    )
+    return 0
+
+
 _HANDLERS = {
     "strategy_live": on_strategy_live,
     "strategy_backtests": on_strategy_backtest,
@@ -305,7 +392,11 @@ _HANDLERS = {
     "trades": on_trade,
     "connections": on_connection,
     "agent_turn": on_agent_turn,
+    "studio_run": on_studio_run,
 }
+
+#: handlers that take the previous status (migr. 070 payload)
+_WITH_OLD_STATUS = {"strategy_live", "strategy_backtests", "connections", "studio_run"}
 
 
 def handle_notification(payload: dict[str, Any]) -> int:
@@ -318,6 +409,8 @@ def handle_notification(payload: dict[str, Any]) -> int:
         return 0
     try:
         with get_session_context() as session:
+            if str(table) in _WITH_OLD_STATUS:
+                return int(handler(session, row_id, payload.get("old_status")))
             return int(handler(session, row_id))
     except Exception:  # noqa: BLE001
         logger.exception("webhook source handler failed: table=%s id=%s", table, row_id)

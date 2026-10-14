@@ -321,6 +321,26 @@ def _mark_live_error(session: Session, live_id: int, message: str) -> None:
     session.commit()
 
 
+def _mark_latest_starting_live_error(session: Session, strategy_id: int, user_id: int, message: str) -> None:
+    """After a failed start: the newest `starting` row of the strategy gets the
+    cause. Best effort: the session may be in a failed state."""
+    try:
+        session.rollback()
+        sl = session.exec(
+            select(StrategyLive)
+            .join(Strategy, Strategy.id == StrategyLive.strategy_id)
+            .where(StrategyLive.strategy_id == strategy_id, Strategy.user_id == user_id,
+                   StrategyLive.status == LiveStatus.STARTING.value,
+                   # the row of THIS request, not an older one left behind
+                   StrategyLive.created_at >= datetime.now(timezone.utc) - timedelta(minutes=15))
+            .order_by(StrategyLive.id.desc())
+        ).first()
+        if sl is not None and sl.id is not None:
+            _mark_live_error(session, sl.id, message[:2000])
+    except Exception:  # noqa: BLE001
+        logger.warning("could not persist the start failure of strategy %s", strategy_id, exc_info=True)
+
+
 def _parse_account_ids(account_ids: str | None) -> list[int] | None:
     if account_ids is None:
         return None
@@ -784,6 +804,10 @@ async def create_live_instance(
         raise
     except Exception as exc:
         logger.exception("Failed to create live instance for strategy %s", payload.strategy_id)
+        # The row was created as `starting` before the broker snapshot and the
+        # runner spawn: without this the cause lives only in the HTTP detail
+        # and the monitor overwrites it 120 s later with a generic message.
+        _mark_latest_starting_live_error(session, payload.strategy_id, current_user.id, str(exc))
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
     return LiveStrategyStartResponse(
