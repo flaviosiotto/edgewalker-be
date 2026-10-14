@@ -497,8 +497,8 @@ def _ctrader_env(config: dict[str, Any]) -> dict[str, str]:
 def _okx_env(config: dict[str, Any]) -> dict[str, str]:
     """Build env vars for a gateway OKX container (see gateway/app/broker/okx/settings.py)."""
     market_type = str(config.get("market_type", "swap") or "swap").strip().lower()
-    if market_type not in {"spot", "swap"}:
-        raise ValueError("OKX market_type must be 'spot' or 'swap'")
+    if market_type not in {"spot", "swap", "xperp"}:
+        raise ValueError("OKX market_type must be 'spot', 'swap' or 'xperp'")
     region = str(config.get("region", "global") or "global").strip().lower()
     if region not in {"global", "eea", "us"}:
         raise ValueError("OKX region must be 'global', 'eea' or 'us'")
