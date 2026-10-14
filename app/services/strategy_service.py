@@ -1722,6 +1722,7 @@ def trigger_rule_agent(
             "request_id": request_id,
             "message_type": "rule_trigger",
             "reasoning": rule_context.get("reasoning") or None,
+            "agent_tools": list(rule_context["tools"]) if isinstance(rule_context.get("tools"), list) else None,
             "requested_action": "rule_trigger",
             "agent_id": agent_id,
             "agent": build_agent_persona_block(agent),
