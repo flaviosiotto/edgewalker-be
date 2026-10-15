@@ -139,6 +139,36 @@ def strategy_live_session_count(session: Session, strategy_id: int) -> int:
     return len(session.exec(select(StrategyLive.id).where(StrategyLive.strategy_id == strategy_id)).all())
 
 
+def list_strategy_trades(
+    session: Session,
+    *,
+    strategy_id: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 5000,
+) -> list[LiveTrade]:
+    """Ledger rows of every live session of a strategy, oldest exit first.
+
+    Same population as ``compute_strategy_performance``: the Performance tab
+    of the workspace derives the trade analysis (win/loss profile, entry
+    hour/day, duration, direction) from these rows client-side, the way the
+    backtest tab does from its own trades.
+    """
+    live_ids = [
+        row for row in session.exec(select(StrategyLive.id).where(StrategyLive.strategy_id == strategy_id)).all()
+        if row is not None
+    ]
+    if not live_ids:
+        return []
+    stmt = select(LiveTrade).where(LiveTrade.strategy_live_id.in_(live_ids))  # type: ignore[union-attr]
+    if start is not None:
+        stmt = stmt.where(LiveTrade.exit_time >= start)
+    if end is not None:
+        stmt = stmt.where(LiveTrade.exit_time < end)
+    stmt = stmt.order_by(LiveTrade.exit_time.asc(), LiveTrade.id.asc()).limit(limit)  # type: ignore[union-attr]
+    return list(session.exec(stmt).all())
+
+
 # ── Aggregation ───────────────────────────────────────────────────────
 
 

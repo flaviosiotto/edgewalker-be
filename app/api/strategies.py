@@ -31,8 +31,9 @@ from app.schemas.strategy import (
 )
 from app.schemas.chat import ChatCreate, ChatRead
 from app.services.live_summary_service import build_live_summary
-from app.services.performance_service import compute_strategy_performance, strategy_live_session_count
+from app.services.performance_service import compute_strategy_performance, list_strategy_trades, strategy_live_session_count
 from app.schemas.performance import PerformanceStats
+from app.schemas.live_trading import LiveTradeRead
 from app.services.strategy_service import (
     copy_strategy,
     create_strategy,
@@ -144,6 +145,25 @@ def get_strategy_performance_endpoint(
     if strategy is None:
         raise HTTPException(status_code=404, detail="Strategy not found")
     return compute_strategy_performance(session, strategy_id=strategy_id, start=start, end=end)
+
+
+@router.get("/{strategy_id}/trades", response_model=list[LiveTradeRead])
+def list_strategy_trades_endpoint(
+    strategy_id: int,
+    start: datetime | None = Query(None, description="Window start (default: whole history)"),
+    end: datetime | None = Query(None, description="Window end, exclusive"),
+    limit: int = Query(default=5000, ge=1, le=20000),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Closed trades (ledger rows) of every live session of the strategy,
+    oldest exit first: the rows behind ``/performance``, for the trade
+    analysis of the workspace Performance tab."""
+    strategy = get_strategy(session, strategy_id, current_user.id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    trades = list_strategy_trades(session, strategy_id=strategy_id, start=start, end=end, limit=limit)
+    return [LiveTradeRead.model_validate(trade) for trade in trades]
 
 
 @router.post("/", response_model=StrategyRead)
