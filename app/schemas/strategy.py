@@ -125,8 +125,16 @@ class StrategyRead(BaseModel):
     # UI layout persistence
     layout_config: Optional[dict[str, Any]] = None
 
+    # Starred by the owner (migr. 071): header dropdown + pinned section.
+    is_favorite: bool = False
+
     class Config:
         from_attributes = True
+
+
+class StrategyFavoriteUpdate(BaseModel):
+    """Body of ``PUT /strategies/{id}/favorite``: star or unstar."""
+    is_favorite: bool
 
 
 class StrategyUpdate(BaseModel):

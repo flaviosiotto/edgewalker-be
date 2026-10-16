@@ -159,6 +159,14 @@ class Strategy(SQLModel, table=True):
         sa_column=Column(JSONB, nullable=True),
     )
 
+    # Starred by the owner (migr. 071): the header dropdown lists only the
+    # favourites and the Strategies page pins them above the account groups.
+    # A UI preference: toggling it does not bump updated_at/updated_by.
+    is_favorite: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
+
     manager_agent: Optional["Agent"] = Relationship(
         sa_relationship=relationship(
             "Agent",

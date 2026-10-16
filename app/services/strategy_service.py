@@ -1256,6 +1256,27 @@ def update_strategy_layout(
     return strategy
 
 
+def set_strategy_favorite(
+    session: Session,
+    strategy_id: int,
+    is_favorite: bool,
+    user_id: int | None = None,
+) -> Strategy:
+    """Star/unstar a strategy (migr. 071).
+
+    A UI preference, not an edit: ``updated_at``/``updated_by`` are left
+    alone so the "last changed" stamp keeps meaning a change to the strategy.
+    Idempotent.
+    """
+    strategy = get_strategy(session, strategy_id, user_id)
+    if strategy.is_favorite != is_favorite:
+        strategy.is_favorite = is_favorite
+        session.add(strategy)
+        session.commit()
+        session.refresh(strategy)
+    return strategy
+
+
 def _definition_with_chart_drawings(definition: Any, chart_id: str, drawings: list[dict[str, Any]]) -> dict[str, Any]:
     """Return a copy of *definition* with ``strategy.charts[chart_id].drawings`` replaced.
 

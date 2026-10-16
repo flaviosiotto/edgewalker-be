@@ -11,6 +11,7 @@ from sqlmodel import Session
 from app.db.database import get_session
 from app.models.user import User
 from app.schemas.strategy import (
+    StrategyFavoriteUpdate,
     StrategyPerformanceSummary,
     StrategyBulkCopyItem,
     StrategyBulkCopyRequest,
@@ -35,6 +36,7 @@ from app.services.performance_service import compute_strategy_performance, list_
 from app.schemas.performance import PerformanceStats
 from app.schemas.live_trading import LiveTradeRead
 from app.services.strategy_service import (
+    set_strategy_favorite,
     copy_strategy,
     create_strategy,
     delete_strategy,
@@ -409,6 +411,21 @@ def delete_strategy_endpoint(
 ):
     delete_strategy(session, strategy_id, current_user.id)
     return {"status": "ok"}
+
+
+@router.put("/{strategy_id}/favorite", response_model=StrategyRead)
+def set_strategy_favorite_endpoint(
+    strategy_id: int,
+    payload: StrategyFavoriteUpdate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Star or unstar a strategy (header dropdown + pinned section).
+
+    A UI preference: no updated_at bump, no ``strategy_updated`` event.
+    """
+    strategy = set_strategy_favorite(session, strategy_id, payload.is_favorite, current_user.id)
+    return _serialize_strategy_with_live(session, strategy)
 
 
 @router.patch("/{strategy_id}/layout", response_model=StrategyRead)
