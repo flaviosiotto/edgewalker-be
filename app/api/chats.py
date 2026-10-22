@@ -16,7 +16,9 @@ from app.schemas.chat import (
     ChatSendMessageRequest,
     ChatSendMessageResponse,
 )
+from app.schemas.chat import ChatRead
 from app.services.chat_realtime import subscribe, unsubscribe
+from app.services.studio_chat_service import get_or_create_studio_chat
 from app.services.chat_service import (
     ASKER_KINDS,
     get_chat_session_id,
@@ -57,6 +59,18 @@ router = APIRouter(prefix="/chats", tags=["chats"])
 # rejects runner-delegated tokens before any endpoint dependency runs, so an
 # endpoint declared there can never be reached by the strategy-runner.
 runner_router = APIRouter(prefix="/chats", tags=["chats"])
+
+
+@router.get("/studio/{studio_id}", response_model=ChatRead)
+def get_studio_chat_endpoint(
+    studio_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The chat of a Studio (created on first use with the Studio's agent).
+    Under /chats and not /studios: in production /studios is routed to
+    studio-svc. 409 when the Studio has no usable agent."""
+    return get_or_create_studio_chat(session, studio_id, current_user.id)
 
 
 @router.get("/{chat_id}/messages", response_model=ChatHistoryPage)

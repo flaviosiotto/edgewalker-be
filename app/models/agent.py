@@ -181,6 +181,19 @@ class Chat(SQLModel, table=True):
         description="FK alla sessione live proprietaria (chat live per-sessione)",
     )
 
+    # Chat di uno Studio (migr. 072): l'agente dello Studio lavora sul suo
+    # notebook. La tabella `studio` e' di studio-svc (stesso DB).
+    studio_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("studio.id", ondelete="CASCADE"),
+            nullable=True,
+            index=True,
+        ),
+        description="FK allo Studio (chat dello Studio)",
+    )
+
     nome: str = Field(max_length=255, description="Nome della chat")
     descrizione: Optional[str] = Field(
         default=None,
@@ -195,6 +208,7 @@ class Chat(SQLModel, table=True):
         GENERIC = "generic"
         LIVE = "live"
         BACKTEST = "backtest"
+        STUDIO = "studio"
 
     chat_type: "Chat.ChatType" = Field(
         sa_column=Column(
@@ -202,7 +216,7 @@ class Chat(SQLModel, table=True):
             nullable=False,
             server_default="user",
         ),
-        description="Tipo chat: user|system|strategy|generic|live|backtest",
+        description="Tipo chat: user|system|strategy|generic|live|backtest|studio",
     )
     created_at: datetime = Field(default_factory=datetime.now, description="Timestamp di creazione")
 

@@ -22,6 +22,7 @@ class ChatRead(BaseModel):
     agent_webhook_url: Optional[str] = None
     user_id: Optional[int]
     strategy_id: Optional[int]
+    studio_id: Optional[int] = None
     nome: str
     descrizione: Optional[str]
     chat_type: Chat.ChatType
