@@ -21,6 +21,7 @@ from app.schemas.lab import (
     LabLaunchRequest,
     LabThemeRequest,
     LabWorkspaceFile,
+    LabWorkspaceFileWrite,
 )
 from app.utils.auth_utils import (
     AuthPrincipal,
@@ -80,6 +81,27 @@ def _hub_auth_headers() -> dict[str, str]:
     return {"Authorization": f"token {settings.LAB_HUB_API_TOKEN}"}
 
 
+def _ui_only(principal: AuthPrincipal) -> None:
+    if principal.claims.get("purpose") != "ui_auth":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="UI sessions only")
+
+
+def _check_path(path: str) -> None:
+    if not path or path.startswith("/") or ".." in path or "?" in path or "#" in path:
+        raise HTTPException(status_code=422, detail="path must be a plain relative path")
+
+
+def _contents_url(uid: int, path: str) -> str:
+    return f"{_user_server_base(uid)}/api/contents/{path}"
+
+
+def _lab_unreachable(exc: httpx.HTTPError) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Lab session unreachable: {exc}")
+
+
+_NOT_RUNNING = HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lab session not running")
+
+
 @router.get("/workspace-file", response_model=LabWorkspaceFile)
 async def read_workspace_file(
     path: str,
@@ -87,37 +109,84 @@ async def read_workspace_file(
 ):
     """Read a file from the user's running Lab workspace (raw text).
 
-    Used by "Esegui ora" to snapshot the notebook being edited into a studio
-    version before running. 409 when the Lab session is not running.
+    The page snapshots the notebook being edited into a studio version
+    (Save version, Run now, leaving edit mode). 409 when the Lab session is
+    not running.
     """
-    if principal.claims.get("purpose") != "ui_auth":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="UI sessions only")
-    if path.startswith("/") or ".." in path or "?" in path or "#" in path:
-        raise HTTPException(status_code=422, detail="path must be a plain relative path")
+    _ui_only(principal)
+    _check_path(path)
     _require_hub_token()
-    url = f"{_user_server_base(principal.user.id)}/api/contents/{path}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                url,
+                _contents_url(principal.user.id, path),
                 params={"content": "1", "type": "file", "format": "text"},
                 headers=_hub_auth_headers(),
             )
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail=f"Lab session unreachable: {exc}") from None
+        raise _lab_unreachable(exc) from None
     if response.status_code == 404:
         raise HTTPException(status_code=404, detail="File not found in the Lab workspace")
     if response.status_code != 200:
         # Server spento: l'hub risponde con la pagina 424/503, non col file.
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail="Lab session not running")
+        raise _NOT_RUNNING
     data = response.json()
     return LabWorkspaceFile(
         path=path,
         content=data.get("content") or "",
         last_modified=data.get("last_modified"),
     )
+
+
+@router.put("/workspace-file", response_model=LabWorkspaceFile)
+async def write_workspace_file(
+    payload: LabWorkspaceFileWrite,
+    principal: AuthPrincipal = Depends(get_current_active_principal),
+):
+    """Write a text file into the user's running Lab workspace.
+
+    The studio versions (studio-svc) are the truth and the workspace follows:
+    entering edit mode the page writes the current version when it is newer
+    than the file (a version saved by an upload, by MCP or by an agent while
+    the Lab was off). 409 when the Lab session is not running.
+    """
+    _ui_only(principal)
+    _check_path(payload.path)
+    _require_hub_token()
+    body = {"type": "file", "format": "text", "content": payload.content}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.put(
+                _contents_url(principal.user.id, payload.path), json=body, headers=_hub_auth_headers(),
+            )
+    except httpx.HTTPError as exc:
+        raise _lab_unreachable(exc) from None
+    if response.status_code not in (200, 201):
+        raise _NOT_RUNNING
+    data = response.json()
+    return LabWorkspaceFile(path=payload.path, content=payload.content, last_modified=data.get("last_modified"))
+
+
+@router.delete("/workspace-file", status_code=204)
+async def delete_workspace_file(
+    path: str,
+    principal: AuthPrincipal = Depends(get_current_active_principal),
+):
+    """Remove a file from the user's running Lab workspace (deleted Studio).
+
+    Best-effort by design: 204 also when the file is already gone; 409 when
+    the session is not running (the spawn hook removes orphans anyway).
+    """
+    _ui_only(principal)
+    _check_path(path)
+    _require_hub_token()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.delete(_contents_url(principal.user.id, path), headers=_hub_auth_headers())
+    except httpx.HTTPError as exc:
+        raise _lab_unreachable(exc) from None
+    if response.status_code not in (204, 404):
+        raise _NOT_RUNNING
 
 
 @router.post("/theme", status_code=204)
@@ -130,8 +199,7 @@ async def set_lab_theme(
     Best-effort by design: a stopped session simply returns 204 (the spawn
     hook applies the theme claim at the next start).
     """
-    if principal.claims.get("purpose") != "ui_auth":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="UI sessions only")
+    _ui_only(principal)
     _require_hub_token()
     jupyter_theme = "JupyterLab Light" if payload.theme == "light" else "JupyterLab Dark"
     url = (f"{_user_server_base(principal.user.id)}"
@@ -149,10 +217,12 @@ async def set_lab_theme(
 
 @router.post("/launch", response_model=LabLaunch)
 async def launch_lab(
-    payload: LabLaunchRequest | None = None,
+    payload: LabLaunchRequest,
     principal: AuthPrincipal = Depends(get_current_active_principal),
 ):
-    """Mint a short-lived launch URL for the current user's Lab session.
+    """Mint a short-lived launch URL for the current user's Lab session, landing
+    on one notebook (``next_path`` is required: the file browser is not a
+    surface the UI exposes).
 
     Interactive UI sessions only: a PAT (or any delegated token) must never
     open a Lab, where arbitrary user code runs with the user's identity.
@@ -181,20 +251,18 @@ async def launch_lab(
             "studio_token": studio_token,
             # Tema dell'app al lancio: l'hook di spawn imposta il tema
             # Jupyter corrispondente.
-            "lab_theme": payload.theme if payload else None,
+            "lab_theme": payload.theme,
         },
         audience=settings.LAB_TOKEN_AUDIENCE,
         purpose="lab_launch",
         expires_delta=timedelta(minutes=settings.LAB_LAUNCH_TOKEN_EXPIRE_MINUTES),
     )
-    if payload and payload.fresh:
+    if payload.fresh:
         await _stop_user_server(principal.user.id)
 
     base = settings.LAB_PUBLIC_URL.rstrip("/")
-    query: dict[str, str] = {"token": token}
-    if payload and payload.next_path:
-        # Atterraggio diretto su un file del workspace (UI Notebook):
-        # next deve essere un path assoluto sotto il prefisso dell'hub.
-        prefix = urlparse(base).path or ""
-        query["next"] = f"{prefix}/user/{principal.user.id}/{payload.next_path}"
+    # Atterraggio diretto sul file del workspace (UI Notebook): next deve
+    # essere un path assoluto sotto il prefisso dell'hub.
+    prefix = urlparse(base).path or ""
+    query = {"token": token, "next": f"{prefix}/user/{principal.user.id}/{payload.next_path}"}
     return LabLaunch(lab_url=f"{base}/hub/login?{urlencode(query)}")

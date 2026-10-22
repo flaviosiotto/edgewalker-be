@@ -7,8 +7,9 @@ class LabLaunchRequest(BaseModel):
     """Options for launching the embedded Studio Lab session."""
 
     # Path (relative to the user's workspace) to land on after login,
-    # e.g. "notebooks/studios/stagionalita-btc-3.ipynb". None -> file browser.
-    next_path: Optional[str] = None
+    # e.g. "notebooks/studios/stagionalita-btc-3.ipynb". Required: the only
+    # Jupyter surface is a Studio's notebook, never the file browser.
+    next_path: str
     # Stop the running server first: the respawn re-syncs the studios into
     # the workspace (needed when a studio was created after the session
     # started). No-op when the hub API token is not configured.
@@ -26,10 +27,8 @@ class LabLaunchRequest(BaseModel):
 
     @field_validator("next_path")
     @classmethod
-    def _safe_path(cls, value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return None
-        if value.startswith("/") or ".." in value or "?" in value or "#" in value:
+    def _safe_path(cls, value: str) -> str:
+        if not value or value.startswith("/") or ".." in value or "?" in value or "#" in value:
             raise ValueError("next_path must be a plain relative path")
         return value
 
@@ -61,6 +60,13 @@ class LabWorkspaceFile(BaseModel):
     # ISO timestamp dal contents API: il FE lo confronta con la versione
     # corrente per non "fotografare" file mai toccati (stale del sync).
     last_modified: Optional[str] = None
+
+
+class LabWorkspaceFileWrite(BaseModel):
+    """Write a text file into the user's Lab workspace (contents API)."""
+
+    path: str
+    content: str
 
 
 class StudioAccessToken(BaseModel):

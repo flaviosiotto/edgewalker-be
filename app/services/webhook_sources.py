@@ -379,7 +379,8 @@ def on_studio_run(session: Session, run_id: int, old_status: Optional[str] = Non
               "origin": "trigger" if row["trigger_id"] is not None else "manual",
               "trigger_type": row["trigger_type"], "queued_at": row["queued_at"],
               "started_at": row["started_at"], "finished_at": row["finished_at"]},
-        links={"ui": f"/studi/{row['studio_id']}?tab=runs"},
+        # La pagina dello Studio apre quel run (rendering, anche di un fallito).
+        links={"ui": f"/studi/{row['studio_id']}?run={row['id']}"},
         dedupe_key=f"studio_run:{row['id']}:{outcome.value}",
     )
     return 0
