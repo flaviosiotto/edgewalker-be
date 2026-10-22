@@ -182,16 +182,14 @@ class Chat(SQLModel, table=True):
     )
 
     # Chat di uno Studio (migr. 072): l'agente dello Studio lavora sul suo
-    # notebook. La tabella `studio` e' di studio-svc (stesso DB).
+    # notebook. La tabella `studio` e' di studio-svc (stesso DB) e NON sta
+    # nei metadati del backend: la FK (ON DELETE CASCADE) vive solo nella
+    # migrazione, qui la colonna e' un intero semplice, altrimenti il
+    # bootstrap create_all fallisce con NoReferencedTableError.
     studio_id: Optional[int] = Field(
         default=None,
-        sa_column=Column(
-            Integer,
-            ForeignKey("studio.id", ondelete="CASCADE"),
-            nullable=True,
-            index=True,
-        ),
-        description="FK allo Studio (chat dello Studio)",
+        sa_column=Column(Integer, nullable=True, index=True),
+        description="Studio della chat (chat dello Studio); FK solo nella migrazione 072",
     )
 
     nome: str = Field(max_length=255, description="Nome della chat")
