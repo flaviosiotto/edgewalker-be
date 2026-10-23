@@ -6,7 +6,6 @@ token only has to survive the iframe's first redirect — after login the hub's
 own session cookie takes over, so FE token rotation never matters here.
 """
 
-import asyncio
 import json
 import logging
 from datetime import timedelta
@@ -19,10 +18,13 @@ from app.core.config import settings
 from app.schemas.lab import (
     LabLaunch,
     LabLaunchRequest,
+    LabSessionRequest,
     LabThemeRequest,
     LabWorkspaceFile,
     LabWorkspaceFileWrite,
 )
+from app.services import lab_hub
+from app.services.lab_hub import LabSession
 from app.utils.auth_utils import (
     AuthPrincipal,
     create_delegated_token,
@@ -32,6 +34,16 @@ from app.utils.auth_utils import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/lab", tags=["Studio Lab"])
+
+
+def _hub_api_client() -> httpx.AsyncClient:
+    """Client sull'API REST dell'hub (porta interna 8081) col token del
+    service edgewalker-backend."""
+    return httpx.AsyncClient(
+        base_url=settings.LAB_HUB_API_URL.rstrip("/") + "/hub/api",
+        headers={"Authorization": f"token {settings.LAB_HUB_API_TOKEN}"},
+        timeout=10.0,
+    )
 
 
 async def _stop_user_server(uid: int) -> None:
@@ -44,23 +56,90 @@ async def _stop_user_server(uid: int) -> None:
     """
     if not settings.LAB_HUB_API_TOKEN:
         return
-    base = settings.LAB_HUB_API_URL.rstrip("/") + "/hub/api"
-    headers = {"Authorization": f"token {settings.LAB_HUB_API_TOKEN}"}
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.delete(f"{base}/users/{uid}/server", headers=headers)
-            if response.status_code not in (202, 204, 400, 404):
-                response.raise_for_status()
-            # 202 = stop avviato: aspetta (poco) che il server sparisca, così
-            # il login successivo spawna subito invece di fallire su "pending".
-            if response.status_code == 202:
-                for _ in range(8):
-                    await asyncio.sleep(1)
-                    user = await client.get(f"{base}/users/{uid}", headers=headers)
-                    if user.status_code != 200 or not user.json().get("server"):
-                        break
+        async with _hub_api_client() as client:
+            await lab_hub.stop_server(client, uid)
     except httpx.HTTPError as exc:
-        logger.warning("lab fresh restart: hub API unreachable (%s)", exc)
+        logger.warning("lab stop: hub API unreachable (%s)", exc)
+
+
+def _studio_token(principal: AuthPrincipal) -> str:
+    # Credenziale di sessione per il container Lab: audience dedicata che
+    # solo studio-svc accetta, così il codice dei notebook può salvare
+    # versioni/lanciare run dei PROPRI Studi ma non toccare il resto
+    # dell'API (niente trading). L'hub la inietta nell'env del container
+    # via auth_state al momento dello spawn.
+    return create_delegated_token(
+        data={"sub": principal.user.email, "uid": principal.user.id},
+        audience=settings.STUDIO_TOKEN_AUDIENCE,
+        purpose="lab_api",
+        expires_delta=timedelta(minutes=settings.LAB_STUDIO_TOKEN_EXPIRE_MINUTES),
+    )
+
+
+@router.get("/session", response_model=LabSession)
+async def get_lab_session(principal: AuthPrincipal = Depends(get_current_active_principal)):
+    """State of the user's Lab session (ready / pending / stopping / stopped).
+
+    The page polls it while the server starts and, in edit mode, to notice a
+    session culled for inactivity (overlay "resume" instead of a hub page).
+    """
+    _ui_only(principal)
+    _require_hub_token()
+    try:
+        async with _hub_api_client() as client:
+            return await lab_hub.fetch_session(client, principal.user.id)
+    except httpx.HTTPError as exc:
+        logger.warning("lab session state: hub API unreachable (%s)", exc)
+        return LabSession(state="unavailable", message=f"hub unreachable: {exc}")
+
+
+@router.post("/session", response_model=LabSession)
+async def create_lab_session(
+    payload: LabSessionRequest,
+    principal: AuthPrincipal = Depends(get_current_active_principal),
+):
+    """Spawn the user's Lab server through the hub API (idempotent: a
+    running server is left alone).
+
+    The hub user is created on first use (same username = uid as the JWT
+    login), the auth_state carries what the spawn hooks need (studio token,
+    theme), then the server is started. The FE polls GET /lab/session and
+    mounts the iframe (POST /lab/launch) only when the state is ready, so the
+    hub's own "not running" / "spawn pending" pages never show up.
+    """
+    _ui_only(principal)
+    _require_hub_token()
+    uid = principal.user.id
+    auth_state = {
+        "uid": uid,
+        "email": principal.user.email,
+        "studio_token": _studio_token(principal),
+        "lab_theme": payload.theme,
+    }
+    try:
+        async with _hub_api_client() as client:
+            await lab_hub.ensure_user(client, uid)
+            current = await lab_hub.fetch_session(client, uid)
+            if current.state in ("ready", "pending"):
+                return current
+            if current.state == "stopping":
+                # Lo stop appena chiesto (Riavvia sessione) deve finire prima.
+                await lab_hub.stop_server(client, uid)
+            await lab_hub.set_auth_state(client, uid, auth_state)
+            return await lab_hub.start_server(client, uid)
+    except httpx.HTTPError as exc:
+        logger.warning("lab session start: hub API error (%s)", exc)
+        return LabSession(state="unavailable", message=f"hub unreachable: {exc}")
+
+
+@router.delete("/session", status_code=204)
+async def stop_lab_session(principal: AuthPrincipal = Depends(get_current_active_principal)):
+    """Stop the user's Lab server ("restart session": the respawn re-runs
+    the workspace sync hook)."""
+    _ui_only(principal)
+    _require_hub_token()
+    await _stop_user_server(principal.user.id)
 
 
 def _require_hub_token() -> None:
@@ -232,17 +311,10 @@ async def launch_lab(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="The Studio Lab can only be launched from an interactive login session",
         )
-    # Credenziale di sessione per il container Lab: audience dedicata che
-    # solo studio-svc accetta, così il codice dei notebook può salvare
-    # versioni/lanciare run dei PROPRI Studi ma non toccare il resto
-    # dell'API (niente trading). L'hub la inietta nell'env del container
-    # via auth_state al momento dello spawn.
-    studio_token = create_delegated_token(
-        data={"sub": principal.user.email, "uid": principal.user.id},
-        audience=settings.STUDIO_TOKEN_AUDIENCE,
-        purpose="lab_api",
-        expires_delta=timedelta(minutes=settings.LAB_STUDIO_TOKEN_EXPIRE_MINUTES),
-    )
+    # Lo stesso studio_token finisce nell'auth_state anche da POST /lab/session:
+    # il login lo riscrive (identico scopo), così lo spawn ha sempre una
+    # credenziale fresca qualunque sia la strada.
+    studio_token = _studio_token(principal)
     token = create_delegated_token(
         data={
             "sub": principal.user.email,

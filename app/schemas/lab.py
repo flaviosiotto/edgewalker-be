@@ -39,6 +39,20 @@ class LabLaunch(BaseModel):
     lab_url: str
 
 
+class LabSessionRequest(BaseModel):
+    """Prepare (spawn) the user's Lab session before the iframe is mounted."""
+
+    # App theme: the spawn hook sets the matching Jupyter theme.
+    theme: Optional[str] = None
+
+    @field_validator("theme")
+    @classmethod
+    def _known_theme(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and value not in ("dark", "light"):
+            raise ValueError("theme must be 'dark' or 'light'")
+        return value
+
+
 class LabThemeRequest(BaseModel):
     """Switch the running Jupyter session's theme to match the app."""
 
