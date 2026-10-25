@@ -1,0 +1,1 @@
+- [Local test env gotchas](local-test-env-gotchas.md) — runtime .venv lacks nbformat/docker; devops tracks a jupyterhub .pyc that local imports rewrite
