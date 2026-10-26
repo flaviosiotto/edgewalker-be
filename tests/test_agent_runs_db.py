@@ -323,7 +323,7 @@ def test_paperclip_run_skills_are_ephemeral_and_visible_to_the_turn(session, ten
     assert [s["name"] for s in run.context["skills"]] == ["trading-room-brief", "risk"]
     assert run.context["skills"][0]["version"] == "v7"
 
-    SYSTEM = ["backtest-review", "live-risk-review", "morning-briefing", "strategy-design"]
+    SYSTEM = ["backtest-review", "live-risk-review", "morning-briefing", "strategy-design", "studio-data"]
     rows = skills.list_skills_for_turn(session, user.id, run_id=run.id)
     assert [(r["name"] if isinstance(r, dict) else r.name) for r in rows] == ["trading-room-brief", "risk", *SYSTEM, "cot-report"]
     assert rows[0]["origin"] == "paperclip" and rows[0]["id"] == 0 and rows[0]["read_only"] is True

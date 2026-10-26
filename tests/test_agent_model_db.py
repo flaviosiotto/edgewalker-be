@@ -118,8 +118,8 @@ def test_skills_crud_and_system_skills(session, tenant):
     # system skills: shipped with the kit, listed before the user's, read-only, name reserved
     rows = skills.list_skills_for_turn(session, user.id)
     names = [r["name"] if isinstance(r, dict) else r.name for r in rows]
-    assert names[:4] == ["backtest-review", "live-risk-review", "morning-briefing", "strategy-design"] and names[-1] == "morning-routine"
-    assert all(r["read_only"] and r["origin"] == "system" and r["id"] == 0 for r in rows[:4])
+    assert names[:5] == ["backtest-review", "live-risk-review", "morning-briefing", "strategy-design", "studio-data"] and names[-1] == "morning-routine"
+    assert all(r["read_only"] and r["origin"] == "system" and r["id"] == 0 for r in rows[:5])
     assert skills.get_skill_for_turn(session, user.id, "Morning-Briefing")["body"].startswith("# Briefing del mattino")
     with pytest.raises(HTTPException) as exc:
         skills.create_skill(session, user.id, SkillCreate(name="morning-briefing", body="mine"))
