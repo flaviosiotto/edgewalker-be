@@ -50,6 +50,7 @@ from app.api.admin_agent_turns import router as admin_agent_turns_router
 from app.api.admin_billing import router as admin_billing_router
 from app.api.admin_wallet import router as admin_wallet_router
 from app.services.connection_events import install_connection_event_listeners
+from app.services.ledger_events import ledger_relay_loop
 from app.services.connection_manager import start_connection_manager, stop_connection_manager
 from app.services.live_runner_monitor import start_live_runner_monitor, stop_live_runner_monitor
 from app.services.backtest_runner_monitor import start_backtest_runner_monitor, stop_backtest_runner_monitor
@@ -58,6 +59,7 @@ from app.services.billing.billing_service import ensure_billing_schema, ensure_b
 from app.services.billing.billing_sweeper import start_billing_sweeper, stop_billing_sweeper
 from app.utils.auth_utils import get_current_active_user
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
 
@@ -113,6 +115,11 @@ async def lifespan(app: FastAPI):
     logging.getLogger(__name__).info("Started webhook sources listener and dispatcher")
     # Agent action requests (migr. 068): pending approvals expire after their TTL.
     action_task = asyncio.create_task(action_sweeper_loop(webhook_stop), name="action-request-sweeper")
+    # Ledger push: events:projection (post-commit, order-aggregator) →
+    # ledger_changed on the per-user SSE, so the live workspace refetches
+    # orders/fills/trades/positions right away instead of polling.
+    ledger_task = asyncio.create_task(ledger_relay_loop(webhook_stop), name="ledger-events-relay")
+    logging.getLogger(__name__).info("Started ledger events relay")
 
     yield
 
@@ -122,6 +129,8 @@ async def lifespan(app: FastAPI):
         await asyncio.wait_for(webhook_task, timeout=15)
     with contextlib.suppress(Exception):
         await asyncio.wait_for(action_task, timeout=5)
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(ledger_task, timeout=5)
     stop_webhook_sources()
     await stop_billing_sweeper()
     stop_chat_realtime()
@@ -179,6 +188,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# The live workspace ledger (orders with fills, 500 fills, 500 trades) is
+# ~1 MB of JSON per refresh: gzip it. Starlette skips text/event-stream, so
+# the SSE relays are unaffected.
+app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 
 # ── Track-ID middleware (end-to-end tracing) ──

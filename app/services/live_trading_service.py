@@ -13,6 +13,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import delete
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
 from app.models.connection import Account, Connection, ConnectionStatus
@@ -138,6 +139,9 @@ def list_account_orders(
     """List persisted orders for a broker account across all live sessions."""
     stmt = (
         select(LiveOrder)
+        # LiveOrderRead embeds the fills: one IN query instead of a lazy
+        # SELECT per order (200 orders per poll = 200 round-trips).
+        .options(selectinload(LiveOrder.fills))  # type: ignore[arg-type]
         .where(LiveOrder.account_id == account_id)
         .order_by(LiveOrder.created_at.desc())  # type: ignore[union-attr]
         .limit(limit)
