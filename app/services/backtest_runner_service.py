@@ -183,6 +183,11 @@ class BacktestRunnerService:
             # this stream and the runner follows it for fills/TP/SL/alerts.
             "BACKTEST_DRIVER_STREAM_ID": f"{stream_id}-driver" if simulation_timeframe else "",
             "BACKTEST_SIMULATION_TIMEFRAME": simulation_timeframe or "",
+            # Attesa del runner per il replay RUNNING: il coordinator prima
+            # scarica i dati (un simbolo freddo con driver 1m richiede minuti
+            # da ds-historical), quindi il runner deve sopravvivere al prefetch
+            # (bt 217: runner morto a 180 s con prefetch di 5,5 min).
+            "BACKTEST_RUNNER_READY_TIMEOUT_S": os.getenv("BACKTEST_RUNNER_READY_TIMEOUT_S", "900"),
             "DEBUG_RULES": os.getenv("BACKTEST_DEBUG_RULES", os.getenv("DEBUG_RULES", "true")),
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
             "PYTHONPATH": "/app",
