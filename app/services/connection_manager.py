@@ -836,6 +836,48 @@ def _gateway_degraded_message(status: dict[str, Any]) -> str:
     return "Gateway is running but the broker connection is degraded"
 
 
+_STARTUP_UNVERIFIED_STATUSES = {
+    ConnectionStatus.CONNECTED.value,
+    ConnectionStatus.DEGRADED.value,
+}
+
+
+def reset_unverified_connections(since: datetime) -> int:
+    """Flip to ``disconnected`` every connected/degraded row not probed since ``since``.
+
+    The startup probe stamps ``last_checked_at`` on each connection it
+    reaches, whatever the outcome; a connected/degraded row whose stamp is
+    older than ``since`` (or missing) was not verified by this process and
+    must not keep advertising a gateway nobody has seen. Returns the number
+    of rows reset.
+    """
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    reset = 0
+    with get_session_context() as session:
+        now = datetime.now(timezone.utc)
+        for conn in session.exec(select(Connection)).all():
+            if conn.status not in _STARTUP_UNVERIFIED_STATUSES:
+                continue
+            checked = conn.last_checked_at
+            if checked is not None and checked.tzinfo is None:
+                checked = checked.replace(tzinfo=timezone.utc)
+            if checked is not None and checked >= since:
+                continue
+            logger.info(
+                "Reset unverified connection %s (%s) from '%s' to 'disconnected'",
+                conn.id, conn.name, conn.status,
+            )
+            conn.status = ConnectionStatus.DISCONNECTED.value
+            conn.status_message = "Reset on server restart"
+            conn.updated_at = now
+            conn.last_checked_at = now
+            reset += 1
+        if reset:
+            session.commit()
+    return reset
+
+
 # ── Public async API (called by route handlers) ─────────────────────
 
 class ConnectionManager:
@@ -2148,36 +2190,18 @@ class ConnectionManager:
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
-    def _reset_connected_on_startup(self) -> None:
-        """Reset all 'connected' statuses to 'disconnected' on boot.
+    def _reset_unverified_on_startup(self, since: datetime) -> int:
+        """Reset the healthy-looking statuses the startup probe could not vouch for.
 
-        Also cleans up any orphan gateway containers that were left
-        running from a previous backend instance.
+        Runs AFTER ``probe_active_connections()``. Gateway containers (gw-N)
+        survive a backend redeploy, so a connection whose probe just answered
+        keeps its status untouched: no ``connected → disconnected → connected``
+        flip, hence no false "connection lost" + "connected" pair in the
+        user's activity feed at every deploy. Only a row the probe did not
+        reach (connection inactive, Docker unavailable, probe raised) cannot
+        be trusted and is reset to ``disconnected``.
         """
-        with get_session_context() as session:
-            now = datetime.now(timezone.utc)
-
-            # Reset stale "connected" connections
-            stmt = select(Connection).where(
-                Connection.status == ConnectionStatus.CONNECTED.value
-            )
-            stale = list(session.exec(stmt).all())
-            for conn in stale:
-                conn.status = ConnectionStatus.DISCONNECTED.value
-                conn.status_message = "Reset on server restart"
-                conn.updated_at = now
-                logger.info(
-                    "Reset stale connection %s (%s) from 'connected' to 'disconnected'",
-                    conn.id, conn.name,
-                )
-
-            if stale:
-                session.commit()
-
-        # NOTE: We do NOT clean up gateway containers here — they are
-        # independent microservices that should survive backend restarts.
-        # probe_active_connections() (called after this) will reconcile
-        # DB status with actually running containers.
+        return reset_unverified_connections(since)
 
     def _cleanup_stale_containers(self) -> None:
         """Remove any gateway containers left from a previous run."""
@@ -2208,11 +2232,15 @@ class ConnectionManager:
         if TWS_RUNTIME_IDLE_TIMEOUT_SECONDS > 0:
             self._tasks.append(asyncio.create_task(self._run_tws_runtime_cleanup()))
 
-        # On (re)start, no broker connections can be alive
-        self._reset_connected_on_startup()
-
-        # Reconcile: check if any gateway containers survived the restart
+        # On (re)start the DB still says "connected" for every gateway that
+        # was up before. Probe FIRST (gw-N containers survive a redeploy) and
+        # reset only what the probe could not verify: resetting blindly and
+        # re-probing flipped every healthy connection disconnected → connected
+        # within 200 ms, which the activity feed reported as a false
+        # "connection lost" + "connected" at each deploy.
+        started_at = datetime.now(timezone.utc)
         await self.probe_active_connections()
+        self._reset_unverified_on_startup(started_at)
 
         # Keep DB connection status fresh off the request path
         self._tasks.append(asyncio.create_task(self._run_connection_health_loop()))

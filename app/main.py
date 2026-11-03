@@ -87,8 +87,9 @@ async def lifespan(app: FastAPI):
     with get_session_context() as session:
         sync_system_templates(session)
 
-    # Must precede the connection manager: its startup reset is the first
-    # status write we want relayed to connected clients.
+    # Must precede the connection manager: its startup reconcile (probe, then
+    # reset of what the probe could not verify) is the first status write we
+    # want relayed to connected clients.
     install_connection_event_listeners()
 
     # Start connection manager (broker connect/disconnect lifecycle)
