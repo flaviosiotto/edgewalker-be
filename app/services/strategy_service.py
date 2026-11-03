@@ -747,6 +747,8 @@ def create_backtest(
         merged_parameters["agent_reasoning"] = payload.agent_reasoning
     if payload.agent_timeout_s is not None:
         merged_parameters["agent_timeout_s"] = float(payload.agent_timeout_s)
+    if payload.on_agent_timeout:
+        merged_parameters["on_agent_timeout"] = payload.on_agent_timeout
 
     backtest = BacktestResult(
         strategy_id=strategy_id,
@@ -828,6 +830,8 @@ _BACKTEST_SUMMARY_COLUMNS = (
     BacktestResult.started_at,
     BacktestResult.completed_at,
     BacktestResult.error_message,
+    BacktestResult.failure_kind,
+    BacktestResult.retried_from_backtest_id,
     BacktestResult.return_pct,
     BacktestResult.sharpe_ratio,
     BacktestResult.max_drawdown_pct,
@@ -891,6 +895,7 @@ def list_all_backtests(
                 Strategy.connection_id.label("connection_id"),
                 Chat.id.label("chat_id"),
                 BacktestResult.agent_evaluation["score_pct"].as_float().label("agent_score_pct"),
+                BacktestResult.metrics["agent_turns_timed_out"].as_integer().label("agent_turns_timed_out"),
             )
         )
         .outerjoin(Chat, Chat.backtest_id == BacktestResult.id)
@@ -1126,6 +1131,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             if isinstance(raw_agent_timeout, (int, float)) and raw_agent_timeout > 0
             else None
         )
+        on_agent_timeout = "fail" if str(run_parameters.get("on_agent_timeout") or "").lower() == "fail" else "continue"
         result = backtest_runner_service.start_backtest(
             backtest_id=backtest.id,
             connection_id=connection_id,
@@ -1144,6 +1150,7 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
             learning_mode=learning_mode,
             agent_timeout_s=agent_timeout_s,
             agent_reasoning=agent_reasoning,
+            on_agent_timeout=on_agent_timeout,
         )
         logger.info(
             "Started backtest runner for backtest %d: %s",
@@ -1169,6 +1176,83 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
         )
 
     return backtest
+
+
+_RETRYABLE_STATUSES = {BacktestStatus.COMPLETED.value, BacktestStatus.FAILED.value, BacktestStatus.ERROR.value}
+
+
+def _lessons_from_of(backtest: BacktestResult) -> str | int:
+    """The playbook descriptor the run was created with, as a ``lessons_from``
+    value: the retry starts from the SAME origin, with a fresh copy."""
+    params = backtest.parameters if isinstance(backtest.parameters, dict) else {}
+    lessons = params.get("lessons") if isinstance(params.get("lessons"), dict) else {}
+    source = str(lessons.get("source") or "strategy")
+    if source == "none":
+        return "none"
+    if source.startswith("backtest:") and lessons.get("source_backtest_id") is not None:
+        return int(lessons["source_backtest_id"])
+    return "strategy"
+
+
+def retry_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> BacktestResult:
+    """"Riprova" (docs/valutazione-riavvio-backtest.md §3): a NEW backtest
+    that repeats a finished one, then started.
+
+    Same inputs, the same ``config`` snapshot (not re-captured from the
+    strategy: a retry is the same experiment), the same playbook origin
+    copied afresh, its own chat, id and events. The source row is left as
+    it is: a failed run is a document, not something to overwrite.
+    """
+    source_row = get_backtest(session, backtest_id, user_id)
+    if source_row.status not in _RETRYABLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot retry backtest with status '{source_row.status}': only a finished run can be repeated.",
+        )
+    params = source_row.parameters if isinstance(source_row.parameters, dict) else {}
+    lessons = params.get("lessons") if isinstance(params.get("lessons"), dict) else {}
+    inherited = {k: v for k, v in params.items() if k not in {"lessons", "agent_reasoning", "agent_timeout_s", "on_agent_timeout"}}
+    raw_timeout = params.get("agent_timeout_s")
+    payload = BacktestCreate(
+        symbol=source_row.symbol,
+        start_date=source_row.start_date,
+        end_date=source_row.end_date,
+        agent_id=source_row.agent_id,
+        lessons_from=_lessons_from_of(source_row),
+        learning_mode=lessons.get("learning_mode") if lessons.get("learning_mode") in LEARNING_MODES else None,
+        agent_timeout_s=float(raw_timeout) if isinstance(raw_timeout, (int, float)) and 30 <= raw_timeout <= 570 else None,
+        agent_reasoning=params.get("agent_reasoning") if params.get("agent_reasoning") in ("quick", "balanced", "deep") else None,
+        on_agent_timeout=params.get("on_agent_timeout") if params.get("on_agent_timeout") in ("continue", "fail") else None,
+        source=source_row.source,
+        timeframe=source_row.timeframe or "5m",
+        simulation_timeframe=source_row.simulation_timeframe,
+        asset=source_row.asset or "stock",
+        rth=_parse_bool(source_row.rth, default=True),
+        ibkr_config=source_row.ibkr_config,
+        exchange=source_row.exchange or "SMART",
+        currency=source_row.currency or "USD",
+        expiry=source_row.expiry,
+        initial_capital=float(source_row.initial_capital if source_row.initial_capital is not None else 100_000.0),
+        commission=float(source_row.commission or 0.0),
+        parameters=inherited or None,
+        config=source_row.config if isinstance(source_row.config, dict) else None,
+        layout_config=source_row.layout_config if isinstance(source_row.layout_config, dict) else None,
+    )
+    created = create_backtest(session, source_row.strategy_id, payload, user_id)
+    created.retried_from_backtest_id = source_row.id
+    session.add(created)
+    session.commit()
+    session.refresh(created)
+    logger.info("Backtest %d created as retry of %d", created.id, source_row.id)
+    return run_backtest(session, created.id, user_id)
+
+
+def _parse_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def update_backtest(

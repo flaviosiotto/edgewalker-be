@@ -41,6 +41,7 @@ class UserEventType(str, Enum):
     CONNECTION_LOST = "connection.lost"
     BACKTEST_COMPLETED = "backtest.completed"
     BACKTEST_FAILED = "backtest.failed"
+    BACKTEST_AGENT_TIMEOUT = "backtest.agent_timeout"
     LIVE_STARTED = "live.started"
     LIVE_FAILED = "live.failed"
     LIVE_STOPPED = "live.stopped"
@@ -54,6 +55,7 @@ SEVERITY: dict[UserEventType, str] = {
     UserEventType.CONNECTION_LOST: "warning",
     UserEventType.BACKTEST_COMPLETED: "success",
     UserEventType.BACKTEST_FAILED: "error",
+    UserEventType.BACKTEST_AGENT_TIMEOUT: "warning",
     UserEventType.LIVE_STARTED: "success",
     UserEventType.LIVE_FAILED: "error",
     UserEventType.LIVE_STOPPED: "info",
@@ -67,6 +69,7 @@ ENTITY_OF: dict[UserEventType, str] = {
     UserEventType.CONNECTION_LOST: "connection",
     UserEventType.BACKTEST_COMPLETED: "backtest",
     UserEventType.BACKTEST_FAILED: "backtest",
+    UserEventType.BACKTEST_AGENT_TIMEOUT: "backtest",
     UserEventType.LIVE_STARTED: "live",
     UserEventType.LIVE_FAILED: "live",
     UserEventType.LIVE_STOPPED: "live",

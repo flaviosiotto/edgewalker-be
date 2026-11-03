@@ -128,6 +128,7 @@ class BacktestRunnerService:
         learning_mode: str = "end_of_run",
         agent_reasoning: str | None = None,
         agent_timeout_s: float | None = None,
+        on_agent_timeout: str = "continue",
     ) -> dict[str, Any]:
         """Start a strategy-runner container in backtest mode."""
         try:
@@ -244,6 +245,10 @@ class BacktestRunnerService:
         # which turns may write lessons. The run always reads its own
         # playbook (possibly empty: launched from "none").
         env["BACKTEST_LEARNING_MODE"] = learning_mode
+        # F1 (docs/valutazione-riavvio-backtest.md §4): an agent turn that
+        # outlives its hold is an event, not a failure, unless the run asked
+        # for the strict behaviour.
+        env["BACKTEST_ON_AGENT_TIMEOUT"] = "fail" if on_agent_timeout == "fail" else "continue"
         if learning_mode == "off":
             # Legacy switch, still read by runner images older than the mode.
             env["BACKTEST_LESSON_REVIEW"] = "false"

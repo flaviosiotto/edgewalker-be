@@ -521,6 +521,16 @@ class BacktestResult(SQLModel, table=True):
     # container is gone minutes after the failure and with it the only
     # evidence of what the runner was doing.
     runner_log_tail: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    # Why a terminal failed/error row ended (migr. 073): user_stop | shutdown |
+    # agent_timeout | runner_attach | data | start | internal. The backend
+    # writes user_stop before the cancel, the coordinator fills the rest.
+    failure_kind: Optional[str] = Field(default=None, sa_column=Column(String(32), nullable=True))
+    # The attempt this row repeats (F0 "Riprova", migr. 073): same inputs and
+    # config snapshot, fresh chat and playbook copy, its own id everywhere.
+    retried_from_backtest_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, ForeignKey("strategy_backtests.id", ondelete="SET NULL"), nullable=True, index=True),
+    )
 
     # ── OUTPUT (populated on completion by n8n workflow) ──
     # Raw stats dict from edgewalker/backtesting.py

@@ -67,7 +67,7 @@ def test_classify(table, old, new, expected):
 def test_catalog_is_closed_and_complete():
     rows = catalog()
     assert {r["type"] for r in rows} == {t.value for t in UserEventType}
-    assert len(rows) == 10
+    assert len(rows) == 11
     for t in UserEventType:
         assert SEVERITY[t] in {"info", "success", "warning", "error"}
         assert ENTITY_OF[t] in {"connection", "backtest", "live", "studio_run"}

@@ -244,6 +244,11 @@ class BacktestCreate(BaseModel):
     # with an explicit level of their own still win.
     agent_reasoning: Optional[Literal["quick", "balanced", "deep"]] = None
 
+    # What the run does when a blocking agent turn outlives its hold:
+    # "continue" (default) releases the clock, marks the call `timeout` and
+    # goes on without that decision; "fail" ends the run as before.
+    on_agent_timeout: Optional[Literal["continue", "fail"]] = None
+
     # Data source parameters (for fetch)
     source: Optional[BacktestSource] = None
     timeframe: str = "5m"  # e.g., "1m", "5m", "15m", "1h", "1d"
@@ -320,6 +325,10 @@ class BacktestRead(BaseModel):
     error_message: Optional[str] = None
     # Last lines of the runner's log for failed runs (diagnostics; not for the agent).
     runner_log_tail: Optional[str] = None
+    # Why a failed/error row ended (user_stop | shutdown | agent_timeout | …)
+    failure_kind: Optional[str] = None
+    # The attempt this row repeats ("Riprova"), when it is a retry
+    retried_from_backtest_id: Optional[int] = None
     
     # Typed metrics from edgewalker (populated on completion)
     return_pct: Optional[float] = None
@@ -484,6 +493,8 @@ class BacktestSummary(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
+    failure_kind: Optional[str] = None
+    retried_from_backtest_id: Optional[int] = None
     return_pct: Optional[float] = None
     sharpe_ratio: Optional[float] = None
     max_drawdown_pct: Optional[float] = None
@@ -493,6 +504,9 @@ class BacktestSummary(BaseModel):
     equity_final: Optional[float] = None
     equity_peak: Optional[float] = None
     created_at: datetime
+    # Agent turns that outlived their hold during the run (F1): a result
+    # with a hole the reader must know about.
+    agent_turns_timed_out: Optional[int] = None
     # Overall Agent Score (0-100) of the agent's final evaluation, when present.
     agent_score_pct: Optional[float] = None
 

@@ -31,6 +31,7 @@ from app.services.strategy_service import (
     get_strategy,
     list_all_backtests,
     list_trades,
+    retry_backtest,
     run_backtest,
     set_backtest_agent_evaluation,
     update_backtest_chart_drawings,
@@ -190,6 +191,21 @@ def run_backtest_endpoint(
     return run_backtest(session, backtest_id, current_user.id)
 
 
+@router.post("/{backtest_id}/retry", response_model=BacktestRead)
+def retry_backtest_endpoint(
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Repeat a finished backtest ("Riprova"): a new backtest with the same
+    inputs and config snapshot, its own chat and playbook copy, started at
+    once. The source row is left untouched; the new one points back to it
+    (``retried_from_backtest_id``). 409 unless the source is completed,
+    failed or error.
+    """
+    return retry_backtest(session, backtest_id, current_user.id)
+
+
 @router.post("/{backtest_id}/control")
 def control_backtest_playback_endpoint(
     backtest_id: int,
@@ -220,15 +236,29 @@ def stop_backtest_endpoint(
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
-    result = backtest_runner_service.stop_backtest(backtest.id)
-
-    # Update DB status
-    if backtest.status in (BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value):
-        backtest.status = BacktestStatus.FAILED.value
-        backtest.completed_at = datetime.now(timezone.utc)
+    was_active = backtest.status in (BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value)
+    if was_active:
+        # Classify BEFORE the cancel: the coordinator finalizes the row on
+        # its CancelledError and keeps a failure_kind already set, so the
+        # stop is never recorded as a service shutdown (migr. 073).
+        backtest.failure_kind = "user_stop"
         backtest.error_message = "Stopped by user"
         session.add(backtest)
         session.commit()
+    bt_id = backtest.id
+    session.close()  # release the pooled DB connection before the blocking HTTP/docker calls
+    result = backtest_runner_service.stop_backtest(bt_id)
+
+    # Terminal status, unless the coordinator already wrote it.
+    if was_active:
+        backtest = get_backtest(session, backtest_id, current_user.id)
+        if backtest.status in (BacktestStatus.PENDING.value, BacktestStatus.RUNNING.value):
+            backtest.status = BacktestStatus.FAILED.value
+            backtest.completed_at = datetime.now(timezone.utc)
+            backtest.error_message = "Stopped by user"
+            backtest.failure_kind = "user_stop"
+            session.add(backtest)
+            session.commit()
 
     return result
 

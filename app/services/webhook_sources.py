@@ -190,6 +190,37 @@ def on_strategy_backtest(session: Session, backtest_id: int, old_status: Optiona
     return len(rows)
 
 
+def on_agent_call(session: Session, call_id: int) -> int:
+    """An agent turn that outlived its hold in a backtest (F1, migr. 073):
+    the run went on without that decision and the trader must know."""
+    from app.models.agent_call import AgentCall
+
+    call = session.get(AgentCall, call_id)
+    if call is None or call.status != "timeout" or call.backtest_id is None:
+        return 0
+    bt = session.get(BacktestResult, call.backtest_id)
+    if bt is None:
+        return 0
+    strategy = session.get(Strategy, bt.strategy_id)
+    if strategy is None:
+        return 0
+    trigger = call.trigger_name or call.trigger_type or "agent"
+    user_events.record(
+        session,
+        user_id=strategy.user_id,
+        event_type=user_events.UserEventType.BACKTEST_AGENT_TIMEOUT,
+        entity_id=bt.id,
+        entity_name=strategy.name,
+        message=f"Turno dell'agente scaduto ({trigger}): il replay è proseguito senza quella decisione",
+        data={"backtest_id": bt.id, "strategy_id": strategy.id, "symbol": bt.symbol, "timeframe": bt.timeframe,
+              "trigger_type": call.trigger_type, "trigger_name": call.trigger_name,
+              "correlation_id": call.correlation_id, "bar_ts": call.bar_ts, "duration_ms": call.duration_ms},
+        links={"ui": f"/strategies/{strategy.id}/backtests/{bt.id}"},
+        dedupe_key=f"backtest:{bt.id}:agent_timeout:{call.correlation_id or call.id}",
+    )
+    return 0
+
+
 def on_live_alert(session: Session, alert_id: int) -> int:
     alert = session.get(LiveAlert, alert_id)
     if alert is None or alert.last_triggered_at is None:
@@ -394,6 +425,7 @@ _HANDLERS = {
     "connections": on_connection,
     "agent_turn": on_agent_turn,
     "studio_run": on_studio_run,
+    "agent_call": on_agent_call,
 }
 
 #: handlers that take the previous status (migr. 070 payload)
