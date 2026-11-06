@@ -97,6 +97,7 @@ from app.services.indicator_ref_service import inject_user_indicator_refs
 from app.utils.auth_utils import (
     AuthPrincipal,
     create_user_delegated_token,
+    get_current_active_or_consultative_user,
     get_current_active_or_runner_user,
     get_current_active_user,
     get_current_admin_user,
@@ -1516,7 +1517,7 @@ def read_live_chart_drawings_endpoint(
     live_id: int,
     chart_id: str,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Current drawings of one chart (lettura leggera per il push ``drawings_changed``)."""
     from app.services.strategy_service import read_live_chart_drawings
@@ -1530,7 +1531,7 @@ def patch_live_chart_drawings_endpoint(
     chart_id: str,
     payload: ChartDrawingsPatch,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Incremental edit (deletions by id/group/author, then upsert by id): the
     agent's ``draw_on_chart`` and the FE deletion of agent drawings."""
