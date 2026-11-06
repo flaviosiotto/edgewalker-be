@@ -21,6 +21,7 @@ from app.models.connection import Account, Connection
 from app.models.n8n_chat_history import N8nChatHistory
 from app.models.strategy import Strategy, StrategyLive, BacktestResult, BacktestTrade, BacktestStatus, LiveStatus
 from app.schemas.agent import build_agent_persona_block
+from app.services.drawing_events import publish_drawings_changed
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyUpdate,
@@ -28,7 +29,10 @@ from app.schemas.strategy import (
     BacktestUpdate,
     TradeCreate,
     LayoutConfigUpdate,
+    ChartDrawingsPatch,
     ChartDrawingsUpdate,
+    MAX_AGENT_DRAWINGS_PER_CHART,
+    MAX_DRAWINGS_PER_CHART,
 )
 from app.schemas.chat import ChatCreate
 from app.services.agent_service import require_hosted_agent
@@ -476,8 +480,9 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
         assert_indicator_count(session, strategy.user_id, payload.definition)
         _reject_invalid_rules(payload.definition)
         _reject_external_rule_agents(session, payload.definition, strategy.user_id)
-        strategy.definition = _strip_rule_chat_ids(
-            _normalize_strategy_indicator_field_references(payload.definition)
+        strategy.definition = preserve_agent_drawings(
+            strategy.definition,
+            _strip_rule_chat_ids(_normalize_strategy_indicator_field_references(payload.definition)),
         )
 
     if payload.layout_config is not None:
@@ -1361,6 +1366,115 @@ def set_strategy_favorite(
     return strategy
 
 
+def _chart_entry_id(entry: Any, index: int) -> str:
+    return str((entry or {}).get("id") or ("main" if index == 0 else f"chart-{index}")) if isinstance(entry, dict) else ""
+
+
+def chart_drawings_of(definition: Any, chart_id: str) -> list[dict[str, Any]]:
+    """Current drawings of one chart in a ``{"strategy": {...}}`` snapshot
+    ([] for a legacy definition without charts[] and chart ``main``)."""
+    strat = definition.get("strategy") if isinstance(definition, dict) else None
+    charts = strat.get("charts") if isinstance(strat, dict) else None
+    if not isinstance(charts, list) or not charts:
+        if chart_id == "main" and isinstance(strat, dict):
+            return []
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chart not found")
+    for i, entry in enumerate(charts):
+        if _chart_entry_id(entry, i) == chart_id:
+            raw = entry.get("drawings")
+            return [copy.deepcopy(d) for d in raw if isinstance(d, dict)] if isinstance(raw, list) else []
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chart not found")
+
+
+def _drawing_author(d: dict[str, Any]) -> str:
+    return "agent" if str(d.get("author") or "user") == "agent" else "user"
+
+
+def _check_drawing_caps(drawings: list[dict[str, Any]]) -> None:
+    if len(drawings) > MAX_DRAWINGS_PER_CHART:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"Troppi disegni sul chart: massimo {MAX_DRAWINGS_PER_CHART}")
+    agent_n = sum(1 for d in drawings if _drawing_author(d) == "agent")
+    if agent_n > MAX_AGENT_DRAWINGS_PER_CHART:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"Troppi disegni dell'agente sul chart: massimo {MAX_AGENT_DRAWINGS_PER_CHART}, "
+                                   "cancella o sostituisci un gruppo")
+
+
+def merge_chart_drawings_put(current: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """PUT del trader: sostituisce i SUOI disegni; quelli dell'agente non
+    inclusi nel payload restano (il FE potrebbe non averli ancora ricevuti).
+    Cancellare un disegno dell'agente passa dal PATCH (``delete_ids``)."""
+    incoming_ids = {str(d.get("id")) for d in incoming}
+    kept_agent = [d for d in current if _drawing_author(d) == "agent" and str(d.get("id")) not in incoming_ids]
+    merged = list(incoming) + kept_agent
+    _check_drawing_caps(merged)
+    return merged
+
+
+def merge_chart_drawings_patch(current: list[dict[str, Any]], patch: ChartDrawingsPatch) -> list[dict[str, Any]]:
+    """Cancellazioni (id, gruppo, autore) poi upsert per id, in quest'ordine:
+    cosi' ``delete_group + upsert`` sostituisce un gruppo in un colpo solo."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    delete_ids = {str(i) for i in patch.delete_ids}
+    kept: list[dict[str, Any]] = []
+    for d in current:
+        if str(d.get("id")) in delete_ids:
+            continue
+        if patch.delete_group is not None and str(d.get("group") or "") == patch.delete_group:
+            continue
+        if patch.delete_author is not None and _drawing_author(d) == patch.delete_author:
+            continue
+        kept.append(d)
+    by_id = {str(d.get("id")): i for i, d in enumerate(kept)}
+    for item in patch.upsert:
+        d = item.model_dump(exclude_none=True)
+        d["updated_at"] = now_ms
+        i = by_id.get(d["id"])
+        if i is None:
+            d.setdefault("created_at", now_ms)
+            by_id[d["id"]] = len(kept)
+            kept.append(d)
+        else:
+            d.setdefault("created_at", kept[i].get("created_at") or now_ms)
+            kept[i] = d
+    _check_drawing_caps(kept)
+    return kept
+
+
+def preserve_agent_drawings(old_definition: Any, new_definition: Any) -> Any:
+    """Update integrale della definition (design): i disegni ``author=agent``
+    gia' salvati su un chart rientrano se il nuovo JSON non li porta, cosi'
+    l'autosave della bozza non cancella cio' che l'agente ha appena tracciato."""
+    old_strat = old_definition.get("strategy") if isinstance(old_definition, dict) else None
+    new_strat = new_definition.get("strategy") if isinstance(new_definition, dict) else None
+    old_charts = old_strat.get("charts") if isinstance(old_strat, dict) else None
+    new_charts = new_strat.get("charts") if isinstance(new_strat, dict) else None
+    if not isinstance(old_charts, list) or not isinstance(new_charts, list):
+        return new_definition
+    agent_by_chart: dict[str, list[dict[str, Any]]] = {}
+    for i, entry in enumerate(old_charts):
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get("drawings")
+        agent = [d for d in raw if isinstance(d, dict) and _drawing_author(d) == "agent"] if isinstance(raw, list) else []
+        if agent:
+            agent_by_chart[_chart_entry_id(entry, i)] = agent
+    if not agent_by_chart:
+        return new_definition
+    for i, entry in enumerate(new_charts):
+        if not isinstance(entry, dict):
+            continue
+        agent = agent_by_chart.get(_chart_entry_id(entry, i))
+        if not agent:
+            continue
+        raw = entry.get("drawings")
+        current = [d for d in raw if isinstance(d, dict)] if isinstance(raw, list) else []
+        ids = {str(d.get("id")) for d in current}
+        entry["drawings"] = current + [copy.deepcopy(d) for d in agent if str(d.get("id")) not in ids]
+    return new_definition
+
+
 def _definition_with_chart_drawings(definition: Any, chart_id: str, drawings: list[dict[str, Any]]) -> dict[str, Any]:
     """Return a copy of *definition* with ``strategy.charts[chart_id].drawings`` replaced.
 
@@ -1427,12 +1541,15 @@ def update_strategy_chart_drawings(
     copy of the design drawings because the snapshot copies the definition.
     """
     strategy = get_strategy(session, strategy_id, user_id)
-    drawings = [d.model_dump(exclude_none=True) for d in payload.drawings]
+    drawings = merge_chart_drawings_put(
+        chart_drawings_of(strategy.definition, chart_id), [d.model_dump(exclude_none=True) for d in payload.drawings],
+    )
     # New top-level object: SQLAlchemy sees the JSONB column as changed.
     strategy.definition = _definition_with_chart_drawings(strategy.definition, chart_id, drawings)
     strategy.updated_at = datetime.now(timezone.utc)
     session.add(strategy)
     session.commit()
+    publish_drawings_changed(strategy.user_id, "strategy", strategy.id, chart_id)
     session.refresh(strategy)
     return drawings
 
@@ -1453,14 +1570,44 @@ def update_live_chart_drawings(
     sl = session.get(StrategyLive, live_id)
     if not sl:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Live session {live_id} not found")
-    if user_id is not None:
-        _ = get_strategy(session, sl.strategy_id, user_id)
-    drawings = [d.model_dump(exclude_none=True) for d in payload.drawings]
+    owner = get_strategy(session, sl.strategy_id, user_id)
+    drawings = merge_chart_drawings_put(
+        chart_drawings_of(sl.definition, chart_id), [d.model_dump(exclude_none=True) for d in payload.drawings],
+    )
     sl.definition = _definition_with_chart_drawings(sl.definition, chart_id, drawings)
     session.add(sl)
     session.commit()
     session.refresh(sl)
+    publish_drawings_changed(owner.user_id, "live", sl.id, chart_id)
     return drawings
+
+
+def patch_live_chart_drawings(
+    session: Session,
+    live_id: int,
+    chart_id: str,
+    patch: ChartDrawingsPatch,
+    user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    sl = session.get(StrategyLive, live_id)
+    if not sl:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Live session {live_id} not found")
+    owner = get_strategy(session, sl.strategy_id, user_id)
+    drawings = merge_chart_drawings_patch(chart_drawings_of(sl.definition, chart_id), patch)
+    sl.definition = _definition_with_chart_drawings(sl.definition, chart_id, drawings)
+    session.add(sl)
+    session.commit()
+    session.refresh(sl)
+    publish_drawings_changed(owner.user_id, "live", sl.id, chart_id)
+    return drawings
+
+
+def read_live_chart_drawings(session: Session, live_id: int, chart_id: str, user_id: int | None = None) -> list[dict[str, Any]]:
+    sl = session.get(StrategyLive, live_id)
+    if not sl:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Live session {live_id} not found")
+    _ = get_strategy(session, sl.strategy_id, user_id)
+    return chart_drawings_of(sl.definition, chart_id)
 
 
 def update_backtest_chart_drawings(
@@ -1472,12 +1619,61 @@ def update_backtest_chart_drawings(
 ) -> list[dict[str, Any]]:
     """Replace the drawings of one chart on a backtest's config snapshot."""
     backtest = get_backtest(session, backtest_id, user_id)
-    drawings = [d.model_dump(exclude_none=True) for d in payload.drawings]
+    owner = get_strategy(session, backtest.strategy_id, user_id)
+    drawings = merge_chart_drawings_put(
+        chart_drawings_of(backtest.config, chart_id), [d.model_dump(exclude_none=True) for d in payload.drawings],
+    )
     backtest.config = _definition_with_chart_drawings(backtest.config, chart_id, drawings)
     session.add(backtest)
     session.commit()
     session.refresh(backtest)
+    publish_drawings_changed(owner.user_id, "backtest", backtest.id, chart_id)
     return drawings
+
+
+def patch_backtest_chart_drawings(
+    session: Session,
+    backtest_id: int,
+    chart_id: str,
+    patch: ChartDrawingsPatch,
+    user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    backtest = get_backtest(session, backtest_id, user_id)
+    owner = get_strategy(session, backtest.strategy_id, user_id)
+    drawings = merge_chart_drawings_patch(chart_drawings_of(backtest.config, chart_id), patch)
+    backtest.config = _definition_with_chart_drawings(backtest.config, chart_id, drawings)
+    session.add(backtest)
+    session.commit()
+    session.refresh(backtest)
+    publish_drawings_changed(owner.user_id, "backtest", backtest.id, chart_id)
+    return drawings
+
+
+def read_backtest_chart_drawings(session: Session, backtest_id: int, chart_id: str, user_id: int | None = None) -> list[dict[str, Any]]:
+    backtest = get_backtest(session, backtest_id, user_id)
+    return chart_drawings_of(backtest.config, chart_id)
+
+
+def patch_strategy_chart_drawings(
+    session: Session,
+    strategy_id: int,
+    chart_id: str,
+    patch: ChartDrawingsPatch,
+    user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    strategy = get_strategy(session, strategy_id, user_id)
+    drawings = merge_chart_drawings_patch(chart_drawings_of(strategy.definition, chart_id), patch)
+    strategy.definition = _definition_with_chart_drawings(strategy.definition, chart_id, drawings)
+    strategy.updated_at = datetime.now(timezone.utc)
+    session.add(strategy)
+    session.commit()
+    publish_drawings_changed(strategy.user_id, "strategy", strategy.id, chart_id)
+    return drawings
+
+
+def read_strategy_chart_drawings(session: Session, strategy_id: int, chart_id: str, user_id: int | None = None) -> list[dict[str, Any]]:
+    strategy = get_strategy(session, strategy_id, user_id)
+    return chart_drawings_of(strategy.definition, chart_id)
 
 
 def set_backtest_agent_evaluation(

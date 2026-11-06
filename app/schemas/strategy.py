@@ -580,6 +580,12 @@ class ChartDrawingStyle(BaseModel):
     text_color: Optional[str] = Field(default=None, max_length=32)
 
 
+DrawingAuthor = Literal["user", "agent"]
+#: Tetto ai disegni dell'agente per chart (sotto il tetto totale): un agente
+#: che accumula annotazioni rende il chart illeggibile; usa i gruppi.
+MAX_AGENT_DRAWINGS_PER_CHART = 50
+
+
 class ChartDrawing(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     type: DrawingType
@@ -588,6 +594,12 @@ class ChartDrawing(BaseModel):
     style: ChartDrawingStyle = Field(default_factory=ChartDrawingStyle)
     props: dict[str, Any] = Field(default_factory=dict)
     locked: bool = False
+    #: Chi ha tracciato il disegno: il trader dalla palette o l'agente dal tool
+    #: draw_on_chart. Il PUT del trader non tocca i disegni dell'agente.
+    author: DrawingAuthor = "user"
+    #: Gruppo logico (es. "similarity", "levels"): l'unita' con cui l'agente
+    #: sostituisce o cancella i propri disegni senza accumularli.
+    group: Optional[str] = Field(default=None, max_length=64)
     created_at: Optional[int] = None
     updated_at: Optional[int] = None
 
@@ -608,6 +620,15 @@ class ChartDrawing(BaseModel):
 class ChartDrawingsUpdate(BaseModel):
     """Full replacement of the drawings of one chart (PUT semantics)."""
     drawings: list[ChartDrawing] = Field(max_length=MAX_DRAWINGS_PER_CHART)
+
+
+class ChartDrawingsPatch(BaseModel):
+    """Incremental edit of one chart's drawings (agent tool, agent-drawing
+    deletions from the FE): deletions first, then upsert by id."""
+    upsert: list[ChartDrawing] = Field(default_factory=list, max_length=MAX_DRAWINGS_PER_CHART)
+    delete_ids: list[str] = Field(default_factory=list, max_length=MAX_DRAWINGS_PER_CHART)
+    delete_group: Optional[str] = Field(default=None, max_length=64)
+    delete_author: Optional[DrawingAuthor] = None
 
 
 class ChartDrawingsRead(BaseModel):

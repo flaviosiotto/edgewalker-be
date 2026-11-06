@@ -207,7 +207,7 @@ async def connection_events_endpoint(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user),
 ):
-    """SSE stream of ``connections_changed``, ``user_event`` and ``ledger_changed`` events for the current user.
+    """SSE stream of ``connections_changed``, ``user_event``, ``ledger_changed`` and ``drawings_changed`` events for the current user.
 
     Relays the Redis channel ``connection-events:{user_id}`` published by the
     ORM hooks in ``connection_events``; degrades to heartbeat-only when Redis
@@ -260,7 +260,9 @@ async def connection_events_endpoint(
                 # ``ledger_changed`` (ledger_events): orders/fills/positions of
                 # one account were just committed; the live workspace refetches.
                 kind = payload.get("type")
-                if kind not in ("connections_changed", "user_event", "ledger_changed"):
+                # ``drawings_changed`` (drawing_events): i disegni di un chart
+                # sono cambiati (altra scheda o agente); il workspace rilegge.
+                if kind not in ("connections_changed", "user_event", "ledger_changed", "drawings_changed"):
                     continue
                 yield f"event: {kind}\ndata: {json.dumps(payload)}\n\n"
         finally:

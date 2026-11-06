@@ -28,6 +28,7 @@ from app.schemas.strategy import (
     RuleTriggerResponse,
     LayoutConfigUpdate,
     ChartDrawingsRead,
+    ChartDrawingsPatch,
     ChartDrawingsUpdate,
 )
 from app.schemas.chat import ChatCreate, ChatRead
@@ -438,6 +439,34 @@ def update_strategy_layout_endpoint(
     """Update only the UI layout configuration for a strategy."""
     strategy = update_strategy_layout(session, strategy_id, payload, current_user.id)
     return _serialize_strategy_with_live(session, strategy)
+
+
+@router.get("/{strategy_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
+def read_strategy_chart_drawings_endpoint(
+    strategy_id: int,
+    chart_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Current drawings of one chart (lettura leggera per il push ``drawings_changed``)."""
+    from app.services.strategy_service import read_strategy_chart_drawings
+    drawings = read_strategy_chart_drawings(session, strategy_id, chart_id, current_user.id)
+    return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)
+
+
+@router.patch("/{strategy_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
+def patch_strategy_chart_drawings_endpoint(
+    strategy_id: int,
+    chart_id: str,
+    payload: ChartDrawingsPatch,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Incremental edit (deletions by id/group/author, then upsert by id): the
+    agent's ``draw_on_chart`` and the FE deletion of agent drawings."""
+    from app.services.strategy_service import patch_strategy_chart_drawings
+    drawings = patch_strategy_chart_drawings(session, strategy_id, chart_id, payload, current_user.id)
+    return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)
 
 
 @router.put("/{strategy_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)

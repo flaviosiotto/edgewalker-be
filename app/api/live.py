@@ -25,7 +25,7 @@ from app.models.live_trading import LiveFill, LivePosition, PositionStatus
 from app.models.strategy import LiveStatus, Strategy, StrategyLive
 from app.models.user import User
 from app.schemas.chat import ChatRead
-from app.schemas.strategy import ChartDrawingsRead, ChartDrawingsUpdate
+from app.schemas.strategy import ChartDrawingsPatch, ChartDrawingsRead, ChartDrawingsUpdate
 from app.schemas.live_strategy import (
     LiveDashboardOverviewRead,
     LivePerformanceSummary,
@@ -1509,6 +1509,34 @@ def update_live_layout_endpoint(
         live_id=sl.id,
         layout_config=sl.layout_config,
     )
+
+
+@router.get("/sessions/{live_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
+def read_live_chart_drawings_endpoint(
+    live_id: int,
+    chart_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Current drawings of one chart (lettura leggera per il push ``drawings_changed``)."""
+    from app.services.strategy_service import read_live_chart_drawings
+    drawings = read_live_chart_drawings(session, live_id, chart_id, current_user.id)
+    return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)
+
+
+@router.patch("/sessions/{live_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
+def patch_live_chart_drawings_endpoint(
+    live_id: int,
+    chart_id: str,
+    payload: ChartDrawingsPatch,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Incremental edit (deletions by id/group/author, then upsert by id): the
+    agent's ``draw_on_chart`` and the FE deletion of agent drawings."""
+    from app.services.strategy_service import patch_live_chart_drawings
+    drawings = patch_live_chart_drawings(session, live_id, chart_id, payload, current_user.id)
+    return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)
 
 
 @router.put("/sessions/{live_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)

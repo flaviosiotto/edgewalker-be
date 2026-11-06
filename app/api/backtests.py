@@ -19,6 +19,7 @@ from app.schemas.strategy import (
     LayoutConfigUpdate,
     TradeRead,
     ChartDrawingsRead,
+    ChartDrawingsPatch,
     ChartDrawingsUpdate,
 )
 from app.schemas.chat import ChatRead
@@ -562,6 +563,34 @@ def update_backtest_layout_endpoint(
 ):
     """Update only the UI layout configuration for a backtest."""
     return update_backtest_layout(session, backtest_id, payload, current_user.id)
+
+
+@router.get("/{backtest_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
+def read_backtest_chart_drawings_endpoint(
+    backtest_id: int,
+    chart_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Current drawings of one chart (lettura leggera per il push ``drawings_changed``)."""
+    from app.services.strategy_service import read_backtest_chart_drawings
+    drawings = read_backtest_chart_drawings(session, backtest_id, chart_id, current_user.id)
+    return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)
+
+
+@router.patch("/{backtest_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
+def patch_backtest_chart_drawings_endpoint(
+    backtest_id: int,
+    chart_id: str,
+    payload: ChartDrawingsPatch,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Incremental edit (deletions by id/group/author, then upsert by id): the
+    agent's ``draw_on_chart`` and the FE deletion of agent drawings."""
+    from app.services.strategy_service import patch_backtest_chart_drawings
+    drawings = patch_backtest_chart_drawings(session, backtest_id, chart_id, payload, current_user.id)
+    return ChartDrawingsRead(chart_id=chart_id, drawings=drawings)
 
 
 @router.put("/{backtest_id}/charts/{chart_id}/drawings", response_model=ChartDrawingsRead)
