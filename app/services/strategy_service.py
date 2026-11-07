@@ -1524,6 +1524,21 @@ def _definition_with_chart_drawings(definition: Any, chart_id: str, drawings: li
     return definition  # type: ignore[return-value]
 
 
+
+def _lock_for_drawings(session: Session, model: Any, row_id: int) -> Any:
+    """Re-read one row ``FOR UPDATE`` inside the current transaction.
+
+    The drawings endpoints are read-modify-write on a JSONB column: two
+    concurrent PATCHes on different charts of the same session (the agent
+    draws on two charts in one turn, the calls run in parallel) both read
+    the definition, each merged its chart and the last commit clobbered the
+    other (live 545, 07/11/2026: the ``main`` drawings vanished). The row
+    lock serialises them and ``populate_existing`` makes the second caller
+    see the first one's definition. SQLite (tests) ignores FOR UPDATE.
+    """
+    stmt = select(model).where(model.id == row_id).with_for_update().execution_options(populate_existing=True)
+    return session.exec(stmt).first()
+
 def update_strategy_chart_drawings(
     session: Session,
     strategy_id: int,
@@ -1541,6 +1556,7 @@ def update_strategy_chart_drawings(
     copy of the design drawings because the snapshot copies the definition.
     """
     strategy = get_strategy(session, strategy_id, user_id)
+    strategy = _lock_for_drawings(session, Strategy, strategy.id) or strategy
     drawings = merge_chart_drawings_put(
         chart_drawings_of(strategy.definition, chart_id), [d.model_dump(exclude_none=True) for d in payload.drawings],
     )
@@ -1571,6 +1587,7 @@ def update_live_chart_drawings(
     if not sl:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Live session {live_id} not found")
     owner = get_strategy(session, sl.strategy_id, user_id)
+    sl = _lock_for_drawings(session, StrategyLive, sl.id) or sl
     drawings = merge_chart_drawings_put(
         chart_drawings_of(sl.definition, chart_id), [d.model_dump(exclude_none=True) for d in payload.drawings],
     )
@@ -1593,6 +1610,7 @@ def patch_live_chart_drawings(
     if not sl:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Live session {live_id} not found")
     owner = get_strategy(session, sl.strategy_id, user_id)
+    sl = _lock_for_drawings(session, StrategyLive, sl.id) or sl
     drawings = merge_chart_drawings_patch(chart_drawings_of(sl.definition, chart_id), patch)
     sl.definition = _definition_with_chart_drawings(sl.definition, chart_id, drawings)
     session.add(sl)
@@ -1620,6 +1638,7 @@ def update_backtest_chart_drawings(
     """Replace the drawings of one chart on a backtest's config snapshot."""
     backtest = get_backtest(session, backtest_id, user_id)
     owner = get_strategy(session, backtest.strategy_id, user_id)
+    backtest = _lock_for_drawings(session, BacktestResult, backtest.id) or backtest
     drawings = merge_chart_drawings_put(
         chart_drawings_of(backtest.config, chart_id), [d.model_dump(exclude_none=True) for d in payload.drawings],
     )
@@ -1640,6 +1659,7 @@ def patch_backtest_chart_drawings(
 ) -> list[dict[str, Any]]:
     backtest = get_backtest(session, backtest_id, user_id)
     owner = get_strategy(session, backtest.strategy_id, user_id)
+    backtest = _lock_for_drawings(session, BacktestResult, backtest.id) or backtest
     drawings = merge_chart_drawings_patch(chart_drawings_of(backtest.config, chart_id), patch)
     backtest.config = _definition_with_chart_drawings(backtest.config, chart_id, drawings)
     session.add(backtest)
@@ -1662,6 +1682,7 @@ def patch_strategy_chart_drawings(
     user_id: int | None = None,
 ) -> list[dict[str, Any]]:
     strategy = get_strategy(session, strategy_id, user_id)
+    strategy = _lock_for_drawings(session, Strategy, strategy.id) or strategy
     drawings = merge_chart_drawings_patch(chart_drawings_of(strategy.definition, chart_id), patch)
     strategy.definition = _definition_with_chart_drawings(strategy.definition, chart_id, drawings)
     strategy.updated_at = datetime.now(timezone.utc)

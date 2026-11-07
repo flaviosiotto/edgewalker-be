@@ -173,3 +173,30 @@ def test_backtest_patch_and_read(session, tenant, monkeypatch):
     assert [d["id"] for d in svc.read_backtest_chart_drawings(session, bt.id, "main", user.id)] == ["a1"]
     # il design non e' toccato
     assert svc.read_strategy_chart_drawings(session, strategy.id, "main", user.id) == []
+
+
+def test_concurrent_patches_on_two_charts_keep_both(app_engine, session, tenant, monkeypatch):
+    """Due sessioni DB caricano la stessa strategia, poi ognuna aggiorna un chart
+    diverso: entrambi i disegni devono restare. E' il caso della live 545
+    (07/11/2026: l'agente disegna su due chart nello stesso turno, i PATCH
+    corrono in parallelo e l'ultimo commit cancellava l'altro). La vera
+    serializzazione e' il ``FOR UPDATE`` di ``_lock_for_drawings`` su
+    Postgres; SQLite lo ignora, qui si verifica solo la rilettura
+    (``populate_existing``) prima della fusione."""
+    from app.services import strategy_service as svc
+
+    monkeypatch.setattr(svc, "publish_drawings_changed", lambda *a: None)
+    user, _conn, acc = tenant
+    definition = _definition()
+    definition["strategy"]["charts"].append({"id": "htf-4h", "symbol": "BTCUSDT", "asset": "crypto", "timeframe": "4h", "indicators": []})
+    from app.schemas.strategy import StrategyCreate
+
+    strategy = svc.create_strategy(session, StrategyCreate(name="DR2", definition=definition, account_id=acc.id), user.id)
+    with Session(app_engine, expire_on_commit=False) as other:
+        stale = svc.get_strategy(other, strategy.id, user.id)      # copia caricata PRIMA della prima scrittura
+        assert stale.definition["strategy"]["charts"][0].get("drawings") is None
+        svc.patch_strategy_chart_drawings(session, strategy.id, "main", ChartDrawingsPatch(upsert=[_model("a-main")]), user.id)
+        svc.patch_strategy_chart_drawings(other, strategy.id, "htf-4h", ChartDrawingsPatch(upsert=[_model("a-htf")]), user.id)
+    with Session(app_engine, expire_on_commit=False) as check:
+        assert [d["id"] for d in svc.read_strategy_chart_drawings(check, strategy.id, "main", user.id)] == ["a-main"]
+        assert [d["id"] for d in svc.read_strategy_chart_drawings(check, strategy.id, "htf-4h", user.id)] == ["a-htf"]
