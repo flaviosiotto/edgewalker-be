@@ -1,4 +1,5 @@
 from edgewalker_platform.brokers import source_names as _source_names
+import math
 from datetime import datetime, date
 from typing import Any, Literal, Optional, Union
 
@@ -544,7 +545,7 @@ class LayoutConfigUpdate(BaseModel):
 DrawingType = Literal[
     "trend_line", "ray", "extended_line",
     "horizontal_line", "horizontal_ray", "vertical_line",
-    "rectangle", "path", "text", "callout",
+    "rectangle", "path", "polyline", "fib_retracement", "text", "callout",
 ]
 
 #: type → (min anchors, max anchors | None)
@@ -557,11 +558,16 @@ DRAWING_ANCHOR_COUNTS: dict[str, tuple[int, int | None]] = {
     "vertical_line": (1, 1),
     "rectangle": (2, 2),
     "path": (2, None),
+    "polyline": (2, None),
+    "fib_retracement": (2, 2),
     "text": (1, 1),
     "callout": (2, 2),
 }
 
 MAX_DRAWING_ANCHORS = 500
+#: fib_retracement: ``props.levels`` (ratios of the move, see the renderer)
+MAX_FIB_LEVELS = 24
+MAX_FIB_RATIO = 10.0
 MAX_DRAWINGS_PER_CHART = 200
 
 
@@ -614,6 +620,14 @@ class ChartDrawing(BaseModel):
         text = self.props.get("text")
         if text is not None and (not isinstance(text, str) or len(text) > 500):
             raise ValueError("props.text must be a string of at most 500 characters")
+        levels = self.props.get("levels")
+        if levels is not None:
+            if self.type != "fib_retracement":
+                raise ValueError("props.levels is only valid on fib_retracement")
+            if (not isinstance(levels, list) or len(levels) > MAX_FIB_LEVELS
+                    or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                               and math.isfinite(v) and abs(v) <= MAX_FIB_RATIO for v in levels)):
+                raise ValueError(f"props.levels must be up to {MAX_FIB_LEVELS} finite ratios within ±{MAX_FIB_RATIO:g}")
         return self
 
 
