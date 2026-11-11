@@ -1076,10 +1076,13 @@ def get_live_strategy_status(
     # Get container status
     container_info = _load_container_info_for_live(sl) if sl else {"status": "not_found"}
     
-    # Sync DB if container state differs
+    # Sync DB if container state differs — on a fresh Docker read, never on
+    # the cached summary (a stale "not_found" would fail a healthy runner).
+    if sl and container_info["status"] == "not_found" and sl.status == LiveStatus.RUNNING.value:
+        container_info = live_runner_service.get_live_instance_status(sl.id, fresh=True)
     if sl and container_info["status"] == "not_found" and sl.status == LiveStatus.RUNNING.value:
         sl.status = LiveStatus.ERROR.value
-        sl.error_message = "Container not found (crashed or removed)"
+        sl.error_message = live_runner_service.describe_termination(container_info)
         sl.container_id = None
         session.add(sl)
         session.commit()

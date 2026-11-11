@@ -413,6 +413,10 @@ class LiveRunnerService:
         image_name = _get_required_runner_image()
 
         try:
+            # A status read made before the container existed (GET /strategies/
+            # builds a summary per live) may have cached "not_found": drop it,
+            # or the monitor reads a brand-new runner as terminated.
+            self.invalidate_status_cache(live_id)
             # Create and start container
             container = self.client.containers.run(
                 image=image_name,
@@ -431,6 +435,7 @@ class LiveRunnerService:
                 self.client.networks.get(TRAEFIK_DOCKER_NETWORK).connect(container)
             
             logger.info("Started live runner container: %s (%s)", container_name, container.short_id)
+            self.invalidate_status_cache(live_id)
             
             return {
                 "status": "started",
@@ -480,7 +485,7 @@ class LiveRunnerService:
     
     _STATUS_CACHE_TTL_S = 5.0
 
-    def get_live_instance_status(self, live_id: int) -> dict[str, Any]:
+    def get_live_instance_status(self, live_id: int, *, fresh: bool = False) -> dict[str, Any]:
         """
         Get status of a strategy runner container.
         
@@ -493,7 +498,9 @@ class LiveRunnerService:
             cache = self._status_cache = {}
         now = time.monotonic()
         cached = cache.get(live_id)
-        if cached is not None and now - cached[0] < self._STATUS_CACHE_TTL_S:
+        # ``fresh`` is for callers that act on the answer (marking a live as
+        # failed): a decision must never rest on a cached observation.
+        if not fresh and cached is not None and now - cached[0] < self._STATUS_CACHE_TTL_S:
             return dict(cached[1])
         result = self._get_live_instance_status_uncached(live_id)
         cache[live_id] = (now, dict(result))
@@ -520,18 +527,85 @@ class LiveRunnerService:
         # Refresh container state
         container.reload()
         
-        health = container.attrs.get("State", {}).get("Health", {})
-        
-        return {
+        state = container.attrs.get("State", {}) or {}
+        health = state.get("Health", {})
+
+        info: dict[str, Any] = {
             "status": container.status,
             "running": container.status == "running",
             "container_id": container.short_id,
             "container_name": container.name,
             "created": container.attrs.get("Created"),
-            "started_at": container.attrs.get("State", {}).get("StartedAt"),
+            "started_at": state.get("StartedAt"),
             "health_status": health.get("Status") if health else None,
             "labels": container.labels,
         }
+        if container.status in {"exited", "dead"}:
+            # What Docker knows about the end of the process, plus the runner's
+            # own last words: the reason a user is shown instead of a bare
+            # "terminated unexpectedly".
+            info["exit_code"] = state.get("ExitCode")
+            info["oom_killed"] = bool(state.get("OOMKilled"))
+            info["docker_error"] = str(state.get("Error") or "") or None
+            info["finished_at"] = state.get("FinishedAt")
+            info["last_log_line"] = self._last_meaningful_log_line(container)
+        return info
+
+    @staticmethod
+    def _last_meaningful_log_line(container: Container) -> str | None:
+        """Last error-level line the runner logged (else its last line), trimmed."""
+        try:
+            raw = container.logs(tail=60, stdout=True, stderr=True)
+        except Exception:
+            return None
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return None
+
+        def _message(line: str) -> tuple[str, str]:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                return "", line
+            if not isinstance(record, dict):
+                return "", line
+            return str(record.get("level") or "").lower(), str(record.get("message") or line)
+
+        parsed = [_message(line) for line in lines]
+        errors = [msg for level, msg in parsed if level in {"error", "critical", "fatal"} or "Traceback" in msg or "Error" in msg]
+        chosen = errors[-1] if errors else parsed[-1][1]
+        return chosen[:300]
+
+    @staticmethod
+    def describe_termination(container_info: dict[str, Any]) -> str:
+        """One sentence saying how the runner ended, from the facts Docker reports."""
+        status = str(container_info.get("status") or "")
+        if status == "not_found":
+            return "Runner container no longer exists (removed outside the platform or by a host restart)"
+        exit_code = container_info.get("exit_code")
+        if container_info.get("oom_killed"):
+            reason = "killed by the host for exceeding memory (OOM)"
+        elif exit_code == 137:
+            reason = "killed (exit code 137, SIGKILL: host shutdown, manual kill or out of memory)"
+        elif exit_code == 143:
+            reason = "stopped by a termination signal (exit code 143, SIGTERM) not requested by the platform"
+        elif exit_code == 0:
+            reason = "exited on its own without an error (exit code 0)"
+        elif exit_code is not None:
+            reason = f"crashed (exit code {exit_code})"
+        else:
+            reason = f"is {status or 'not running'}"
+        parts = [f"Runner container {reason}"]
+        finished_at = str(container_info.get("finished_at") or "")
+        if finished_at and not finished_at.startswith("0001-"):
+            parts.append(f"at {finished_at[:19]}Z")
+        message = " ".join(parts)
+        if container_info.get("docker_error"):
+            message += f". Docker: {container_info['docker_error']}"
+        if container_info.get("last_log_line"):
+            message += f". Last log: {container_info['last_log_line']}"
+        return message
     
     def list_live_instances(self, include_all: bool = False) -> list[dict[str, Any]]:
         """

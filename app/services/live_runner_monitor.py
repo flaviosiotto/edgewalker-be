@@ -43,16 +43,20 @@ class LiveRunnerMonitor:
             )
 
         updated_sessions: list[StrategyLive] = []
+        original_status = {sl.id: sl.status for sl in live_sessions}
         now = datetime.now(timezone.utc)
 
         for sl in live_sessions:
-            container_info = live_runner_service.get_live_instance_status(sl.id)
+            # Always a fresh Docker read: the monitor acts on the answer, and a
+            # cached "not_found" from before the container was created used to
+            # mark a just-started runner as terminated (live 547, 11/11/2026).
+            container_info = live_runner_service.get_live_instance_status(sl.id, fresh=True)
             container_status = container_info.get("status")
 
             if sl.status in {LiveStatus.RUNNING.value, LiveStatus.PAUSED.value} and container_status in {"not_found", "exited", "dead"}:
                 sl.status = LiveStatus.ERROR.value
                 sl.container_id = None
-                sl.error_message = "Runner container terminated unexpectedly"
+                sl.error_message = live_runner_service.describe_termination(container_info)
                 sl.stopped_at = now
                 sl.updated_at = now
                 updated_sessions.append(sl)
@@ -73,7 +77,10 @@ class LiveRunnerMonitor:
                 if container_status in {"not_found", "exited", "dead"} and age_seconds >= RUNNER_START_TIMEOUT_SECONDS:
                     sl.status = LiveStatus.ERROR.value
                     sl.container_id = None
-                    sl.error_message = "Runner container did not reach running state within timeout"
+                    sl.error_message = (
+                        f"Runner did not start within {RUNNER_START_TIMEOUT_SECONDS}s: "
+                        + live_runner_service.describe_termination(container_info)
+                    )
                     sl.stopped_at = now
                     sl.updated_at = now
                     updated_sessions.append(sl)
@@ -94,11 +101,18 @@ class LiveRunnerMonitor:
                     sl.updated_at = now
                     updated_sessions.append(sl)
 
-        updated = len(updated_sessions)
-        if updated:
+        updated = 0
+        if updated_sessions:
             with get_session_context() as session:
                 for sl in updated_sessions:
+                    # The Docker reads above take time: apply the verdict only
+                    # if nobody changed the row meanwhile (a start or a stop
+                    # request racing with this tick wins).
+                    current = session.get(StrategyLive, sl.id)
+                    if current is None or current.status != original_status[sl.id]:
+                        continue
                     session.merge(sl)
+                    updated += 1
                 session.commit()
             logger.info("Live runner monitor reconciled %d live instance(s)", updated)
 
