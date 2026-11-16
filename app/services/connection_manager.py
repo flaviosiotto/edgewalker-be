@@ -1722,7 +1722,13 @@ class ConnectionManager:
             status_value = conn.status
 
         launch_url = None
-        if user_id is not None and status_value == ConnectionStatus.AWAITING_AUTH.value:
+        # Anche a connessione attiva: il GUI di IB Gateway può restare bloccato su
+        # un dialogo che solo l'utente può confermare (es. "API client needs
+        # write access"), e senza launch URL non c'è modo di raggiungerlo.
+        if user_id is not None and status_value in {
+            ConnectionStatus.AWAITING_AUTH.value,
+            ConnectionStatus.CONNECTED.value,
+        }:
             launch_url = await create_tws_launch_url(
                 connection_id=connection_id,
                 user_id=user_id,
