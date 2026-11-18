@@ -1,12 +1,14 @@
-"""Market Data API - symbols and indicator catalog."""
+"""Market Data API - symbols, option chains (gateway proxy) and indicator catalog."""
 from __future__ import annotations
 from edgewalker_platform.brokers import has_gateway
 
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.models.user import User
+from app.utils.auth_utils import get_current_active_user
 from app.schemas.marketdata import (
     AvailableSymbolsResponse,
     IndicatorsListResponse,
@@ -118,6 +120,92 @@ def search_symbols_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to search symbols: {str(e)}",
         )
+
+
+# ── Options (proxied to the connection's gateway) ──────────────────────────
+# Contract: devops docs/valutazione-opzioni.md §11. The body is the gateway's,
+# untouched. Errors: 404 connection/account not the caller's, 409 with an
+# ``OPTIONS_*`` detail (broker without options, or the gateway's own 409),
+# 400 invalid parameters, 424 gateway unreachable / broker not connected.
+
+
+async def _options_read(current_user: User, connection_id: int, account_id: int | None, read):
+    from app.services import options_service as svc
+    from app.services.gateway_client import GatewayError
+
+    try:
+        target = svc.resolve_options_target(
+            user_id=current_user.id, connection_id=connection_id, account_id=account_id
+        )
+    except svc.OptionsNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except svc.OptionsRequestError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except svc.OptionsUnsupportedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
+
+    try:
+        return await read(svc, target)
+    except GatewayError as exc:
+        status_code, detail = svc.http_error_for(exc)
+        if status_code >= 424:
+            logger.warning("Options read on connection %s failed: %s", connection_id, exc)
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+@router.get("/options/chain")
+async def get_option_chain_endpoint(
+    connection_id: int = Query(..., description="Connection whose gateway serves the chain"),
+    underlying: str = Query(..., min_length=1, max_length=32, description="Underlying symbol, e.g. MNQZ6"),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Option chain definition of an underlying: expiries, strikes, multiplier."""
+    return await _options_read(
+        current_user, connection_id, None,
+        lambda svc, target: svc.get_option_chain(target, underlying=underlying),
+    )
+
+
+@router.get("/options/quotes")
+async def get_option_quotes_endpoint(
+    connection_id: int = Query(..., description="Connection whose gateway serves the quotes"),
+    underlying: str = Query(..., min_length=1, max_length=32, description="Underlying symbol, e.g. MNQZ6"),
+    expiry: Optional[str] = Query(None, description="Expiry (YYYY-MM-DD) of the strike window"),
+    strikes_around_atm: Optional[int] = Query(
+        None, ge=1, le=25, description="Strikes per side around the underlying price (gateway default 10)"
+    ),
+    symbols: Optional[str] = Query(
+        None, description="Comma-separated canonical option symbols to include anyway"
+    ),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Quotes snapshot of a strike window (prices, greeks, market-data state)."""
+    return await _options_read(
+        current_user, connection_id, None,
+        lambda svc, target: svc.get_option_quotes(
+            target,
+            underlying=underlying,
+            expiry=expiry,
+            strikes_around_atm=strikes_around_atm,
+            symbols=symbols,
+        ),
+    )
+
+
+@router.get("/options/readiness")
+async def get_option_readiness_endpoint(
+    connection_id: int = Query(..., description="Connection whose gateway runs the checks"),
+    underlying: str = Query(..., min_length=1, max_length=32, description="Underlying symbol, e.g. MNQZ6"),
+    account_id: Optional[int] = Query(
+        None, description="Internal account id (must belong to the connection) for the trading-permission check"
+    ),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Whether chain, option market data and option trading are usable."""
+    return await _options_read(
+        current_user, connection_id, account_id,
+        lambda svc, target: svc.get_option_readiness(target, underlying=underlying),
+    )
 
 
 @router.get("/indicators", response_model=IndicatorsListResponse)

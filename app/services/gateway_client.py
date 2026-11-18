@@ -138,8 +138,9 @@ class GatewayClient:
     async def _command(self, call: Any) -> dict:
         """Run a trading command and surface the gateway's reason as a typed error.
 
-        Only the order/position commands go through here: the read paths keep
-        raising ``httpx`` errors, which their callers already handle.
+        Only the order/position commands and the options reads go through
+        here: the other read paths keep raising ``httpx`` errors, which their
+        callers already handle.
         """
         try:
             return await call()
@@ -230,6 +231,19 @@ class GatewayClient:
             params["asset_type"] = asset_type
         resp = await self._get("/search", params=params)
         return resp.get("symbols", [])
+
+    # ── Options (chain, quotes snapshot, readiness) ───────────────────────
+
+    async def get_options(self, path: str, params: dict | None = None) -> Any:
+        """GET one of the gateway's ``/options/*`` reads, body untouched.
+
+        Unlike the other reads, failures come back typed (``GatewayRejectedError``
+        carries the gateway's structured ``detail``, e.g. ``OPTIONS_*`` codes on
+        a 409), because the backend forwards them to the client as they are.
+        """
+        if not path.startswith("/options/"):
+            raise ValueError(f"not an options path: {path}")
+        return await self._command(lambda: self._get(path, params=params))
 
     # ── Streaming ─────────────────────────────────────────────────────────
 
