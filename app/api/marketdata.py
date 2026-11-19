@@ -15,6 +15,7 @@ from app.schemas.marketdata import (
     IndicatorInfo,
     AssetType,
 )
+from app.schemas.options import OptionPayoffRequest, OptionPayoffResponse
 from app.services.indicator_registry import (
     get_all_indicators,
     get_indicator_by_name,
@@ -206,6 +207,28 @@ async def get_option_readiness_endpoint(
         current_user, connection_id, account_id,
         lambda svc, target: svc.get_option_readiness(target, underlying=underlying),
     )
+
+
+@router.post("/options/payoff", response_model=OptionPayoffResponse)
+def option_payoff_endpoint(
+    request: OptionPayoffRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Model value (Black-76) of a set of option legs before expiry.
+
+    Pure computation on the request body — no gateway, no broker: P&L of the
+    set over a grid of underlying prices at ``valuation_at``, and its net
+    greeks at the current underlying price. Position greeks are in currency
+    (× quantity × side × multiplier): theta per calendar day, vega per
+    volatility point. Legs that cannot be valued are listed in ``excluded``.
+    400: legs on different underlyings, ``valuation_at`` in the past.
+    """
+    from app.services.option_payoff_service import OptionPayoffError, compute_payoff
+
+    try:
+        return compute_payoff(request)
+    except OptionPayoffError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/indicators", response_model=IndicatorsListResponse)
