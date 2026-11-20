@@ -536,7 +536,6 @@ def instantiate_template(
         session,
         StrategyCreate(
             name=name,
-            description=template.description,
             definition=definition,
             manager_agent_id=payload.manager_agent_id,
             account_id=account.id,

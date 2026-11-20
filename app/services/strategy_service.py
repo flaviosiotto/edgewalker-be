@@ -415,7 +415,6 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
     strategy = Strategy(
         user_id=user_id,
         name=name,
-        description=payload.description,
         definition=_strip_rule_chat_ids(
             _normalize_strategy_indicator_field_references(payload.definition)
         ),
@@ -472,9 +471,6 @@ def update_strategy(session: Session, strategy_id: int, payload: StrategyUpdate,
                 detail="Strategy name already exists on this account",
             )
         strategy.name = name
-
-    if payload.description is not None:
-        strategy.description = payload.description
 
     if payload.definition is not None:
         assert_indicator_count(session, strategy.user_id, payload.definition)
@@ -602,7 +598,7 @@ def copy_strategy(
 ) -> tuple[Strategy, list[str]]:
     """Duplicate a strategy onto ``target_account_id`` (same account allowed).
 
-    Copies the design (definition, description, layout, manager agent) and
+    Copies the design (definition, layout, manager agent) and
     the agent lessons, orphaned of their backtest evidence. Never copies run
     history: live sessions, orders, fills, alerts, chats, backtests. The
     datafeed connection is derived from the target account.
@@ -640,7 +636,6 @@ def copy_strategy(
     copy = Strategy(
         user_id=user_id,
         name=new_name,
-        description=source.description,
         definition=source.definition,
         layout_config=source.layout_config,
         manager_agent_id=source.manager_agent_id,

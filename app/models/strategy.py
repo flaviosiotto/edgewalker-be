@@ -84,7 +84,6 @@ class Strategy(SQLModel, table=True):
     )
 
     name: str = Field(sa_column=Column(String(255), nullable=False, index=True))
-    description: Optional[str] = Field(default=None, sa_column=Column(String(2000), nullable=True))
 
     # Declarative strategy syntax/config
     definition: Any = Field(sa_column=Column(JSONB, nullable=False))

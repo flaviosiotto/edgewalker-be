@@ -56,7 +56,6 @@ def _prepare_bitcoin(session: Session, user_id: int, agent_id: int) -> dict:
     strategy = Strategy(
         user_id=user_id, name="Primi passi - Bitcoin", account_id=account.id,
         connection_id=connection.id, manager_agent_id=agent_id,
-        description="Esempio didattico BTC/USDT sui dati pubblici Binance Spot. Solo dati e backtest, senza trading reale.",
         definition=definition,
         layout_config={"extendedHours": True, "timezone": "UTC"},
     )
@@ -132,7 +131,6 @@ def provision_user_workspace(session: Session, user: User) -> dict:
     strategy = Strategy(
         user_id=user_id, name="Primi passi - EUR/USD", account_id=account.id,
         connection_id=connection.id, manager_agent_id=agents[0].id_agent,
-        description="Esempio didattico: ingresso sul superamento del massimo orario precedente. Non costituisce una raccomandazione di investimento.",
         definition=starter_definition(),
     )
     session.add(strategy)

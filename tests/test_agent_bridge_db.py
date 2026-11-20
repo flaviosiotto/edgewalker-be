@@ -189,7 +189,7 @@ def test_strategy_records_the_actor(session, tenant):
 
     token = set_current_actor(Actor(via="pat", user_id=user.id, agent_id=9, agent_name="Analyst", pat_id=1, pat_name="cc"))
     try:
-        updated = update_strategy(session, strategy.id, StrategyUpdate(description="by the agent"), user.id)
+        updated = update_strategy(session, strategy.id, StrategyUpdate(name="S4 by the agent"), user.id)
     finally:
         reset_current_actor(token)
     assert updated.updated_by == {"via": "pat", "user_id": user.id, "agent_id": 9, "agent_name": "Analyst", "pat_id": 1, "pat_name": "cc"}
