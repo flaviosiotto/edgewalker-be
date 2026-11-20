@@ -43,11 +43,12 @@ CHAT_EVENT_HEARTBEAT_SECONDS = 15.0
 # Redis channel where runners publish streamed agent-turn chunks
 # (see strategy-runner ChatStreamPublisher). Payload types map 1:1 onto the
 # SSE events emitted to the frontend.
-from app.services.chat_service import CHAT_STREAM_CHANNEL_PREFIX  # noqa: E402
+from app.services.chat_service import CHAT_STREAM_CHANNEL_PREFIX, read_active_turn  # noqa: E402
 _AGENT_TURN_EVENT_MAP = {
     "turn_start": "agent_turn_start",
     "delta": "agent_delta",
     "tool_call": "agent_tool_call",
+    "activity": "agent_activity",
     "turn_end": "agent_turn_end",
     "turn_error": "agent_turn_error",
 }
@@ -236,7 +237,10 @@ async def chat_events_endpoint(
 
         try:
             # Initial connected marker so clients know the subscription is live.
-            yield f"event: ready\ndata: {json.dumps({'session_id': session_id})}\n\n"
+            # ``active_turn``: the channel has no history, so a client that
+            # connects mid-turn learns here that the agent is at work.
+            ready = {"session_id": session_id, "active_turn": await read_active_turn(session_id)}
+            yield f"event: ready\ndata: {json.dumps(ready)}\n\n"
             while True:
                 if await request.is_disconnected():
                     break

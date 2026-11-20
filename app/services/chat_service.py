@@ -42,22 +42,53 @@ DEFAULT_SEND_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 # relayed to clients by ``GET /chats/{id}/events``. Runners publish their own
 # turns on it; agent runs (Paperclip, A2A, MCP) are published by ``_post_turn``.
 CHAT_STREAM_CHANNEL_PREFIX = "chat-stream:"
+# Redis key with what the turn in flight on a chat session is doing right now
+# (``TurnRelay.state``). A client that connects mid-turn (page reload, second
+# tab) reads it from the ``ready`` event of ``GET /chats/{id}/events``: the
+# channel above carries no history. Refreshed by every event and heartbeat.
+CHAT_TURN_STATE_PREFIX = "chat-turn:"
+CHAT_TURN_STATE_TTL_SECONDS = 120
+# Silence allowed on the user's streamed reply before a keep-alive comment:
+# a reasoning step sends nothing for minutes and proxies drop idle responses.
+CHAT_STREAM_HEARTBEAT_SECONDS = 15.0
 
 
 class TurnRelay:
     """Best-effort publisher of the live events of one agent turn: display
     only, never authoritative (a failed publish must not fail the turn)."""
 
-    def __init__(self, session_id: str, request_id: str):
+    def __init__(self, session_id: str, request_id: str, *, asker: dict[str, Any] | None = None):
         self.session_id = str(session_id)
         self.request_id = request_id
+        # Who asked and what (``chat_input`` / ``sender_kind`` /
+        # ``sender_label``): lets a client show the question with the turn.
+        self.asker = dict(asker or {})
         self._buffer = ""
         self.full_len = 0
+        self.started_ms = int(time.time() * 1000)
+        self.activity: dict[str, Any] = {"phase": "thinking"}
+        self.tools = 0
+        self._open = False
 
-    def _publish(self, payload: dict[str, Any]) -> None:
+    @property
+    def state(self) -> dict[str, Any]:
+        """What the turn is doing now: ``phase`` is ``thinking`` (the model is
+        working on its next step), ``tool`` (running ``name``) or ``writing``
+        (the reply is streaming); ``tools`` counts the tool calls so far."""
+        return {
+            "request_id": self.request_id,
+            "started_at": self.started_ms,
+            "tools": self.tools,
+            **self.activity,
+        }
+
+    def _client(self):
         from app.utils.redis_client import get_redis
 
-        client = get_redis()
+        return get_redis()
+
+    def _publish(self, payload: dict[str, Any]) -> None:
+        client = self._client()
         if client is None:
             return
         try:
@@ -65,40 +96,111 @@ class TurnRelay:
         except Exception as exc:  # noqa: BLE001
             logger.debug("chat-stream publish failed (non-critical): %s", exc)
 
-    def feed(self, text: str) -> None:
-        """Consume agent-svc NDJSON (``{"type": "begin"|"item"|"end", ...}``, one per line)."""
+    def touch(self) -> None:
+        """Store (or refresh) the state of the turn while it is in flight."""
+        if not self._open:
+            return
+        client = self._client()
+        if client is None:
+            return
+        try:
+            client.set(f"{CHAT_TURN_STATE_PREFIX}{self.session_id}", json.dumps(self.state), ex=CHAT_TURN_STATE_TTL_SECONDS)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("chat-turn state write failed (non-critical): %s", exc)
+
+    def close(self) -> None:
+        """The turn is over, however it ended: drop its state. Idempotent."""
+        if not self._open:
+            return
+        self._open = False
+        client = self._client()
+        if client is None:
+            return
+        try:
+            client.delete(f"{CHAT_TURN_STATE_PREFIX}{self.session_id}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("chat-turn state delete failed (non-critical): %s", exc)
+
+    def _set_activity(self, activity: dict[str, Any]) -> dict[str, Any]:
+        self.activity = activity
+        self.touch()
+        return self.state
+
+    def feed(self, text: str) -> list[dict[str, Any]]:
+        """Consume agent-svc NDJSON (``{"type": "begin"|"item"|"end", ...}``, one per line).
+
+        Returns the state after each change of activity met in ``text``, for
+        a caller that streams the turn itself (the user's chat reply)."""
+        changes: list[dict[str, Any]] = []
         self._buffer += text
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
-            self._line(line)
+            changed = self._line(line)
+            if changed is not None:
+                changes.append(changed)
+        return changes
 
-    def _line(self, line: str) -> None:
+    def _line(self, line: str) -> dict[str, Any] | None:
         stripped = line.strip()
         if not stripped.startswith("{"):
-            return
+            return None
         try:
             payload = json.loads(stripped)
         except json.JSONDecodeError:
-            return
+            return None
         if not isinstance(payload, dict):
-            return
+            return None
         kind = payload.get("type")
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        changed: dict[str, Any] | None = None
         if kind == "begin":
-            self._publish({"type": "turn_start", "session_id": self.session_id, "source": "run", "ts": int(time.time() * 1000)})
+            self._open = True
+            self._publish({"type": "turn_start", "session_id": self.session_id, "source": "run", "ts": self.started_ms, **self.asker})
+            changed = self._set_activity({"phase": "thinking"})
         elif kind == "item":
             tool = metadata.get("tool_call")
             if isinstance(tool, str) and tool:
-                self._publish({"type": "tool_call", "name": tool})
+                self.tools += 1
+                self._publish({"type": "tool_call", "name": tool, "tools": self.tools})
+                changed = self._set_activity({"phase": "tool", "name": tool})
+            elif metadata.get("activity") == "thinking" and self.activity.get("phase") != "thinking":
+                self._publish({"type": "activity", "phase": "thinking", "tools": self.tools})
+                changed = self._set_activity({"phase": "thinking"})
             content = payload.get("content")
             if isinstance(content, str) and content:
                 self.full_len += len(content)
                 self._publish({"type": "delta", "delta": content})
+                if self.activity.get("phase") != "writing":
+                    changed = self._set_activity({"phase": "writing"})
         elif kind == "end":
             self._publish({"type": "turn_end", "full_len": self.full_len})
+            self.close()
+        return changed
 
     def error(self, detail: str) -> None:
         self._publish({"type": "turn_error", "detail": detail})
+        self.close()
+
+
+async def read_active_turn(session_id: str) -> dict[str, Any] | None:
+    """State of the agent turn in flight on a chat session, if any."""
+    from app.utils.redis_async import get_async_redis
+
+    client = get_async_redis()
+    if client is None:
+        return None
+    try:
+        raw = await client.get(f"{CHAT_TURN_STATE_PREFIX}{session_id}")
+        state = json.loads(raw) if raw else None
+    except Exception as exc:  # noqa: BLE001 - display only
+        logger.debug("chat-turn state read failed (non-critical): %s", exc)
+        return None
+    return state if isinstance(state, dict) else None
+
+
+# Relay tasks of the streamed chat replies in flight: they outlive the request
+# that started them, so something must hold a reference.
+_STREAM_PUMPS: set[asyncio.Task] = set()
 
 
 class AgentTurnDeadlineExceeded(Exception):
@@ -1066,20 +1168,24 @@ async def stream_chat_message(
     # reference only the plain locals captured above — never ORM state.
     session.close()
 
-    async def event_stream() -> AsyncIterator[str]:
+    relay = TurnRelay(
+        session_id,
+        request_id,
+        asker={"chat_input": normalized_text, "sender_kind": sender_kind, "sender_label": sender_label},
+    )
+    events: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+
+    def push(event: str, **payload: Any) -> None:
+        events.put_nowait((event, {"request_id": request_id, **payload}))
+
+    async def pump() -> None:
+        """Drain the agent's stream to the end, whatever happens to the
+        client: the turn keeps running in agent-svc anyway, and the relay
+        keeps a reloaded page (or another tab) informed through
+        ``GET /chats/{id}/events``."""
         decoder = codecs.getincrementaldecoder("utf-8")()
         buffer = ""
         full_text = ""
-
-        yield _sse_event(
-            "message_start",
-            {
-                "request_id": request_id,
-                "chat_id": resolved_chat_id,
-                "session_id": session_id,
-            },
-        )
-
         try:
             async with httpx.AsyncClient(timeout=DEFAULT_STREAM_TIMEOUT) as client:
                 async with client.stream(
@@ -1088,6 +1194,9 @@ async def stream_chat_message(
                     json=webhook_payload,
                     headers=headers,
                 ) as response:
+                    if response.is_error:
+                        # A streamed response has no body until it is read.
+                        await response.aread()
                     response.raise_for_status()
 
                     # Always iterate chunks with the raw_decode-based drain parser.
@@ -1098,23 +1207,19 @@ async def stream_chat_message(
                     async for chunk in response.aiter_bytes():
                         if not chunk:
                             continue
-
                         text_chunk = decoder.decode(chunk)
                         if not text_chunk:
                             continue
 
-                        buffer += text_chunk
+                        # Progress markers (empty items the text parser skips).
+                        for state in await asyncio.to_thread(relay.feed, text_chunk):
+                            push("message_activity", **state)
 
+                        buffer += text_chunk
                         buffer, full_text, emitted_parts = _drain_stream_buffer(buffer, full_text)
                         for emitted in emitted_parts:
                             if emitted:
-                                yield _sse_event(
-                                    "message_chunk",
-                                    {
-                                        "request_id": request_id,
-                                        "delta": emitted,
-                                    },
-                                )
+                                push("message_chunk", delta=emitted)
 
                     tail = decoder.decode(b"", final=True)
                     if tail:
@@ -1123,34 +1228,14 @@ async def stream_chat_message(
                     buffer, full_text, emitted_parts = _drain_stream_buffer(buffer, full_text)
                     for emitted in emitted_parts:
                         if emitted:
-                            yield _sse_event(
-                                "message_chunk",
-                                {
-                                    "request_id": request_id,
-                                    "delta": emitted,
-                                },
-                            )
+                            push("message_chunk", delta=emitted)
 
                     if buffer:
                         full_text, emitted = _emit_terminal_buffer(buffer, full_text)
                         if emitted:
-                            yield _sse_event(
-                                "message_chunk",
-                                {
-                                    "request_id": request_id,
-                                    "delta": emitted,
-                                },
-                            )
+                            push("message_chunk", delta=emitted)
 
-            yield _sse_event(
-                "message_end",
-                {
-                    "request_id": request_id,
-                    "chat_id": resolved_chat_id,
-                    "session_id": session_id,
-                    "full_text": full_text,
-                },
-            )
+            push("message_end", chat_id=resolved_chat_id, session_id=session_id, full_text=full_text)
             # Character-based estimate of the turn; the n8n usage report with
             # the real token counts replaces it (same correlation id).
             await asyncio.to_thread(
@@ -1163,34 +1248,47 @@ async def stream_chat_message(
             )
         except httpx.ConnectError as exc:
             logger.warning("chat %s request %s: cannot connect to %s: %s", resolved_chat_id, request_id, webhook_url, exc)
-            yield _sse_event(
-                "message_error",
-                {
-                    "request_id": request_id,
-                    "detail": f"Cannot connect to agent webhook: {exc}",
-                },
-            )
+            push("message_error", detail=f"Cannot connect to agent webhook: {exc}")
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:500] if exc.response.text else ""
             detail = f"Agent webhook returned {exc.response.status_code}"
             if body:
                 detail = f"{detail}: {body}"
             logger.warning("chat %s request %s: %s (%s)", resolved_chat_id, request_id, detail, webhook_url)
-            yield _sse_event(
-                "message_error",
-                {
-                    "request_id": request_id,
-                    "detail": detail,
-                },
-            )
+            push("message_error", detail=detail)
         except httpx.HTTPError as exc:
             logger.warning("chat %s request %s: agent call to %s failed: %s", resolved_chat_id, request_id, webhook_url, exc)
-            yield _sse_event(
-                "message_error",
-                {
-                    "request_id": request_id,
-                    "detail": f"Failed to call agent webhook: {exc}",
-                },
-            )
+            push("message_error", detail=f"Failed to call agent webhook: {exc}")
+        except Exception as exc:  # noqa: BLE001 - the reader must always get an end
+            logger.exception("chat %s request %s: agent stream relay failed", resolved_chat_id, request_id)
+            push("message_error", detail=f"Agent stream failed: {exc}")
+        finally:
+            # No ``end`` envelope seen (error, broken stream): the turn is not
+            # in flight any more as far as this relay can tell.
+            await asyncio.to_thread(relay.close)
+            events.put_nowait(None)
+
+    async def event_stream() -> AsyncIterator[str]:
+        yield _sse_event(
+            "message_start",
+            {
+                "request_id": request_id,
+                "chat_id": resolved_chat_id,
+                "session_id": session_id,
+            },
+        )
+        task = asyncio.create_task(pump(), name=f"chat-stream-{request_id}")
+        _STREAM_PUMPS.add(task)
+        task.add_done_callback(_STREAM_PUMPS.discard)
+        while True:
+            try:
+                item = await asyncio.wait_for(events.get(), timeout=CHAT_STREAM_HEARTBEAT_SECONDS)
+            except asyncio.TimeoutError:
+                await asyncio.to_thread(relay.touch)
+                yield ": ping\n\n"
+                continue
+            if item is None:
+                break
+            yield _sse_event(*item)
 
     return request_id, event_stream()
