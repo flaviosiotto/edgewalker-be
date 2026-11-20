@@ -48,11 +48,16 @@ class StrategyLiveRead(BaseModel):
         from_attributes = True
 
 
+#: Size of ``strategies.description`` (``String(2000)`` in the model): a longer
+#: text must be a 422 the caller can act on — the design agent reads the
+#: message and shortens it — never a database error surfacing as a 500.
+STRATEGY_DESCRIPTION_MAX = 2000
+
 class StrategyCreate(BaseModel):
     # Optional since 29/08/2026: the design agent names the strategy. When
     # omitted the backend picks a unique placeholder ("Nuova strategia N").
     name: Optional[str] = Field(default=None, max_length=60)
-    description: Optional[str] = None
+    description: Optional[str] = Field(default=None, max_length=STRATEGY_DESCRIPTION_MAX)
     definition: Any
     manager_agent_id: Optional[int] = None
     # Trading account the strategy belongs to (mandatory from birth). The
@@ -140,7 +145,7 @@ class StrategyFavoriteUpdate(BaseModel):
 
 class StrategyUpdate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=60)
-    description: Optional[str] = None
+    description: Optional[str] = Field(default=None, max_length=STRATEGY_DESCRIPTION_MAX)
     definition: Optional[Any] = None
     layout_config: Optional[dict[str, Any]] = None
     manager_agent_id: Optional[int] = None
