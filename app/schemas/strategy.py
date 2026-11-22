@@ -252,7 +252,13 @@ class BacktestCreate(BaseModel):
     timeframe: str = "5m"  # e.g., "1m", "5m", "15m", "1h", "1d"
     # Replay clock finer than the strategy timeframe (fills, TP/SL, alerts and
     # forming bars follow it); None/equal = the primary chart bars are the clock.
+    # In bulk mode it only times the TP/SL touches inside a primary bar.
     simulation_timeframe: Optional[str] = None
+    # "replay": runner container fed bar by bar (forming bars, agent turns,
+    # live chart). "bulk": rules applied in-process over the whole period on
+    # closed bars — no agent (ask_agent rules fire as a hold and are counted),
+    # no live chart; meant for long periods.
+    mode: Literal["replay", "bulk"] = "replay"
     asset: Literal["stock", "future", "futures", "forex", "crypto"] = "stock"
     rth: bool = True  # True = Regular Trading Hours only
     
@@ -297,6 +303,7 @@ class BacktestRead(BaseModel):
     source: Optional[str] = None
     timeframe: Optional[str] = None
     simulation_timeframe: Optional[str] = None
+    mode: str = "replay"
     asset: Optional[str] = None
     rth: Optional[bool] = None
     
@@ -484,6 +491,7 @@ class BacktestSummary(BaseModel):
     source: Optional[str] = None
     timeframe: Optional[str] = None
     simulation_timeframe: Optional[str] = None
+    mode: str = "replay"
     asset: Optional[str] = None
     initial_capital: Optional[float] = None
     commission: Optional[float] = None

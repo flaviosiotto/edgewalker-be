@@ -54,7 +54,7 @@ from app.services.n8n_auth import (
 )
 from app.utils.auth_utils import create_user_delegated_token
 from app.utils.timeframes import normalize_simulation_timeframe
-from edgewalker_platform.rules_dsl import validate_definition
+from edgewalker_platform.rules_dsl import bulk_mode_problems, validate_definition
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -149,6 +149,20 @@ def _normalize_strategy_indicator_field_references(value: Any) -> Any:
             for key, item in mapping.items()
         }
     return value
+
+
+def _reject_unsupported_in_bulk(definition: Any) -> None:
+    """A bulk backtest (``mode = "bulk"``) evaluates rules on the primary
+    chart's closed bars: refuse at creation what it cannot run faithfully,
+    instead of failing the run after the data has been downloaded."""
+    if not isinstance(definition, dict):
+        return
+    problems = bulk_mode_problems(definition)
+    if problems:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Strategia non eseguibile in modalità massiva: " + "; ".join(problems),
+        )
 
 
 def _reject_invalid_rules(definition: Any) -> None:
@@ -715,8 +729,11 @@ def create_backtest(
     if source not in allowed_sources:
         source = "ibkr"
     
-    # Snapshot the manager agent used by this backtest instance.
-    resolved_agent_id = _resolve_backtest_agent_id(
+    bulk = payload.mode == "bulk"
+
+    # Snapshot the manager agent used by this backtest instance. A bulk run
+    # has none: no agent is ever called (ask_agent rules fire as a hold).
+    resolved_agent_id = None if bulk else _resolve_backtest_agent_id(
         session, strategy, explicit_agent_id=payload.agent_id
     )
     if resolved_agent_id is not None:
@@ -727,28 +744,32 @@ def create_backtest(
             payload.config if payload.config else strategy.definition
         )
     )
+    if bulk:
+        _reject_unsupported_in_bulk(config_snapshot)
 
     # Playbook the run starts from (docs/valutazione-playbook-lezioni.md):
     # resolved now, copied into the run's own rows once the row has an id.
     from app.services import playbook_service
 
     lessons_from = payload.lessons_from
-    if lessons_from is None and not payload.use_lessons:
+    if bulk or (lessons_from is None and not payload.use_lessons):
+        # No agent in a bulk run: nobody reads lessons nor writes any.
         lessons_from = "none"
     input_meta, input_rows = playbook_service.resolve_input(session, strategy, lessons_from)
     lessons_meta: dict[str, Any] = {
         **input_meta,
         "enabled": True,
-        "learning_mode": payload.learning_mode or DEFAULT_LEARNING_MODE,
+        "learning_mode": "off" if bulk else (payload.learning_mode or DEFAULT_LEARNING_MODE),
     }
     base_parameters = payload.parameters if isinstance(payload.parameters, dict) else {}
     merged_parameters = {**base_parameters, "lessons": lessons_meta}
-    if payload.agent_reasoning:
-        merged_parameters["agent_reasoning"] = payload.agent_reasoning
-    if payload.agent_timeout_s is not None:
-        merged_parameters["agent_timeout_s"] = float(payload.agent_timeout_s)
-    if payload.on_agent_timeout:
-        merged_parameters["on_agent_timeout"] = payload.on_agent_timeout
+    if not bulk:
+        if payload.agent_reasoning:
+            merged_parameters["agent_reasoning"] = payload.agent_reasoning
+        if payload.agent_timeout_s is not None:
+            merged_parameters["agent_timeout_s"] = float(payload.agent_timeout_s)
+        if payload.on_agent_timeout:
+            merged_parameters["on_agent_timeout"] = payload.on_agent_timeout
 
     backtest = BacktestResult(
         strategy_id=strategy_id,
@@ -761,6 +782,7 @@ def create_backtest(
         source=source,
         timeframe=payload.timeframe,
         simulation_timeframe=normalize_simulation_timeframe(payload.simulation_timeframe, payload.timeframe),
+        mode=payload.mode,
         asset=payload.asset,
         rth=payload.rth,
         # IBKR-specific parameters
@@ -823,6 +845,7 @@ _BACKTEST_SUMMARY_COLUMNS = (
     BacktestResult.source,
     BacktestResult.timeframe,
     BacktestResult.simulation_timeframe,
+    BacktestResult.mode,
     BacktestResult.asset,
     BacktestResult.initial_capital,
     BacktestResult.commission,
@@ -1043,6 +1066,16 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
     broker_type = str(connection.broker_type or "").strip().lower()
     position_accounting_mode = _resolve_backtest_position_accounting_mode(connection)
 
+    if backtest.mode == "bulk":
+        return _run_bulk_backtest(
+            session,
+            backtest,
+            strategy,
+            connection,
+            broker_type=broker_type,
+            position_accounting_mode=position_accounting_mode,
+        )
+
     try:
         backtest_chat = get_or_create_backtest_chat(session, backtest.id, user_id)
         runner_auth_token = create_user_delegated_token(
@@ -1079,41 +1112,14 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
                     no_expiry=True,
                 )
 
-        raw_strategy_config = backtest.config or strategy.definition
-        strategy_config = _strip_rule_chat_ids(
-            _normalize_strategy_indicator_field_references(raw_strategy_config)
-        )
-        from app.services.contract_multiplier import resolve_contract_multiplier
-
-        contract_multiplier, multiplier_source = resolve_contract_multiplier(
+        strategy_config, contract_multiplier = _backtest_run_config(
             session,
-            symbol=backtest.symbol,
-            asset=backtest.asset,
-            connection=connection,
-            backtest_config=backtest.config,
-            strategy_definition=strategy.definition,
-        )
-        logger.info(
-            "Backtest %d contract multiplier for %s: %s (source=%s)",
-            backtest.id, backtest.symbol, contract_multiplier, multiplier_source,
-        )
-        strategy_config = _with_backtest_accounting_snapshot(
-            strategy_config,
+            backtest,
+            strategy,
+            connection,
             broker_type=broker_type,
             position_accounting_mode=position_accounting_mode,
-            contract_multiplier=contract_multiplier,
         )
-        # Pin user-defined indicators to their current valid version
-        # (params.ew_hash) so the backtest resolves them by content hash.
-        from app.services.indicator_ref_service import inject_user_indicator_refs
-
-        strategy_config = inject_user_indicator_refs(strategy_config, strategy.user_id)
-        if strategy_config != raw_strategy_config:
-            backtest.config = strategy_config
-            logger.info(
-                "Normalized backtest %d config before runner start",
-                backtest.id,
-            )
 
         run_parameters = backtest.parameters if isinstance(backtest.parameters, dict) else {}
         lessons_cfg = run_parameters.get("lessons")
@@ -1178,6 +1184,120 @@ def run_backtest(session: Session, backtest_id: int, user_id: int | None = None)
     return backtest
 
 
+def _backtest_run_config(
+    session: Session,
+    backtest: BacktestResult,
+    strategy: Strategy,
+    connection: Any,
+    *,
+    broker_type: str,
+    position_accounting_mode: str,
+) -> tuple[dict[str, Any], float | None]:
+    """The strategy config a run executes, and its contract multiplier.
+
+    Normalizes the snapshot taken at creation (field references, accounting
+    mode of the connection, multiplier, pinned user indicators) and stores it
+    back on the row when it changed. Shared by the two execution modes.
+    """
+    raw_strategy_config = backtest.config or strategy.definition
+    strategy_config = _strip_rule_chat_ids(
+        _normalize_strategy_indicator_field_references(raw_strategy_config)
+    )
+    from app.services.contract_multiplier import resolve_contract_multiplier
+
+    contract_multiplier, multiplier_source = resolve_contract_multiplier(
+        session,
+        symbol=backtest.symbol,
+        asset=backtest.asset,
+        connection=connection,
+        backtest_config=backtest.config,
+        strategy_definition=strategy.definition,
+    )
+    logger.info(
+        "Backtest %d contract multiplier for %s: %s (source=%s)",
+        backtest.id, backtest.symbol, contract_multiplier, multiplier_source,
+    )
+    strategy_config = _with_backtest_accounting_snapshot(
+        strategy_config,
+        broker_type=broker_type,
+        position_accounting_mode=position_accounting_mode,
+        contract_multiplier=contract_multiplier,
+    )
+    # Pin user-defined indicators to their current valid version
+    # (params.ew_hash) so the backtest resolves them by content hash.
+    from app.services.indicator_ref_service import inject_user_indicator_refs
+
+    strategy_config = inject_user_indicator_refs(strategy_config, strategy.user_id)
+    if strategy_config != raw_strategy_config:
+        backtest.config = strategy_config
+        logger.info(
+            "Normalized backtest %d config before the run",
+            backtest.id,
+        )
+    return strategy_config, contract_multiplier
+
+
+def _run_bulk_backtest(
+    session: Session,
+    backtest: BacktestResult,
+    strategy: Strategy,
+    connection: Any,
+    *,
+    broker_type: str,
+    position_accounting_mode: str,
+) -> BacktestResult:
+    """Start a bulk run (``mode = "bulk"``): no runner container, no agent.
+
+    The coordinator gets what a runner would have been started with (config,
+    connection, accounting mode, multiplier) and applies the rules in-process
+    over the whole period. No chat token, no agent webhook: nothing in a bulk
+    run talks to an agent.
+    """
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    try:
+        strategy_config, contract_multiplier = _backtest_run_config(
+            session,
+            backtest,
+            strategy,
+            connection,
+            broker_type=broker_type,
+            position_accounting_mode=position_accounting_mode,
+        )
+        _reject_unsupported_in_bulk(strategy_config)
+        # RUNNING before the call: the coordinator writes the row too, as
+        # soon as it accepts the run.
+        backtest.status = BacktestStatus.RUNNING.value
+        backtest.started_at = datetime.now(timezone.utc)
+        backtest.completed_at = None
+        backtest.error_message = None
+        session.add(backtest)
+        session.commit()
+        result = backtest_runner_service.start_bulk_backtest(
+            backtest_id=backtest.id,
+            connection_id=strategy.connection_id,
+            strategy_config=strategy_config,
+            broker_type=broker_type,
+            position_accounting_mode=position_accounting_mode,
+            contract_multiplier=contract_multiplier,
+        )
+        logger.info("Started bulk backtest %d: %s", backtest.id, result)
+        session.refresh(backtest)
+    except RuntimeError as e:
+        backtest.status = BacktestStatus.ERROR.value
+        backtest.completed_at = datetime.now(timezone.utc)
+        backtest.error_message = f"Failed to start bulk backtest: {e}"
+        backtest.failure_kind = "start"
+        session.add(backtest)
+        session.commit()
+        session.refresh(backtest)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start bulk backtest: {e}",
+        )
+    return backtest
+
+
 _RETRYABLE_STATUSES = {BacktestStatus.COMPLETED.value, BacktestStatus.FAILED.value, BacktestStatus.ERROR.value}
 
 
@@ -1226,6 +1346,7 @@ def retry_backtest(session: Session, backtest_id: int, user_id: int | None = Non
         source=source_row.source,
         timeframe=source_row.timeframe or "5m",
         simulation_timeframe=source_row.simulation_timeframe,
+        mode="bulk" if source_row.mode == "bulk" else "replay",
         asset=source_row.asset or "stock",
         rth=_parse_bool(source_row.rth, default=True),
         ibkr_config=source_row.ibkr_config,

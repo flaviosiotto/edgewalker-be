@@ -479,6 +479,10 @@ class BacktestResult(SQLModel, table=True):
     timeframe: Optional[str] = Field(default="5m", sa_column=Column(String(10), nullable=True))
     # Replay clock finer than the primary chart (migr. 064); NULL = primary chart bars
     simulation_timeframe: Optional[str] = Field(default=None, sa_column=Column(String(10), nullable=True))
+    # How the run is executed (migr. 075): "replay" = runner container fed by
+    # Redis streams at a pace (forming bars, agent turns); "bulk" = rules
+    # applied in-process over the whole dataset on closed bars, no agent.
+    mode: str = Field(default="replay", sa_column=Column(String(16), nullable=False, server_default="replay"))
     asset: Optional[str] = Field(default="stock", sa_column=Column(String(20), nullable=True))
     rth: Optional[bool] = Field(default=True, sa_column=Column(String(10), nullable=True))  # stored as string for simplicity
     

@@ -320,6 +320,45 @@ class BacktestRunnerService:
             logger.error("Failed to start backtest runner %s: %s", container_name, exc)
             raise RuntimeError(f"Failed to start backtest runner: {exc}") from exc
 
+    def start_bulk_backtest(
+        self,
+        backtest_id: int,
+        connection_id: int | str | None,
+        strategy_config: dict[str, Any],
+        *,
+        broker_type: str = "",
+        position_accounting_mode: str = "netting",
+        contract_multiplier: float | None = None,
+    ) -> dict[str, Any]:
+        """Start a bulk run on the coordinator: no runner container.
+
+        The coordinator applies the rules in-process over the whole period
+        (docs/valutazione-backtest-massivo.md); it gets here what a runner
+        container is given through its environment in replay mode.
+        """
+        payload = {
+            "strategy_config": strategy_config,
+            "connection_id": str(connection_id) if connection_id is not None else None,
+            "broker_type": str(broker_type or ""),
+            "position_accounting_mode": str(position_accounting_mode or "netting"),
+            "contract_multiplier": float(contract_multiplier) if contract_multiplier and contract_multiplier > 0 else None,
+        }
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.post(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/run-bulk", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            try:
+                detail: Any = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            raise RuntimeError(f"Backtest coordinator refused the bulk run: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}"
+            ) from exc
+
     def stop_backtest(self, backtest_id: int, remove: bool = True) -> dict[str, Any]:
         service_result: dict[str, Any] = {}
         try:
