@@ -541,6 +541,21 @@ def get_backtest_agent_calls_endpoint(
     return {"agent_calls": [call.model_dump(mode="json") for call in calls]}
 
 
+@router.post("/{backtest_id}/agent-evaluation/request", status_code=202)
+def request_backtest_agent_evaluation_endpoint(
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Ask the run's agent to evaluate a completed backtest (Agent Score +
+    Agent Hint). Returns at once: the evaluation lands on the backtest when
+    the agent closes its turn. The way to get one for a bulk run, which never
+    calls the agent, and for a replay run that ended without it."""
+    from app.services.backtest_evaluation_service import request_backtest_agent_evaluation
+
+    return request_backtest_agent_evaluation(session, backtest_id, current_user.id)
+
+
 @router.put("/{backtest_id}/agent-evaluation")
 def set_backtest_agent_evaluation_endpoint(
     backtest_id: int,

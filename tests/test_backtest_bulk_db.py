@@ -207,3 +207,159 @@ def test_retry_keeps_the_mode(session, tenant, monkeypatch):
 
     clone = retry_backtest(session, bt.id, user.id)
     assert clone.mode == "bulk" and clone.agent_id is None and clone.simulation_timeframe == "1m"
+
+
+# ── Agent evaluation asked after the run (backtest_evaluation_service) ──────
+
+
+class _InlineExecutor:
+    def submit(self, fn, **kwargs):
+        fn(**kwargs)
+
+
+def _completed_bulk(session, user, acc, monkeypatch, *, trades=12):
+    from app.services.strategy_service import create_backtest
+
+    _no_multiplier_lookup(monkeypatch)
+    strategy = _strategy(session, user, acc)
+    backtest = create_backtest(session, strategy.id, _payload(), user.id)
+    backtest.status = "completed"
+    backtest.total_trades = trades
+    backtest.metrics = {"mode": "bulk", "bulk": {"agent_hold_count": 3}}
+    session.add(backtest)
+    session.commit()
+    return backtest
+
+
+def _wire_evaluation(monkeypatch, *, agent_id=77, on_turn=None):
+    """Stub the chat/agent plumbing: the agent tables are migration-managed."""
+    from types import SimpleNamespace
+
+    import app.services.agent_run_service as agent_run_service
+    import app.services.chat_service as chat_service
+    import app.services.entitlement_service as entitlement_service
+    import app.services.strategy_service as strategy_service
+
+    sent: list[dict] = []
+    monkeypatch.setattr(strategy_service, "get_or_create_backtest_chat",
+                        lambda session, backtest_id, user_id=None: SimpleNamespace(id=501, id_agent=agent_id, user_id=user_id))
+    monkeypatch.setattr(entitlement_service, "check_ai_budget", lambda *a, **k: None)
+    monkeypatch.setattr(agent_run_service, "_run_executor", lambda: _InlineExecutor())
+
+    def fake_send(session, **kwargs):
+        sent.append(kwargs)
+        if on_turn is not None:
+            on_turn(session, kwargs)
+
+    monkeypatch.setattr(chat_service, "send_chat_message", fake_send)
+    return sent
+
+
+def test_evaluation_request_needs_a_completed_run_with_trades(session, tenant, monkeypatch):
+    from app.services.backtest_evaluation_service import request_backtest_agent_evaluation
+
+    user, _conn, acc = tenant
+    backtest = _completed_bulk(session, user, acc, monkeypatch, trades=0)
+    _wire_evaluation(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        request_backtest_agent_evaluation(session, backtest.id, user.id)
+    assert exc.value.status_code == 409 and "no trades" in exc.value.detail
+
+    backtest.status, backtest.total_trades = "running", 5
+    session.add(backtest)
+    session.commit()
+    with pytest.raises(HTTPException) as exc:
+        request_backtest_agent_evaluation(session, backtest.id, user.id)
+    assert exc.value.status_code == 409 and "completed" in exc.value.detail
+
+
+def test_evaluation_request_needs_an_agent(session, tenant, monkeypatch):
+    from app.services.backtest_evaluation_service import request_backtest_agent_evaluation
+
+    user, _conn, acc = tenant
+    backtest = _completed_bulk(session, user, acc, monkeypatch)
+    sent = _wire_evaluation(monkeypatch, agent_id=None)
+    with pytest.raises(HTTPException) as exc:
+        request_backtest_agent_evaluation(session, backtest.id, user.id)
+    assert exc.value.status_code == 409 and "No agent" in exc.value.detail
+    assert sent == []
+
+
+def test_evaluation_request_sends_a_read_only_synthesis_turn(session, tenant, monkeypatch):
+    from app.models.strategy import BacktestResult
+    from app.services.backtest_evaluation_service import request_backtest_agent_evaluation
+
+    user, _conn, acc = tenant
+    backtest = _completed_bulk(session, user, acc, monkeypatch)
+
+    def agent_submits(own_session, _kwargs):
+        row = own_session.get(BacktestResult, backtest.id)
+        row.agent_evaluation = {"score_pct": 55.0, "created_at": datetime.now(timezone.utc).isoformat()}
+        own_session.add(row)
+        own_session.commit()
+
+    sent = _wire_evaluation(monkeypatch, on_turn=agent_submits)
+    result = request_backtest_agent_evaluation(session, backtest.id, user.id)
+
+    assert result["status"] == "requested" and result["agent_id"] == 77
+    (turn,) = sent
+    assert turn["chat_id"] == 501 and turn["user_id"] == user.id
+    assert turn["metadata"]["message_type"] == "backtest_synthesis"
+    assert turn["metadata"]["backtest_id"] == backtest.id
+    assert turn["metadata"]["learning_mode"] == "off" and turn["metadata"]["lessons_enabled"] is False
+    assert "MODALITA MASSIVA" in turn["text"] and "3 volte" in turn["text"]
+    assert "submit_backtest_evaluation" in turn["text"]
+
+    session.expire_all()
+    stored = session.get(BacktestResult, backtest.id)
+    request = stored.parameters["agent_evaluation_request"]
+    assert request["error"] is None and request["finished_at"]
+    assert stored.parameters["lessons"]  # the run's own parameters are kept
+
+
+def test_evaluation_request_records_a_turn_without_evaluation_and_allows_another(session, tenant, monkeypatch):
+    from app.models.strategy import BacktestResult
+    from app.services import backtest_evaluation_service as service
+
+    user, _conn, acc = tenant
+    backtest = _completed_bulk(session, user, acc, monkeypatch)
+    sent = _wire_evaluation(monkeypatch)
+    service.request_backtest_agent_evaluation(session, backtest.id, user.id)
+
+    session.expire_all()
+    stored = session.get(BacktestResult, backtest.id)
+    assert "without submitting" in stored.parameters["agent_evaluation_request"]["error"]
+    assert service.evaluation_request_pending(stored) is False
+
+    service.request_backtest_agent_evaluation(session, backtest.id, user.id)
+    assert len(sent) == 2
+
+
+def test_evaluation_request_refused_while_one_is_pending(session, tenant, monkeypatch):
+    from app.services import backtest_evaluation_service as service
+
+    user, _conn, acc = tenant
+    backtest = _completed_bulk(session, user, acc, monkeypatch)
+    _wire_evaluation(monkeypatch)
+    backtest.parameters = {**(backtest.parameters or {}), service.REQUEST_KEY: {
+        "requested_at": datetime.now(timezone.utc).isoformat(), "agent_id": 77, "error": None}}
+    session.add(backtest)
+    session.commit()
+    with pytest.raises(HTTPException) as exc:
+        service.request_backtest_agent_evaluation(session, backtest.id, user.id)
+    assert exc.value.status_code == 409 and "already in progress" in exc.value.detail
+
+
+def test_retry_does_not_inherit_the_evaluation_request(session, tenant, monkeypatch):
+    from app.services import backtest_evaluation_service as service
+    from app.services import strategy_service
+    from app.services.strategy_service import retry_backtest
+
+    user, _conn, acc = tenant
+    backtest = _completed_bulk(session, user, acc, monkeypatch)
+    backtest.parameters = {**(backtest.parameters or {}), service.REQUEST_KEY: {"requested_at": "2026-11-22T10:00:00+00:00"}}
+    session.add(backtest)
+    session.commit()
+    monkeypatch.setattr(strategy_service, "run_backtest", lambda sess, bid, uid=None: strategy_service.get_backtest(sess, bid, uid))
+    retried = retry_backtest(session, backtest.id, user.id)
+    assert service.REQUEST_KEY not in (retried.parameters or {})

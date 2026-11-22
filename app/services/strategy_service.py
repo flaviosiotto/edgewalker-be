@@ -1331,7 +1331,7 @@ def retry_backtest(session: Session, backtest_id: int, user_id: int | None = Non
         )
     params = source_row.parameters if isinstance(source_row.parameters, dict) else {}
     lessons = params.get("lessons") if isinstance(params.get("lessons"), dict) else {}
-    inherited = {k: v for k, v in params.items() if k not in {"lessons", "agent_reasoning", "agent_timeout_s", "on_agent_timeout"}}
+    inherited = {k: v for k, v in params.items() if k not in {"lessons", "agent_reasoning", "agent_timeout_s", "on_agent_timeout", "agent_evaluation_request"}}
     raw_timeout = params.get("agent_timeout_s")
     payload = BacktestCreate(
         symbol=source_row.symbol,
