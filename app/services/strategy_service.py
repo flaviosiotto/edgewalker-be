@@ -19,13 +19,22 @@ from app.core.config import settings
 from app.models.agent import Agent, Chat
 from app.models.connection import Account, Connection
 from app.models.n8n_chat_history import N8nChatHistory
-from app.models.strategy import Strategy, StrategyLive, BacktestResult, BacktestTrade, BacktestStatus, LiveStatus
+from app.models.strategy import (
+    BacktestResult,
+    BacktestStatus,
+    BacktestTrade,
+    BacktestTrial,
+    LiveStatus,
+    Strategy,
+    StrategyLive,
+)
 from app.schemas.agent import build_agent_persona_block
 from app.services.drawing_events import publish_drawings_changed
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyUpdate,
     BacktestCreate,
+    BacktestExplorationCreate,
     BacktestUpdate,
     TradeCreate,
     LayoutConfigUpdate,
@@ -41,6 +50,7 @@ from app.services.entitlement_service import (
     assert_indicator_count,
     assert_within,
     check_ai_budget,
+    get_effective_limits,
 )
 from app.services.limits import LimitKey
 from app.services.onboarding_state import require_configured_account
@@ -55,6 +65,13 @@ from app.services.n8n_auth import (
 from app.utils.auth_utils import create_user_delegated_token
 from app.utils.timeframes import normalize_simulation_timeframe
 from edgewalker_platform.rules_dsl import bulk_mode_problems, validate_definition
+from edgewalker_platform.exploration import (
+    DEFAULT_OOS_FRACTION,
+    ExplorationError,
+    apply_values,
+    explorable_parameters,
+    parse_space,
+)
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -705,6 +722,191 @@ def copy_strategy(
     return get_strategy(session, copy.id, user_id), warnings
 
 
+# ─── PARAMETER EXPLORATION (docs/valutazione-esplorazione-parametri.md) ───
+
+# ``parameters`` keys of a bulk run opened from a trial ("Apri come backtest"):
+# the values written into the definition at launch, and where they came from.
+DEFINITION_VALUES_KEY = "definition_values"
+FROM_TRIAL_KEY = "from_trial"
+
+
+def _definition_values_of(parameters: Any) -> dict[str, Any] | None:
+    """The ``parameters.definition_values`` of a run, when it has any."""
+    if not isinstance(parameters, dict):
+        return None
+    values = parameters.get(DEFINITION_VALUES_KEY)
+    return dict(values) if isinstance(values, dict) and values else None
+
+
+def _with_definition_values(definition: Any, values: dict[str, Any] | None) -> Any:
+    """``definition`` with ``values`` written in (``apply_values``); the
+    definition itself when there are none. ExplorationError propagates."""
+    if not values or not isinstance(definition, dict):
+        return definition
+    return apply_values(definition, values)
+
+
+def exploration_trials_cap(session: Session, user_id: int) -> int | None:
+    """Trials per exploration the user's plan allows (None = unlimited)."""
+    return get_effective_limits(session, user_id).value(LimitKey.BACKTEST_EXPLORATION_TRIALS_MAX)
+
+
+def _exploration_request(
+    session: Session,
+    spec: Any,
+    definition: Any,
+    user_id: int,
+) -> dict[str, Any]:
+    """Validate an exploration asked at creation and return the request
+    stored on the row (``exploration.request``).
+
+    A grid larger than the plan cap is not refused: ``max_trials`` is the cap
+    and the coordinator samples the grid, declaring it on the state. A grid
+    within the cap stores its own size, so ``max_trials`` is always the
+    number of trials planned (the backtest itself excluded).
+    """
+    raw = spec.model_dump(exclude_none=True) if hasattr(spec, "model_dump") else dict(spec or {})
+    try:
+        space = parse_space(raw, definition if isinstance(definition, dict) else {})
+    except ExplorationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    cap = exploration_trials_cap(session, user_id)
+    max_trials = space.grid_size if cap is None else min(int(cap), space.grid_size)
+    asked = raw.get("max_trials")
+    if isinstance(asked, int) and asked > 0:
+        max_trials = min(max_trials, asked)
+    return {
+        "dimensions": list(raw.get("dimensions") or []),
+        "oos_fraction": space.oos_fraction,
+        "max_trials": max(int(max_trials), 1),
+    }
+
+
+def explorable_parameters_of(session: Session, strategy_id: int, user_id: int | None = None) -> dict[str, Any]:
+    """``GET /strategies/{id}/explorable-parameters``: what an exploration of
+    the strategy can vary (current values included) and the plan's cap."""
+    strategy = get_strategy(session, strategy_id, user_id)
+    definition = strategy.definition if isinstance(strategy.definition, dict) else {}
+    return {
+        "parameters": explorable_parameters(definition),
+        "max_trials": exploration_trials_cap(session, strategy.user_id),
+        "default_oos_fraction": DEFAULT_OOS_FRACTION,
+    }
+
+
+def list_backtest_trials(session: Session, backtest_id: int, user_id: int | None = None) -> list[BacktestTrial]:
+    """Trials of a backtest's exploration, in ``trial_index`` order (0 = the
+    backtest itself). No ranking: the order is the order of the space."""
+    backtest = get_backtest(session, backtest_id, user_id)
+    return list(
+        session.exec(
+            select(BacktestTrial)
+            .where(BacktestTrial.backtest_id == backtest.id)
+            .order_by(BacktestTrial.trial_index)
+        ).all()
+    )
+
+
+def _get_trial(session: Session, backtest: BacktestResult, trial_index: int) -> BacktestTrial:
+    trial = session.exec(
+        select(BacktestTrial)
+        .where(BacktestTrial.backtest_id == backtest.id)
+        .where(BacktestTrial.trial_index == trial_index)
+    ).first()
+    if trial is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trial not found")
+    return trial
+
+
+def _trial_values(trial: BacktestTrial) -> dict[str, Any]:
+    return dict(trial.params) if isinstance(trial.params, dict) else {}
+
+
+def _apply_trial_or_conflict(definition: Any, trial: BacktestTrial) -> dict[str, Any]:
+    """The strategy definition with the trial's values; 409 when the strategy
+    changed since the exploration and no longer has one of its parameters."""
+    try:
+        return apply_values(definition if isinstance(definition, dict) else {}, _trial_values(trial))
+    except ExplorationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "The strategy changed since the exploration: the values of trial "
+                f"#{trial.trial_index} no longer fit it ({exc})."
+            ),
+        ) from exc
+
+
+def open_trial_as_backtest(
+    session: Session,
+    backtest_id: int,
+    trial_index: int,
+    user_id: int | None = None,
+) -> BacktestResult:
+    """"Apri come backtest": a NEW bulk backtest with the inputs of the
+    explored one (symbol, period, timeframes, capital, commission, source…),
+    on the strategy's current definition with the trial's values written in
+    at launch (``parameters.definition_values``), no exploration. Started at
+    once, like a retry. The source row and its trials are left untouched.
+    """
+    source_row = get_backtest(session, backtest_id, user_id)
+    trial = _get_trial(session, source_row, trial_index)
+    strategy = get_strategy(session, source_row.strategy_id, user_id)
+    _apply_trial_or_conflict(strategy.definition, trial)
+
+    params = source_row.parameters if isinstance(source_row.parameters, dict) else {}
+    inherited = {
+        k: v for k, v in params.items()
+        if k not in {
+            "lessons", "agent_reasoning", "agent_timeout_s", "on_agent_timeout",
+            "agent_evaluation_request", DEFINITION_VALUES_KEY, FROM_TRIAL_KEY,
+        }
+    }
+    inherited[DEFINITION_VALUES_KEY] = _trial_values(trial)
+    inherited[FROM_TRIAL_KEY] = {"backtest_id": source_row.id, "trial_index": trial.trial_index}
+    payload = BacktestCreate(
+        symbol=source_row.symbol,
+        start_date=source_row.start_date,
+        end_date=source_row.end_date,
+        lessons_from="none",
+        source=source_row.source,
+        timeframe=source_row.timeframe or "5m",
+        simulation_timeframe=source_row.simulation_timeframe,
+        mode="bulk",
+        asset=source_row.asset or "stock",
+        rth=_parse_bool(source_row.rth, default=True),
+        ibkr_config=source_row.ibkr_config,
+        exchange=source_row.exchange or "SMART",
+        currency=source_row.currency or "USD",
+        expiry=source_row.expiry,
+        initial_capital=float(source_row.initial_capital if source_row.initial_capital is not None else 100_000.0),
+        commission=float(source_row.commission or 0.0),
+        parameters=inherited,
+        layout_config=source_row.layout_config if isinstance(source_row.layout_config, dict) else None,
+    )
+    created = create_backtest(session, source_row.strategy_id, payload, user_id)
+    logger.info(
+        "Backtest %d created from trial %d of backtest %d", created.id, trial.trial_index, source_row.id,
+    )
+    return run_backtest(session, created.id, user_id)
+
+
+def apply_trial_to_strategy(
+    session: Session,
+    backtest_id: int,
+    trial_index: int,
+    user_id: int | None = None,
+) -> Strategy:
+    """"Applica alla strategia": write the trial's values into the strategy
+    definition through the normal update path (validation, updated_by).
+    Always an explicit user action, never automatic."""
+    backtest = get_backtest(session, backtest_id, user_id)
+    trial = _get_trial(session, backtest, trial_index)
+    strategy = get_strategy(session, backtest.strategy_id, user_id)
+    definition = _apply_trial_or_conflict(strategy.definition, trial)
+    return update_strategy(session, strategy.id, StrategyUpdate(definition=definition), user_id)
+
+
 def create_backtest(
     session: Session,
     strategy_id: int,
@@ -747,6 +949,28 @@ def create_backtest(
     if bulk:
         _reject_unsupported_in_bulk(config_snapshot)
 
+    # Values written into the definition at launch (a run opened from an
+    # exploration trial): refuse now what the launch could not apply.
+    base_parameters = payload.parameters if isinstance(payload.parameters, dict) else {}
+    try:
+        run_definition = _with_definition_values(config_snapshot, _definition_values_of(base_parameters))
+    except ExplorationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"parameters.{DEFINITION_VALUES_KEY}: {exc}",
+        ) from exc
+
+    exploration: dict[str, Any] | None = None
+    if payload.exploration is not None:
+        if not bulk:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A parameter exploration needs a bulk backtest (mode 'bulk').",
+            )
+        # Validated on the definition the run will execute: the coordinator
+        # parses the same space on the definition it is sent.
+        exploration = {"request": _exploration_request(session, payload.exploration, run_definition, strategy.user_id)}
+
     # Playbook the run starts from (docs/valutazione-playbook-lezioni.md):
     # resolved now, copied into the run's own rows once the row has an id.
     from app.services import playbook_service
@@ -761,7 +985,6 @@ def create_backtest(
         "enabled": True,
         "learning_mode": "off" if bulk else (payload.learning_mode or DEFAULT_LEARNING_MODE),
     }
-    base_parameters = payload.parameters if isinstance(payload.parameters, dict) else {}
     merged_parameters = {**base_parameters, "lessons": lessons_meta}
     if not bulk:
         if payload.agent_reasoning:
@@ -783,6 +1006,7 @@ def create_backtest(
         timeframe=payload.timeframe,
         simulation_timeframe=normalize_simulation_timeframe(payload.simulation_timeframe, payload.timeframe),
         mode=payload.mode,
+        exploration=exploration,
         asset=payload.asset,
         rth=payload.rth,
         # IBKR-specific parameters
@@ -919,6 +1143,10 @@ def list_all_backtests(
                 Chat.id.label("chat_id"),
                 BacktestResult.agent_evaluation["score_pct"].as_float().label("agent_score_pct"),
                 BacktestResult.metrics["agent_turns_timed_out"].as_integer().label("agent_turns_timed_out"),
+                BacktestResult.exploration["state"]["status"].astext.label("exploration_status"),
+                BacktestResult.exploration["state"]["total"].as_integer().label("_exploration_total"),
+                BacktestResult.exploration["request"]["max_trials"].as_integer().label("_exploration_planned"),
+                (BacktestResult.exploration["request"] != None).label("_exploration_requested"),  # noqa: E711
             )
         )
         .outerjoin(Chat, Chat.backtest_id == BacktestResult.id)
@@ -927,7 +1155,23 @@ def list_all_backtests(
         .offset(offset)
     )
     rows = session.execute(query).mappings().all()
-    return [dict(row) for row in rows], int(total)
+    return [_with_exploration_summary(dict(row)) for row in rows], int(total)
+
+
+def _with_exploration_summary(row: dict[str, Any]) -> dict[str, Any]:
+    """``exploration_trials`` of a listing row: the trials of its exploration,
+    the backtest itself included (state.total + 1 once the trials started,
+    else the planned count), None without an exploration."""
+    total = row.pop("_exploration_total", None)
+    planned = row.pop("_exploration_planned", None)
+    requested = bool(row.pop("_exploration_requested", False))
+    if total is not None:
+        row["exploration_trials"] = int(total) + 1
+    elif requested and planned is not None:
+        row["exploration_trials"] = int(planned) + 1
+    else:
+        row["exploration_trials"] = None
+    return row
 
 
 def get_backtest(session: Session, backtest_id: int, user_id: int | None = None) -> BacktestResult:
@@ -1203,6 +1447,13 @@ def _backtest_run_config(
     strategy_config = _strip_rule_chat_ids(
         _normalize_strategy_indicator_field_references(raw_strategy_config)
     )
+    # A run opened from an exploration trial: its values written into the
+    # definition BEFORE the launch-time injections below (accounting
+    # snapshot, ew_hash refs), which then land on the modified definition.
+    try:
+        strategy_config = _with_definition_values(strategy_config, _definition_values_of(backtest.parameters))
+    except ExplorationError as exc:
+        raise RuntimeError(f"parameters.{DEFINITION_VALUES_KEY} no longer fit the definition: {exc}") from exc
     from app.services.contract_multiplier import resolve_contract_multiplier
 
     contract_multiplier, multiplier_source = resolve_contract_multiplier(
@@ -1331,8 +1582,18 @@ def retry_backtest(session: Session, backtest_id: int, user_id: int | None = Non
         )
     params = source_row.parameters if isinstance(source_row.parameters, dict) else {}
     lessons = params.get("lessons") if isinstance(params.get("lessons"), dict) else {}
+    # definition_values / from_trial are kept: a retry of a run opened from a
+    # trial runs the same values again.
     inherited = {k: v for k, v in params.items() if k not in {"lessons", "agent_reasoning", "agent_timeout_s", "on_agent_timeout", "agent_evaluation_request"}}
     raw_timeout = params.get("agent_timeout_s")
+    # The same exploration request (the plan cap is applied again).
+    source_exploration = source_row.exploration if isinstance(source_row.exploration, dict) else {}
+    exploration_request = source_exploration.get("request")
+    exploration_payload = (
+        BacktestExplorationCreate.model_validate(exploration_request)
+        if source_row.mode == "bulk" and isinstance(exploration_request, dict)
+        else None
+    )
     payload = BacktestCreate(
         symbol=source_row.symbol,
         start_date=source_row.start_date,
@@ -1358,6 +1619,7 @@ def retry_backtest(session: Session, backtest_id: int, user_id: int | None = Non
         parameters=inherited or None,
         config=source_row.config if isinstance(source_row.config, dict) else None,
         layout_config=source_row.layout_config if isinstance(source_row.layout_config, dict) else None,
+        exploration=exploration_payload,
     )
     created = create_backtest(session, source_row.strategy_id, payload, user_id)
     created.retried_from_backtest_id = source_row.id

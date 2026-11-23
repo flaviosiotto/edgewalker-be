@@ -34,6 +34,7 @@ class LimitKey(str, Enum):
     STUDIOS_MAX = "studios_max"
     STUDIO_RUNS_CONCURRENT_MAX = "studio_runs_concurrent_max"
     CONNECTIONS_MAX = "connections_max"
+    BACKTEST_EXPLORATION_TRIALS_MAX = "backtest_exploration_trials_max"
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,15 @@ LIMIT_REGISTRY: dict[LimitKey, LimitSpec] = {
             "Connessioni a broker/datafeed configurabili.",
             LimitKind.COUNT,
             "backend: creazione connessione (non ancora applicato)",
+        ),
+        LimitSpec(
+            LimitKey.BACKTEST_EXPLORATION_TRIALS_MAX,
+            "Prove per esplorazione",
+            "Prove di un'esplorazione dei parametri (backtest massivo). Oltre il tetto la "
+            "griglia non è rifiutata: se ne prova un campione casuale, dichiarato sul risultato.",
+            LimitKind.PER_RESOURCE,
+            "backend: creazione backtest (request.max_trials); coordinator: campionamento",
+            default=1000,
         ),
     )
 }

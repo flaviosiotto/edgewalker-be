@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlmodel import Session
 
 from app.db.database import get_session
@@ -16,7 +16,9 @@ from app.schemas.strategy import (
     BacktestRuntimeOrderRequest,
     BacktestRuntimePositionCloseRequest,
     BacktestSummary,
+    BacktestTrialRead,
     LayoutConfigUpdate,
+    StrategyRead,
     TradeRead,
     ChartDrawingsRead,
     ChartDrawingsPatch,
@@ -25,20 +27,27 @@ from app.schemas.strategy import (
 from app.schemas.chat import ChatRead
 from app.services.backtest_analysis import analyze_backtest
 from app.services.strategy_service import (
+    apply_trial_to_strategy,
     create_backtest,
     delete_backtest,
     get_backtest,
     get_or_create_backtest_chat,
     get_strategy,
     list_all_backtests,
+    list_backtest_trials,
     list_trades,
+    open_trial_as_backtest,
     retry_backtest,
     run_backtest,
     set_backtest_agent_evaluation,
     update_backtest_chart_drawings,
     update_backtest_layout,
 )
-from app.utils.auth_utils import get_current_active_or_consultative_user
+from app.utils.auth_utils import (
+    AuthPrincipal,
+    get_current_active_or_consultative_principal,
+    get_current_active_or_consultative_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +214,80 @@ def retry_backtest_endpoint(
     failed or error.
     """
     return retry_backtest(session, backtest_id, current_user.id)
+
+
+# ── Parameter exploration (docs/valutazione-esplorazione-parametri.md) ──
+# Trials are listed in the order of the space: no endpoint ranks them or
+# names a "best" one (the platform is a tool, not a verdict).
+
+
+@router.get("/{backtest_id}/trials", response_model=list[BacktestTrialRead])
+def list_backtest_trials_endpoint(
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Trials of the backtest's parameter exploration, by ``trial_index``
+    (0 = the backtest itself, on the strategy's values). Empty when the run
+    has no exploration or its trials have not started yet; the progress is
+    in ``exploration.state`` of ``GET /backtests/{id}``."""
+    return list_backtest_trials(session, backtest_id, current_user.id)
+
+
+@router.post("/{backtest_id}/exploration/stop")
+def stop_backtest_exploration_endpoint(
+    backtest_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Stop the trials of the backtest's exploration; the backtest and the
+    trials already done stay. 409 when no exploration of it is running."""
+    from app.services.backtest_runner_service import CoordinatorConflict, backtest_runner_service
+
+    backtest = get_backtest(session, backtest_id, current_user.id)
+    bt_id = backtest.id
+    session.close()  # release the pooled DB connection before the blocking HTTP call
+    try:
+        return backtest_runner_service.stop_exploration(bt_id)
+    except CoordinatorConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.post("/{backtest_id}/trials/{trial_index}/backtest", response_model=BacktestRead)
+def open_trial_as_backtest_endpoint(
+    backtest_id: int,
+    trial_index: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """"Apri come backtest": create and start a new bulk backtest with the
+    inputs of this one and the trial's values written into the strategy's
+    definition (``parameters.definition_values``, ``parameters.from_trial``),
+    no exploration. 404 unknown trial; 409 when the strategy no longer has
+    one of the trial's parameters."""
+    return open_trial_as_backtest(session, backtest_id, trial_index, current_user.id)
+
+
+@router.post("/{backtest_id}/trials/{trial_index}/apply", response_model=StrategyRead)
+def apply_trial_to_strategy_endpoint(
+    backtest_id: int,
+    trial_index: int,
+    session: Session = Depends(get_session),
+    principal: AuthPrincipal = Depends(get_current_active_or_consultative_principal),
+    x_client_request_id: str | None = Header(default=None, alias="X-Client-Request-Id"),
+):
+    """"Applica alla strategia": write the trial's values into the strategy
+    definition through the normal update path; returns the strategy as
+    ``PATCH /strategies/{id}`` does. 409 when the strategy no longer has one
+    of the trial's parameters."""
+    from app.api.strategies import _publish_strategy_updated, _serialize_strategy_with_live
+
+    strategy = apply_trial_to_strategy(session, backtest_id, trial_index, principal.user.id)
+    origin = "user" if principal.claims.get("purpose") == "ui_auth" else "agent"
+    _publish_strategy_updated(strategy, origin=origin, request_id=x_client_request_id)
+    return _serialize_strategy_with_live(session, strategy)
 
 
 @router.post("/{backtest_id}/control")

@@ -209,12 +209,21 @@ def count_active_live_sessions(session: Session, user_id: int) -> int:
 
 
 def count_running_backtests(session: Session, user_id: int) -> int:
+    """Backtests running now. A bulk backtest whose row is already
+    ``completed`` while the trials of its parameter exploration still run
+    (``exploration.state.status = running``, migr. 076) counts as one
+    running backtest too (docs/valutazione-esplorazione-parametri.md §6.6)."""
+    from sqlalchemy import or_
+
     return int(
         session.exec(
             select(func.count(BacktestResult.id))
             .join(Strategy, Strategy.id == BacktestResult.strategy_id)
             .where(Strategy.user_id == user_id)
-            .where(BacktestResult.status == BacktestStatus.RUNNING.value)
+            .where(or_(
+                BacktestResult.status == BacktestStatus.RUNNING.value,
+                BacktestResult.exploration["state"]["status"].astext == "running",
+            ))
         ).one()
     )
 

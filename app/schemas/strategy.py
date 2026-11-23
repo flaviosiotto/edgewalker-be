@@ -3,7 +3,7 @@ import math
 from datetime import datetime, date
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.chat import ChatRead
 from app.schemas.live_strategy import LiveStrategySummaryRead
@@ -205,6 +205,24 @@ class StrategyBulkDeleteResponse(BaseModel):
 # ─── BACKTEST SCHEMAS ───
 
 
+class BacktestExplorationCreate(BaseModel):
+    """Parameter exploration asked with a bulk backtest
+    (docs/valutazione-esplorazione-parametri.md): after the run on the
+    strategy's own values, the coordinator repeats it over the same data for
+    every combination of ``dimensions``.
+
+    A dimension is ``{"chart", "indicator", "param"}`` (indicator parameter;
+    chart defaults to ``main``) or ``{"param"}`` (named strategy parameter),
+    plus ``"values": [...]`` or ``"min"``/``"max"``/``"step"``. Validated
+    against the definition by ``edgewalker_platform.exploration.parse_space``.
+    """
+    dimensions: list[dict[str, Any]]
+    # Share of the period, at its end, measured as out-of-sample; None = 0.3.
+    oos_fraction: Optional[float] = None
+    # Optional lower cap on the trials; the plan limit always wins.
+    max_trials: Optional[int] = Field(default=None, ge=1)
+
+
 class BacktestCreate(BaseModel):
     """Input parameters for creating a new backtest (status=pending).
     
@@ -283,6 +301,11 @@ class BacktestCreate(BaseModel):
     # UI layout config snapshot (timezone, extended hours, etc.)
     layout_config: Optional[dict[str, Any]] = None
 
+    # Parameter exploration (bulk mode only; 422 otherwise). Stored on the
+    # row as ``exploration.request`` with ``oos_fraction`` and ``max_trials``
+    # filled in.
+    exploration: Optional[BacktestExplorationCreate] = None
+
 
 class BacktestRead(BaseModel):
     """Full backtest representation including status and results."""
@@ -360,6 +383,10 @@ class BacktestRead(BaseModel):
 
     # UI layout persistence
     layout_config: Optional[dict[str, Any]] = None
+
+    # Parameter exploration (migr. 076): {"request": {...}, "state": {...}};
+    # "state" (progress, status, space) is written by the coordinator.
+    exploration: Optional[dict[str, Any]] = None
     
     created_at: datetime
 
@@ -515,6 +542,12 @@ class BacktestSummary(BaseModel):
     agent_turns_timed_out: Optional[int] = None
     # Overall Agent Score (0-100) of the agent's final evaluation, when present.
     agent_score_pct: Optional[float] = None
+    # Parameter exploration (migr. 076), when the run has one: the status of
+    # its trials (running | completed | stopped | failed | interrupted; None
+    # before they start) and how many trials it has, the backtest itself
+    # included (state.total + 1 once started, else the planned count).
+    exploration_status: Optional[str] = None
+    exploration_trials: Optional[int] = None
 
     # Live-run enrichment (pending/running rows only, when requested):
     # phase/progress come from the coordinator; stale means the DB says
@@ -522,6 +555,37 @@ class BacktestSummary(BaseModel):
     phase: Optional[str] = None
     progress: Optional[float] = None
     stale: Optional[bool] = None
+
+
+class BacktestTrialRead(BaseModel):
+    """One trial of a backtest's parameter exploration (trial_index 0 = the
+    backtest itself, on the strategy's own values)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    backtest_id: int
+    trial_index: int
+    is_reference: bool = False
+    # Values of the trial by dimension key (main.bb.timeperiod, params.sl_atr)
+    params: dict[str, Any] = Field(default_factory=dict)
+    # Scalar measures over the whole period and per segment: return_pct,
+    # sharpe_ratio, sortino_ratio, volatility_ann_pct, max_drawdown_pct,
+    # win_rate_pct, profit_factor, total_trades, equity_final, equity_peak.
+    metrics: Optional[dict[str, Any]] = None
+    in_sample: Optional[dict[str, Any]] = None
+    out_of_sample: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+    elapsed_s: Optional[float] = None
+
+
+class ExplorableParametersRead(BaseModel):
+    """What an exploration of the strategy can vary, and the plan's cap."""
+    # explorable_parameters(definition): {key, kind, chart, indicator, type,
+    # param, value, integer} per numeric value of the definition.
+    parameters: list[dict[str, Any]]
+    # Trials per exploration allowed by the plan (None = unlimited).
+    max_trials: Optional[int] = None
+    default_oos_fraction: float
 
 
 class BacktestListPage(BaseModel):

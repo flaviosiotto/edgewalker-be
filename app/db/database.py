@@ -45,7 +45,7 @@ def create_db_and_tables():
         UserRecoveryCode,
         UserTotp,
     )
-    from app.models.strategy import Strategy, BacktestResult, BacktestTrade  # noqa: F401
+    from app.models.strategy import Strategy, BacktestResult, BacktestTrade, BacktestTrial  # noqa: F401
     from app.models.strategy_template import StrategyTemplate  # noqa: F401
     from app.models.connection import Connection, Account  # noqa: F401
     from app.models.live_trading import LiveOrder, LiveFill, LivePosition, LiveTrade  # noqa: F401

@@ -30,6 +30,7 @@ from app.schemas.strategy import (
     ChartDrawingsRead,
     ChartDrawingsPatch,
     ChartDrawingsUpdate,
+    ExplorableParametersRead,
 )
 from app.schemas.chat import ChatCreate, ChatRead
 from app.services.live_summary_service import build_live_summary
@@ -37,6 +38,7 @@ from app.services.performance_service import compute_strategy_performance, list_
 from app.schemas.performance import PerformanceStats
 from app.schemas.live_trading import LiveTradeRead
 from app.services.strategy_service import (
+    explorable_parameters_of,
     set_strategy_favorite,
     copy_strategy,
     create_strategy,
@@ -303,6 +305,19 @@ def get_strategy_endpoint(
     """
     strategy = get_strategy(session, strategy_id, current_user.id)
     return _serialize_strategy_with_live(session, strategy)
+
+
+@router.get("/{strategy_id}/explorable-parameters", response_model=ExplorableParametersRead)
+def get_strategy_explorable_parameters_endpoint(
+    strategy_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    """Numeric values of the definition a parameter exploration can vary
+    (indicator parameters per chart, named ``params``), each with its current
+    value, plus the plan's cap on trials (``max_trials``, None = unlimited)
+    and the default out-of-sample share."""
+    return explorable_parameters_of(session, strategy_id, current_user.id)
 
 
 @router.patch("/{strategy_id}", response_model=StrategyRead)

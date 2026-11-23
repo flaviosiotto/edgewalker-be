@@ -32,6 +32,10 @@ BACKTEST_SERVICE_URL = os.getenv("BACKTEST_SERVICE_URL", "http://strategy-backte
 BACKTEST_DEBUG_HOLD_SECONDS = os.getenv("BACKTEST_DEBUG_HOLD_SECONDS", "300")
 CONTAINER_PREFIX = "edgewalker-backtest-runner-"
 
+
+class CoordinatorConflict(RuntimeError):
+    """The coordinator refused the command with 409 (nothing to act on)."""
+
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_URL = os.getenv("REDIS_URL", "")
@@ -358,6 +362,30 @@ class BacktestRunnerService:
             raise RuntimeError(
                 f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}"
             ) from exc
+
+    def stop_exploration(self, backtest_id: int) -> dict[str, Any]:
+        """Stop the trials of a backtest's parameter exploration (the
+        backtest itself stays as it is). The coordinator answers 409 when no
+        exploration of that backtest is running: raised as
+        :class:`CoordinatorConflict` so the API can keep the 409."""
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.post(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/exploration/stop")
+                resp.raise_for_status()
+                return resp.json() if resp.content else {"status": "stopping", "backtest_id": backtest_id}
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                detail = exc.response.json()
+            except Exception:
+                detail = exc.response.text
+            if isinstance(detail, dict) and "detail" in detail:
+                detail = detail["detail"]
+            if exc.response.status_code == 409:
+                raise CoordinatorConflict(str(detail)) from exc
+            raise RuntimeError(f"Exploration stop failed: {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Backtest coordinator is not reachable at {BACKTEST_SERVICE_URL}: {exc}") from exc
 
     def stop_backtest(self, backtest_id: int, remove: bool = True) -> dict[str, Any]:
         service_result: dict[str, Any] = {}

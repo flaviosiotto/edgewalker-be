@@ -483,6 +483,10 @@ class BacktestResult(SQLModel, table=True):
     # Redis streams at a pace (forming bars, agent turns); "bulk" = rules
     # applied in-process over the whole dataset on closed bars, no agent.
     mode: str = Field(default="replay", sa_column=Column(String(16), nullable=False, server_default="replay"))
+    # Parameter exploration of a bulk run (migr. 076): {"request": {...},
+    # "state": {...}}. The backend writes "request" once at creation and
+    # never "state", which belongs to the coordinator. NULL = no exploration.
+    exploration: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
     asset: Optional[str] = Field(default="stock", sa_column=Column(String(20), nullable=True))
     rth: Optional[bool] = Field(default=True, sa_column=Column(String(10), nullable=True))  # stored as string for simplicity
     
@@ -604,6 +608,33 @@ class BacktestResult(SQLModel, table=True):
             cascade="all, delete-orphan",
         )
     )
+
+
+class BacktestTrial(SQLModel, table=True):
+    """One trial of a backtest's parameter exploration (migr. 076).
+
+    Written by the coordinator only: the values tried (``params``, keyed
+    ``main.bb.timeperiod`` / ``params.sl_atr``) and the scalar measures over
+    the whole period, the in-sample and the out-of-sample segments. No
+    ledger, no dataset. ``trial_index`` 0 is the backtest itself.
+    """
+    __tablename__ = "strategy_backtest_trials"
+    __table_args__ = (
+        UniqueConstraint("backtest_id", "trial_index", name="uq_strategy_backtest_trials_backtest_index"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    backtest_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("strategy_backtests.id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+    trial_index: int = Field(sa_column=Column(Integer, nullable=False))
+    is_reference: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, default=False))
+    params: Any = Field(default=None, sa_column=Column(JSONB, nullable=False))
+    metrics: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    in_sample: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    out_of_sample: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    elapsed_s: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
 
 
 class BacktestTrade(SQLModel, table=True):
