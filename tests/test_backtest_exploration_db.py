@@ -420,21 +420,32 @@ def test_apply_trial_to_strategy(session, tenant):
     assert updated.updated_at >= before
 
 
-def test_trial_actions_conflict_when_the_strategy_changed(session, tenant, monkeypatch):
+def test_after_the_strategy_changed_a_trial_still_opens_as_itself_but_no_longer_applies(session, tenant, monkeypatch):
+    """The exploration ran on the definition frozen on its backtest: opening a
+    trial runs THAT definition with the trial's values, whatever the strategy
+    became since. Applying the values to the changed strategy is refused."""
     from app.schemas.strategy import StrategyUpdate
     from app.services.strategy_service import apply_trial_to_strategy, open_trial_as_backtest, update_strategy
 
     user, _conn, acc = tenant
     strategy, source = _explored_with_trial(session, user, acc)
+    explored_rules = (source.config or strategy.definition)["strategy"]["rules"]
     update_strategy(session, strategy.id, StrategyUpdate(definition=_definition(with_sl=False)), user.id)
     calls = _wire_run(monkeypatch)
 
-    for action in (open_trial_as_backtest, apply_trial_to_strategy):
-        with pytest.raises(HTTPException) as exc:
-            action(session, source.id, 3, user.id)
-        assert exc.value.status_code == 409
-        assert "changed since the exploration" in exc.value.detail and "params.sl_atr" in exc.value.detail
-    assert calls == []
+    opened = open_trial_as_backtest(session, source.id, 3, user.id)
+
+    (call,) = calls
+    sent = call["strategy_config"]["strategy"]
+    assert call["backtest_id"] == opened.id
+    assert sent["params"]["sl_atr"] == 2.0  # the parameter the strategy no longer has
+    assert sent["rules"] == explored_rules
+    assert sent["charts"][0]["indicators"][0]["params"]["timeperiod"] == 30
+
+    with pytest.raises(HTTPException) as exc:
+        apply_trial_to_strategy(session, source.id, 3, user.id)
+    assert exc.value.status_code == 409
+    assert "changed since the exploration" in exc.value.detail and "params.sl_atr" in exc.value.detail
 
 
 def test_retry_keeps_the_exploration_request(session, tenant, monkeypatch):

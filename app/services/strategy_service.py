@@ -844,15 +844,20 @@ def open_trial_as_backtest(
     user_id: int | None = None,
 ) -> BacktestResult:
     """"Apri come backtest": a NEW bulk backtest with the inputs of the
-    explored one (symbol, period, timeframes, capital, commission, source…),
-    on the strategy's current definition with the trial's values written in
-    at launch (``parameters.definition_values``), no exploration. Started at
-    once, like a retry. The source row and its trials are left untouched.
+    explored one (symbol, period, timeframes, capital, commission, source…)
+    and the trial's values written in at launch
+    (``parameters.definition_values``), no exploration. Started at once, like
+    a retry. The source row and its trials are left untouched.
+
+    It runs the definition the exploration ran on (the source row's
+    ``config`` snapshot), not the strategy as it is now: a trial opened as a
+    backtest must be that trial, also after the strategy was edited.
     """
     source_row = get_backtest(session, backtest_id, user_id)
     trial = _get_trial(session, source_row, trial_index)
     strategy = get_strategy(session, source_row.strategy_id, user_id)
-    _apply_trial_or_conflict(strategy.definition, trial)
+    explored = source_row.config if isinstance(source_row.config, dict) and source_row.config else strategy.definition
+    _apply_trial_or_conflict(explored, trial)
 
     params = source_row.parameters if isinstance(source_row.parameters, dict) else {}
     inherited = {
@@ -882,6 +887,7 @@ def open_trial_as_backtest(
         initial_capital=float(source_row.initial_capital if source_row.initial_capital is not None else 100_000.0),
         commission=float(source_row.commission or 0.0),
         parameters=inherited,
+        config=explored if isinstance(explored, dict) else None,
         layout_config=source_row.layout_config if isinstance(source_row.layout_config, dict) else None,
     )
     created = create_backtest(session, source_row.strategy_id, payload, user_id)
