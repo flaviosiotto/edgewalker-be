@@ -13,12 +13,13 @@ from app.schemas.chat import (
     ChatHistoryAppendRequest,
     ChatHistoryAppendResponse,
     ChatAskAnswerRequest,
+    ChatAskCreateRequest,
     ChatHistoryPage,
     ChatSendMessageRequest,
     ChatSendMessageResponse,
 )
 from app.schemas.chat import ChatRead
-from app.services.chat_ask_service import answer_ask, read_pending_ask
+from app.services.chat_ask_service import answer_ask, close_ask, open_ask, read_pending_ask, wait_answer
 from app.services.chat_realtime import subscribe, unsubscribe
 from app.services.studio_chat_service import get_or_create_studio_chat
 from app.services.chat_service import (
@@ -51,8 +52,8 @@ _AGENT_TURN_EVENT_MAP = {
     "delta": "agent_delta",
     "tool_call": "agent_tool_call",
     "activity": "agent_activity",
-    # Mid-turn question to the trader and its outcome (edgewalker_platform.user_ask):
-    # published on the same channel by the agent service itself.
+    # Mid-turn question to the trader and its outcome (services/user_ask.py):
+    # published on the same channel by chat_ask_service.
     "ask": "agent_ask",
     "ask_resolved": "agent_ask_resolved",
     "turn_end": "agent_turn_end",
@@ -175,6 +176,51 @@ async def stream_chat_message_endpoint(
             "X-Chat-Request-Id": request_id,
         },
     )
+
+
+# Asker side of the mid-turn questions (services/user_ask.py): the agent
+# service calls these with the token of the turn, which in a live session is
+# the runner's — hence the runner router.
+@runner_router.post("/{chat_id}/asks", status_code=201)
+async def open_chat_ask_endpoint(
+    chat_id: int,
+    payload: ChatAskCreateRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_runner_user),
+):
+    """Ask the chat's owner a question in the middle of an agent turn."""
+    session_id = get_chat_session_id(session, chat_id=chat_id, user_id=current_user.id)
+    session.close()
+    return await open_ask(session_id, **payload.model_dump())
+
+
+@runner_router.get("/{chat_id}/asks/{ask_id}/wait")
+async def wait_chat_ask_endpoint(
+    chat_id: int,
+    ask_id: str,
+    seconds: float = Query(default=10.0, ge=1.0, le=20.0),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_runner_user),
+):
+    """Long poll for the answer: ``pending`` (ask again), ``answered`` /
+    ``skipped``, ``timeout`` or ``gone``."""
+    session_id = get_chat_session_id(session, chat_id=chat_id, user_id=current_user.id)
+    session.close()
+    return await wait_answer(session_id, ask_id, seconds=seconds)
+
+
+@runner_router.delete("/{chat_id}/asks/{ask_id}")
+async def close_chat_ask_endpoint(
+    chat_id: int,
+    ask_id: str,
+    reason: str = Query(default="cancelled"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_runner_user),
+):
+    """The asker withdraws its question (turn over or cancelled)."""
+    session_id = get_chat_session_id(session, chat_id=chat_id, user_id=current_user.id)
+    session.close()
+    return await close_ask(session_id, ask_id, reason=reason)
 
 
 @router.get("/{chat_id}/asks/pending")

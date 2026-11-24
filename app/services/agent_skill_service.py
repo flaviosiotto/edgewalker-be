@@ -13,7 +13,7 @@ from typing import Any, Optional
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
-from edgewalker_platform.skills import system_skill_names, system_skills
+from app.services.system_skills import system_skill_names, system_skills
 
 from app.models.agent_model import AgentSkill
 from app.schemas.agent_model import SkillCreate, SkillUpdate

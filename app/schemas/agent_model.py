@@ -7,7 +7,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
-from edgewalker_platform.skills import parse_skill_inputs
+from app.services.skill_inputs import parse_skill_inputs
 
 SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 SKILL_BODY_MAX_CHARS = 20_000
@@ -73,7 +73,7 @@ class SkillRead(SkillSummary):
     @property
     def inputs(self) -> list[dict[str, Any]]:
         """Values the skill asks for when invoked from the chat with
-        ``/<name>``, declared in the body under ``## Input`` (kit grammar)."""
+        ``/<name>``, declared in the body under ``## Input`` (services/skill_inputs.py)."""
         return parse_skill_inputs(self.body)
 
 

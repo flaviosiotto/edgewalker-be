@@ -6,10 +6,8 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from edgewalker_platform import user_ask
-
 from app.schemas.agent_model import SkillRead
-from app.services import chat_ask_service
+from app.services import chat_ask_service, user_ask
 from app.services.chat_service import TurnRelay
 
 
@@ -18,9 +16,16 @@ class FakeRedis:
         self.values: dict[str, str] = {}
         self.lists: dict[str, list[str]] = {}
         self.expires: dict[str, int] = {}
+        self.published: list[tuple[str, dict]] = []
 
     async def get(self, key):
         return self.values.get(key)
+
+    async def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.values:
+            return None
+        self.values[key] = value
+        return True
 
     async def rpush(self, key, value):
         self.lists.setdefault(key, []).append(value)
@@ -29,8 +34,21 @@ class FakeRedis:
     async def rpop(self, key):
         return self.lists[key].pop()
 
+    async def blpop(self, key, timeout=0):
+        self.waits = getattr(self, "waits", []) + [timeout]
+        items = self.lists.get(key) or []
+        return (key, items.pop(0)) if items else None
+
     async def expire(self, key, seconds):
         self.expires[key] = seconds
+
+    async def delete(self, *keys):
+        for key in keys:
+            self.values.pop(key, None)
+            self.lists.pop(key, None)
+
+    async def publish(self, channel, payload):
+        self.published.append((channel, json.loads(payload)))
 
 
 @pytest.fixture
@@ -107,3 +125,50 @@ def test_skill_read_exposes_declared_inputs():
     assert skill.model_dump()["inputs"] == [
         {"key": "modo", "type": "choice", "label": "come", "options": ["a", "b"], "required": False, "default": "a"}
     ]
+
+
+def _open(redis, **kw):
+    fields = {"question": "Quale variante?", "options": ["V1", "V2"], "turn_id": "t1", "request_id": "r1", **kw}
+    return asyncio.run(chat_ask_service.open_ask("621", **fields))
+
+
+def test_open_stores_announces_and_refuses_a_second_question(redis):
+    ask = _open(redis)
+    assert json.loads(redis.values["chat-ask:621"])["id"] == ask["id"]
+    assert redis.published == [("chat-stream:621", {"v": 1, "type": "ask", "request_id": "r1", "ask": ask})]
+    assert _status(chat_ask_service.open_ask("621", question="Altra?", options=["a", "b"])) == 409
+    assert _status(chat_ask_service.open_ask("622", question="", options=["a", "b"])) == 422
+    assert _status(chat_ask_service.open_ask("622", question="q", options=["solo una"])) == 422
+    assert len(redis.published) == 1
+
+
+def test_wait_returns_pending_then_the_answer_and_closes_the_question(redis):
+    ask = _open(redis)
+    assert asyncio.run(chat_ask_service.wait_answer("621", ask["id"], seconds=5)) == {"status": "pending"}
+    assert redis.waits == [5]
+    asyncio.run(chat_ask_service.answer_ask("621", ask["id"], text="v2"))
+    assert asyncio.run(chat_ask_service.wait_answer("621", ask["id"], seconds=999)) == {"status": "answered", "answer": "V2", "option": 1}
+    assert redis.waits[-1] == user_ask.WAIT_MAX_SECONDS
+    assert redis.values == {} and redis.lists == {}
+    assert redis.published[-1][1] == {"v": 1, "type": "ask_resolved", "request_id": "r1", "ask_id": ask["id"], "status": "answered", "answer": "V2"}
+    assert asyncio.run(chat_ask_service.wait_answer("621", ask["id"], seconds=5)) == {"status": "gone"}
+    assert asyncio.run(chat_ask_service.read_pending_ask("621")) is None
+
+
+def test_wait_skip_and_deadline(redis):
+    ask = _open(redis)
+    asyncio.run(chat_ask_service.answer_ask("621", ask["id"], skip=True))
+    assert asyncio.run(chat_ask_service.wait_answer("621", ask["id"], seconds=5)) == {"status": "skipped", "answer": "", "option": None}
+    assert redis.published[-1][1]["status"] == "skipped"
+    old = _pending(redis, now=time.time() - 1000)
+    assert asyncio.run(chat_ask_service.wait_answer("621", old["id"], seconds=5)) == {"status": "timeout"}
+    assert redis.values == {} and redis.published[-1][1]["status"] == "timeout"
+
+
+def test_close_is_idempotent_and_tells_the_clients(redis):
+    ask = _open(redis)
+    assert asyncio.run(chat_ask_service.close_ask("621", ask["id"], reason="timeout")) == {"status": "timeout"}
+    assert redis.values == {} and redis.published[-1][1]["status"] == "timeout"
+    assert asyncio.run(chat_ask_service.close_ask("621", ask["id"])) == {"status": "gone"}
+    assert asyncio.run(chat_ask_service.close_ask("621", "other", reason="boh")) == {"status": "gone"}
+    assert len(redis.published) == 2

@@ -60,6 +60,19 @@ class ChatSendMessageRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatAskCreateRequest(BaseModel):
+    """A question the agent asks in the middle of a turn (services/user_ask.py)."""
+
+    question: str
+    options: list[str]
+    kind: Literal["choice", "confirm"] = "choice"
+    allow_text: bool = True
+    timeout_seconds: float = Field(default=180.0, ge=10, le=900)
+    turn_id: str = Field(default="", max_length=64)
+    request_id: str = Field(default="", max_length=128)
+    agent_name: str = Field(default="", max_length=255)
+
+
 class ChatAskAnswerRequest(BaseModel):
     """Answer to a mid-turn question of the agent: exactly one of the three."""
 
