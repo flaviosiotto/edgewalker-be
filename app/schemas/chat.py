@@ -60,6 +60,14 @@ class ChatSendMessageRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatAskAnswerRequest(BaseModel):
+    """Answer to a mid-turn question of the agent: exactly one of the three."""
+
+    option: Optional[int] = None
+    text: Optional[str] = Field(default=None, max_length=500)
+    skip: bool = False
+
+
 class ChatHistoryAppendRequest(BaseModel):
     """Append one row to the chat history without invoking the agent.
 

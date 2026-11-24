@@ -12,11 +12,13 @@ from app.models.user import User
 from app.schemas.chat import (
     ChatHistoryAppendRequest,
     ChatHistoryAppendResponse,
+    ChatAskAnswerRequest,
     ChatHistoryPage,
     ChatSendMessageRequest,
     ChatSendMessageResponse,
 )
 from app.schemas.chat import ChatRead
+from app.services.chat_ask_service import answer_ask, read_pending_ask
 from app.services.chat_realtime import subscribe, unsubscribe
 from app.services.studio_chat_service import get_or_create_studio_chat
 from app.services.chat_service import (
@@ -49,6 +51,10 @@ _AGENT_TURN_EVENT_MAP = {
     "delta": "agent_delta",
     "tool_call": "agent_tool_call",
     "activity": "agent_activity",
+    # Mid-turn question to the trader and its outcome (edgewalker_platform.user_ask):
+    # published on the same channel by the agent service itself.
+    "ask": "agent_ask",
+    "ask_resolved": "agent_ask_resolved",
     "turn_end": "agent_turn_end",
     "turn_error": "agent_turn_error",
 }
@@ -171,6 +177,36 @@ async def stream_chat_message_endpoint(
     )
 
 
+@router.get("/{chat_id}/asks/pending")
+async def get_pending_chat_ask_endpoint(
+    chat_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The question the agent is waiting on in this chat, or ``null``."""
+    session_id = get_chat_session_id(session, chat_id=chat_id, user_id=current_user.id)
+    session.close()
+    return {"pending_ask": await read_pending_ask(session_id)}
+
+
+@router.post("/{chat_id}/asks/{ask_id}/answer")
+async def answer_chat_ask_endpoint(
+    chat_id: int,
+    ask_id: str,
+    payload: ChatAskAnswerRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Answer a question the agent asked in the middle of a turn: one of
+    ``option`` (index of a button), ``text`` or ``skip``. The turn that is
+    waiting resumes with it."""
+    session_id = get_chat_session_id(session, chat_id=chat_id, user_id=current_user.id)
+    session.close()
+    return await answer_ask(
+        session_id, ask_id, option=payload.option, text=payload.text, skip=payload.skip, user_id=current_user.id
+    )
+
+
 @router.get("/{chat_id}/events")
 async def chat_events_endpoint(
     chat_id: int,
@@ -239,7 +275,12 @@ async def chat_events_endpoint(
             # Initial connected marker so clients know the subscription is live.
             # ``active_turn``: the channel has no history, so a client that
             # connects mid-turn learns here that the agent is at work.
-            ready = {"session_id": session_id, "active_turn": await read_active_turn(session_id)}
+            ready = {
+                "session_id": session_id,
+                "active_turn": await read_active_turn(session_id),
+                # a question the agent is waiting on survives a page reload
+                "pending_ask": await read_pending_ask(session_id),
+            }
             yield f"event: ready\ndata: {json.dumps(ready)}\n\n"
             while True:
                 if await request.is_disconnected():

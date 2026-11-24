@@ -74,7 +74,8 @@ class TurnRelay:
     def state(self) -> dict[str, Any]:
         """What the turn is doing now: ``phase`` is ``thinking`` (the model is
         working on its next step), ``tool`` (running ``name``) or ``writing``
-        (the reply is streaming); ``tools`` counts the tool calls so far."""
+        (the reply is streaming) or ``waiting`` (the agent asked the trader a
+        question and waits for the answer); ``tools`` counts the tool calls so far."""
         return {
             "request_id": self.request_id,
             "started_at": self.started_ms,
@@ -166,6 +167,14 @@ class TurnRelay:
             elif metadata.get("activity") == "thinking" and self.activity.get("phase") != "thinking":
                 self._publish({"type": "activity", "phase": "thinking", "tools": self.tools})
                 changed = self._set_activity({"phase": "thinking"})
+            elif metadata.get("activity") == "waiting_user":
+                # The agent asked the trader something and waits (user_ask):
+                # the marker repeats as a keep-alive, so refresh the state TTL.
+                if self.activity.get("phase") != "waiting":
+                    self._publish({"type": "activity", "phase": "waiting", "tools": self.tools})
+                    changed = self._set_activity({"phase": "waiting"})
+                else:
+                    self.touch()
             content = payload.get("content")
             if isinstance(content, str) and content:
                 self.full_len += len(content)
