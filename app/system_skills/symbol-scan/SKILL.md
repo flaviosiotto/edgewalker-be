@@ -14,7 +14,8 @@ Usa questa procedura quando il trader cerca un mercato: su quali simboli si pres
 - mercati_fissi (testo; facoltativo): per template o strategie con più chart, slot da leggere su un simbolo fisso, per esempio "mkt=BTC-USDT-SWAP"; gli altri seguono il simbolo della riga
 - timeframe (testo; facoltativo): solo per il filtro libero, per esempio 1h; i timeframe di template e strategie non si cambiano
 - simboli (testo; facoltativo): simboli separati da virgola; vuoto = il mercato della connessione
-- controvalore_minimo (numero; facoltativo): soglia di controvalore scambiato nelle 24 ore, in valuta di quotazione
+- tipi (testo; facoltativo): tipi di strumento a cui restringere il mercato, separati da virgola (forex, index, commodity, stock, crypto, etf, futures, cfd); utile sulle connessioni cTrader; vuoto = tutti
+- controvalore_minimo (numero; facoltativo): soglia di controvalore scambiato nelle 24 ore, in valuta di quotazione; non vale sulle connessioni senza dati a 24 ore (cTrader)
 - massimo_simboli (numero; default 100): quanti simboli al massimo, i più scambiati per primi
 - barre_indietro (numero; default 20): quante barre chiuse guardare indietro, l'ultima compresa; 1 = solo l'ultima
 - parametri (testo; facoltativo): valori dei params della strategia da usare solo per questa scansione, per esempio "rsi_entry=25, max_bars=10"; vuoto = quelli salvati

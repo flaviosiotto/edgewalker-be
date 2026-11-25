@@ -271,6 +271,9 @@ def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
         "max_symbols": payload.max_symbols,
         "lookback": payload.lookback,
     }
+    asset_types = sorted({t.strip().lower() for t in (payload.asset_types or []) if t and t.strip()})
+    if asset_types and not symbols:
+        request["asset_types"] = asset_types
     if overrides:
         request["params"] = overrides
     if fixed:
@@ -321,7 +324,7 @@ def _start_on_coordinator(scan: Scan) -> None:
         "connection_id": scan.connection_id,
         "broker_type": scan.broker_type or "",
         "timeframe": scan.timeframe,
-        **{k: v for k, v in (scan.request or {}).items() if k in ("symbols", "min_turnover_24h", "max_symbols", "lookback")},
+        **{k: v for k, v in (scan.request or {}).items() if k in ("symbols", "min_turnover_24h", "max_symbols", "lookback", "asset_types")},
     }
     try:
         with httpx.Client(timeout=15.0) as client:

@@ -292,6 +292,11 @@ def test_the_coordinator_gets_only_the_fields_it_knows(session, tenant, monkeypa
     assert set(sent[0]) == {"url", "strategy_config", "connection_id", "broker_type", "timeframe", "symbols", "min_turnover_24h", "max_symbols", "lookback"}
     assert sent[0]["lookback"] == 20
     assert sent[0]["symbols"] == ["AAA"] and sent[0]["broker_type"] == "okx"
+    # asset types narrow the market: sent only when no symbols are given
+    scan_service.create_scan(session, ScanCreate(connection_id=conn.id, timeframe="1h", indicators=[RSI], symbols=["aaa"], asset_types=["Forex"]), user.id)
+    assert "asset_types" not in sent[1]
+    scan = scan_service.create_scan(session, ScanCreate(connection_id=conn.id, timeframe="1h", indicators=[RSI], asset_types=["Index", " forex "]), user.id)
+    assert sent[2]["asset_types"] == ["forex", "index"] and scan.request["asset_types"] == ["forex", "index"]
 
 
 def test_free_scans_are_refused_when_they_cannot_be_read(session, tenant, stranger, started):

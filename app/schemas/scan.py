@@ -34,6 +34,9 @@ class ScanCreate(BaseModel):
     min_turnover_24h: Optional[float] = Field(default=None, ge=0)
     #: how many symbols at most, largest turnover first
     max_symbols: int = Field(default=300, ge=1, le=1000)
+    #: asset types of the market to scan ("forex", "index", "stock", …);
+    #: default: all. Not read when ``symbols`` are given.
+    asset_types: Optional[list[str]] = Field(default=None, max_length=16)
     #: closed bars the conditions are evaluated on, the last one included:
     #: a row says when each rule was true in that window, not only whether it is now
     lookback: int = Field(default=20, ge=1, le=200)
