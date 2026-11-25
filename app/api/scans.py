@@ -20,16 +20,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scans", tags=["Scans"])
 
 
+def _read(scan) -> ScanRead:
+    read = ScanRead.model_validate(scan, from_attributes=True)
+    read.free = isinstance(scan.request, dict) and isinstance(scan.request.get("free"), dict)
+    return read
+
+
 @router.post("/", response_model=ScanRead, status_code=status.HTTP_201_CREATED)
 def create_scan_endpoint(
     payload: ScanCreate,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
-    """Create a scan from a strategy and start it. The rows fill in while it
-    runs: poll ``GET /scans/{id}/rows``."""
+    """Create a scan and start it: from a strategy (``strategy_id``), or free
+    (``indicators`` and optional ``conditions`` on a ``connection_id``). The
+    rows fill in while it runs: poll ``GET /scans/{id}/rows``."""
     scan = scan_service.create_scan(session, payload, current_user.id)
-    return ScanRead.model_validate(scan, from_attributes=True)
+    return _read(scan)
 
 
 @router.get("/", response_model=ScanListPage)
@@ -51,7 +58,7 @@ def get_scan_endpoint(
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     scan = scan_service.get_scan(session, scan_id, current_user.id)
-    read = ScanRead.model_validate(scan, from_attributes=True)
+    read = _read(scan)
     read.value_keys = scan_service.value_keys(session, scan_id)
     return read
 

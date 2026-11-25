@@ -2,22 +2,56 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ScanCreate(BaseModel):
-    #: strategy whose primary-chart indicators and rules are read on each symbol
-    strategy_id: int
+    """Two ways to say what to read on each symbol.
+
+    From a strategy (``strategy_id`` alone): its primary-chart indicators and
+    its enabled rules. Or freely (``indicators``, with optional
+    ``conditions``): the classic screener — a few indicators and a filter over
+    them — on the connection given by ``connection_id`` or, when a
+    ``strategy_id`` comes with it, on that strategy's connection.
+    """
+    strategy_id: Optional[int] = None
+    connection_id: Optional[int] = None
+    #: title of a free scan, shown where a strategy's name would be
+    name: Optional[str] = Field(default=None, max_length=120)
+    #: free scan: indicator instances, ``{"name", "type", "params"}``
+    indicators: Optional[list[dict[str, Any]]] = Field(default=None, max_length=12)
+    #: free scan: conditions over price.* / indicators.*, same shape as a rule's
+    conditions: Optional[list[dict[str, Any]]] = Field(default=None, max_length=12)
+    #: free scan: how the conditions combine
+    logic: Literal["and", "or"] = "and"
     #: bars to read; default: the timeframe of the strategy's primary chart
     timeframe: Optional[str] = Field(default=None, max_length=16)
-    #: explicit symbols; default: the market of the strategy's connection
+    #: explicit symbols; default: the market of the connection
     symbols: Optional[list[str]] = Field(default=None, max_length=1000)
     #: lower bound on the 24h turnover, in quote currency
     min_turnover_24h: Optional[float] = Field(default=None, ge=0)
     #: how many symbols at most, largest turnover first
     max_symbols: int = Field(default=300, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def _one_source(self) -> "ScanCreate":
+        free = self.indicators is not None or self.conditions is not None
+        if not free and self.strategy_id is None:
+            raise ValueError("Give a strategy_id, or indicators for a free scan")
+        if free:
+            if not self.indicators and not self.conditions:
+                raise ValueError("A free scan needs at least one indicator or one condition")
+            if self.strategy_id is None and self.connection_id is None:
+                raise ValueError("A free scan needs the connection_id of the market to read")
+            if not str(self.timeframe or "").strip():
+                raise ValueError("A free scan needs a timeframe")
+        return self
+
+    @property
+    def is_free(self) -> bool:
+        return self.indicators is not None or self.conditions is not None
 
 
 class ScanSummary(BaseModel):
@@ -40,6 +74,8 @@ class ScanSummary(BaseModel):
     created_at: datetime
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    #: True when the scan reads free indicators and conditions, not a strategy's
+    free: bool = False
 
 
 class ScanRead(ScanSummary):

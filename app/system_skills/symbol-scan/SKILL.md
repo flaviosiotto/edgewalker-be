@@ -1,11 +1,11 @@
 ---
 name: symbol-scan
-description: Scansiona il mercato della connessione con gli indicatori e le condizioni della strategia corrente: su quali simboli sono vere, sull'ultima barra chiusa.
+description: Scansiona il mercato della connessione con le condizioni della strategia corrente, oppure con un filtro libero su indicatori classici: su quali simboli sono vere, sull'ultima barra chiusa.
 ---
 
 # Scansionare i simboli
 
-Usa questa procedura quando il trader chiede su quali altri simboli si presentano le condizioni della strategia, o dove ha senso applicarla. Una scansione legge gli indicatori del chart principale e le condizioni delle rule sull'ultima barra chiusa di molti simboli del mercato della connessione: produce una tabella, una riga per simbolo. Non classifica i simboli e non lancia ordini.
+Usa questa procedura quando il trader chiede su quali altri simboli si presentano le condizioni della strategia, dove ha senso applicarla, oppure uno screening su indicatori classici (RSI, medie, volume). Una scansione legge gli indicatori del chart principale e le condizioni delle rule sull'ultima barra chiusa di molti simboli del mercato della connessione: produce una tabella, una riga per simbolo. Non classifica i simboli e non lancia ordini.
 
 ## Input
 
@@ -14,13 +14,14 @@ Usa questa procedura quando il trader chiede su quali altri simboli si presentan
 - controvalore_minimo (numero; facoltativo): soglia di controvalore scambiato nelle 24 ore, in valuta di quotazione
 - massimo_simboli (numero; default 100): quanti simboli al massimo, i più scambiati per primi
 - regola (testo; facoltativo): la rule su cui concentrare la lettura; vuoto = tutte
+- filtro (testo; facoltativo): filtro libero al posto delle rule della strategia, per esempio "RSI 14 sotto 30" o "chiusura sopra EMA 200"
 - scansione (numero; facoltativo): id di una scansione già fatta da rileggere, senza lanciarne una nuova
 
 ## Procedura
 
 1. Se è indicata una scansione già fatta, salta al punto 4 con quell'id.
 2. La scansione usa la definizione SALVATA della strategia. Se in questo turno hai modificato la strategia senza salvarla, dillo prima di lanciare.
-3. Lancia `run_scan` con gli input dati (i simboli come lista). Una sola scansione: non rilanciarla per cambiare ordinamento o filtro, quelli si chiedono a `get_scan`. Se dopo l'attesa non è conclusa, riferisci id e link e fermati: la leggerai quando il trader lo chiede. Se è fallita, riporta l'errore così com'è.
+3. Lancia `run_scan` con gli input dati (i simboli come lista). Se è dato un filtro libero, traducilo in `indicators` e `conditions` di `run_scan` (tipo e parametri degli indicatori da `list_indicators`; campi `price.*` e `indicators.<nome>`): la scansione allora ignora le rule della strategia, che presta solo la connessione, e il timeframe va indicato (se manca usa quello del chart principale e dillo). Riporta in una riga come hai tradotto il filtro. Una sola scansione: non rilanciarla per cambiare ordinamento o filtro, quelli si chiedono a `get_scan`. Se dopo l'attesa non è conclusa, riferisci id e link e fermati: la leggerai quando il trader lo chiede. Se è fallita, riporta l'errore così com'è.
 4. Leggi con `get_scan`. Prima la vista d'insieme: per ogni rule, su quanti simboli è vera, falsa, non valutabile. Poi, per la rule indicata (o per ciascuna rule che è vera su almeno un simbolo), una pagina di righe filtrata con `rule`. Non leggere la tabella intera: filtra e pagina.
 5. Le condizioni che leggono `position.*`, `vars.*`, `studio.*` o un altro chart non sono valutabili in una scansione: dillo una volta, indicando quali, e non trattarle come false.
 6. Se una rule non è vera su nessun simbolo, mostra quale condizione la blocca più spesso e di quanto: i due numeri confrontati sono nella riga.

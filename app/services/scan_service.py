@@ -41,8 +41,68 @@ def _primary_timeframe(definition: Any) -> str:
     return str(strategy.get("timeframe") or (definition.get("timeframe") if isinstance(definition, dict) else "") or "")
 
 
+FREE_RULE_NAME = "filter"
+FREE_CHART_ID = "main"
+_FREE_NAMESPACES = {"price", "prev_price", "indicators", "prev_indicators", "session", "time"}
+
+
+def free_definition(payload: ScanCreate, timeframe: str) -> dict[str, Any]:
+    """The definition a free scan evaluates: one chart with the indicators
+    asked and, when there are conditions, one rule that never trades.
+
+    It is a strategy definition on purpose — the coordinator reads every scan
+    the same way — and it is validated like one.
+    """
+    from edgewalker_platform.rules_dsl import FIELD_PATH_RE, split_chart_prefix, split_offset, validate_definition
+
+    indicators: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in payload.indicators or []:
+        kind = str(raw.get("type") or "").strip()
+        name = str(raw.get("name") or "").strip() or kind.lower()
+        if not kind:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Every indicator needs a type")
+        if name in seen:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Two indicators are named '{name}'")
+        seen.add(name)
+        params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+        indicators.append({"name": name, "type": kind, "params": {k: v for k, v in params.items() if k != "ew_hash"}})
+    conditions = [dict(c) for c in payload.conditions or [] if isinstance(c, dict)]
+    for cond in conditions:
+        if not str(cond.get("field") or "").strip() or not str(cond.get("op") or "").strip():
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Every condition needs a field and an operator")
+    rules = (
+        [{"name": FREE_RULE_NAME, "action": "hold", "logic": payload.logic, "conditions": conditions}]
+        if conditions else []
+    )
+    definition = {"strategy": {
+        "name": (payload.name or "").strip() or "scan",
+        "symbol": "", "timeframe": timeframe, "timezone": "UTC",
+        "indicators": indicators,
+        "charts": [{"id": FREE_CHART_ID, "symbol": "", "timeframe": timeframe, "indicators": indicators}],
+        "rules": rules,
+    }}
+    problems = list(validate_definition(definition))
+    # What a scan cannot read is refused here rather than shown as "not evaluable":
+    # in a free scan the conditions are the whole point.
+    for cond in conditions:
+        texts = [str(cond.get(k)) for k in ("field", "value", "upper", "lower") if isinstance(cond.get(k), str)]
+        for ref in (m.group(0) for text in texts for m in FIELD_PATH_RE.finditer(text)):
+            chart, rest = split_chart_prefix(split_offset(ref)[0])
+            namespace = rest.split(".", 1)[0]
+            if namespace not in _FREE_NAMESPACES or (chart is not None and chart != FREE_CHART_ID):
+                problems.append(f"'{ref}' cannot be read in a scan: use price.*, indicators.*, session.* or time.*")
+    if problems:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="; ".join(problems[:5]))
+    return definition
+
+
 def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
-    """Create a scan from a strategy of the user and start it on the coordinator."""
+    """Create a scan and start it on the coordinator.
+
+    From a strategy of the user (its saved definition), or free: indicators
+    and conditions given in the request (``free_definition``).
+    """
     from app.services.indicator_ref_service import inject_user_indicator_refs
     from app.services.strategy_service import (
         _normalize_strategy_indicator_field_references,
@@ -50,33 +110,52 @@ def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
         get_strategy,
     )
 
-    strategy = get_strategy(session, payload.strategy_id, user_id)
-    connection = session.get(Connection, strategy.connection_id) if strategy.connection_id else None
+    strategy = get_strategy(session, payload.strategy_id, user_id) if payload.strategy_id is not None else None
+    connection_id = payload.connection_id if payload.is_free and payload.connection_id is not None else (
+        strategy.connection_id if strategy is not None else None
+    )
+    connection = session.get(Connection, connection_id) if connection_id else None
     if connection is None or connection.user_id != user_id:
+        if payload.connection_id is not None and payload.is_free:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="The strategy has no connection to read the market from",
         )
-    config = _strip_rule_chat_ids(_normalize_strategy_indicator_field_references(strategy.definition))
+    if payload.is_free:
+        timeframe = str(payload.timeframe or "").strip()
+        config = _normalize_strategy_indicator_field_references(free_definition(payload, timeframe))
+    else:
+        config = _strip_rule_chat_ids(_normalize_strategy_indicator_field_references(strategy.definition))
+        timeframe = str(payload.timeframe or "").strip() or _primary_timeframe(config)
     # Pin user-defined indicators to their current version, as a backtest does
     config = inject_user_indicator_refs(config, user_id)
-    timeframe = str(payload.timeframe or "").strip() or _primary_timeframe(config)
     if not timeframe:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="The strategy has no timeframe: give one")
     symbols = [s.strip().upper() for s in (payload.symbols or []) if s and s.strip()] or None
 
+    request: dict[str, Any] = {
+        "symbols": symbols,
+        "min_turnover_24h": payload.min_turnover_24h,
+        "max_symbols": payload.max_symbols,
+    }
+    if payload.is_free:
+        # Kept as asked, so the scan can be shown and launched again as it was
+        request["free"] = {
+            "name": (payload.name or "").strip() or None,
+            "indicators": config["strategy"]["charts"][0]["indicators"],
+            "conditions": payload.conditions or [],
+            "logic": payload.logic,
+        }
     scan = Scan(
         user_id=user_id,
-        strategy_id=strategy.id,
-        strategy_name=strategy.name,
+        strategy_id=None if payload.is_free else strategy.id,
+        # A free scan has no strategy: its own title takes that place
+        strategy_name=((payload.name or "").strip() or None) if payload.is_free else strategy.name,
         connection_id=connection.id,
         broker_type=connection.broker_type,
         timeframe=timeframe,
-        request={
-            "symbols": symbols,
-            "min_turnover_24h": payload.min_turnover_24h,
-            "max_symbols": payload.max_symbols,
-        },
+        request=request,
         config=config,
         status=ScanStatus.PENDING.value,
     )
@@ -101,7 +180,7 @@ def _start_on_coordinator(scan: Scan) -> None:
         "connection_id": scan.connection_id,
         "broker_type": scan.broker_type or "",
         "timeframe": scan.timeframe,
-        **(scan.request or {}),
+        **{k: v for k, v in (scan.request or {}).items() if k in ("symbols", "min_turnover_24h", "max_symbols")},
     }
     try:
         with httpx.Client(timeout=15.0) as client:
@@ -136,6 +215,7 @@ def list_scans(
         Scan.id, Scan.strategy_id, Scan.strategy_name, Scan.connection_id, Scan.broker_type, Scan.market_type,
         Scan.timeframe, Scan.mode, Scan.status, Scan.symbols_total, Scan.symbols_done, Scan.symbols_failed,
         Scan.error_message, Scan.created_at, Scan.started_at, Scan.completed_at,
+        Scan.request.op("?")("free").label("free"),
     ]
     rows = session.exec(
         select(*summary_columns).where(*where).order_by(Scan.id.desc()).limit(limit).offset(offset)
