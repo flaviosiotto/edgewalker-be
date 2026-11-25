@@ -130,12 +130,83 @@ def _apply_params(config: dict[str, Any], given: dict[str, float]) -> dict[str, 
     return changed
 
 
+def scan_source(request: Any) -> tuple[str, int | None]:
+    """``(source, template_id)`` of a scan from its stored request."""
+    if isinstance(request, dict):
+        if isinstance(request.get("free"), dict):
+            return "free", None
+        template = request.get("template")
+        if isinstance(template, dict) and template.get("id") is not None:
+            return "template", int(template["id"])
+    return "strategy", None
+
+
+def _chart_ids(definition: dict[str, Any]) -> list[str]:
+    strategy = definition.get("strategy") if isinstance(definition.get("strategy"), dict) else definition
+    charts = strategy.get("charts") if isinstance(strategy, dict) else None
+    if not isinstance(charts, list):
+        return []
+    return [
+        str(chart.get("id") or ("main" if index == 0 else f"chart-{index}"))
+        for index, chart in enumerate(charts) if isinstance(chart, dict)
+    ]
+
+
+def _own_market_charts(definition: Any) -> dict[str, str]:
+    """Charts of a strategy that read a symbol other than the strategy's own
+    (a market filter): they stay on that symbol when the strategy is scanned."""
+    strategy = definition.get("strategy") if isinstance(definition, dict) and isinstance(definition.get("strategy"), dict) else definition
+    charts = strategy.get("charts") if isinstance(strategy, dict) else None
+    if not isinstance(charts, list) or not charts or not isinstance(charts[0], dict):
+        return {}
+    own = str(charts[0].get("symbol") or strategy.get("symbol") or "").strip().upper()
+    fixed: dict[str, str] = {}
+    for index, chart in enumerate(charts[1:], start=1):
+        symbol = str(chart.get("symbol") or "").strip().upper() if isinstance(chart, dict) else ""
+        if symbol and symbol != own:
+            fixed[str(chart.get("id") or f"chart-{index}")] = symbol
+    return fixed
+
+
+def scan_definition(template_definition: dict[str, Any], fixed: dict[str, str]) -> dict[str, Any]:
+    """The definition a scan evaluates, from a market-free one.
+
+    The primary chart has no symbol (it is each scanned symbol in turn); so
+    has every other chart that follows it. ``fixed`` puts a chart on a symbol
+    of its own, the same for every row.
+    """
+    import copy
+
+    out = copy.deepcopy(template_definition)
+    strategy = out.get("strategy") if isinstance(out.get("strategy"), dict) else out
+    ids = _chart_ids(out)
+    unknown = sorted(set(fixed) - set(ids[1:]))
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"No such chart to put on a symbol of its own: {', '.join(unknown)}. "
+                f"Other charts: {', '.join(ids[1:]) or 'none'} (the primary chart is always the scanned symbol)"
+            ),
+        )
+    strategy["symbol"] = ""
+    charts = [c for c in strategy.get("charts") or [] if isinstance(c, dict)]
+    for chart_id, chart in zip(ids, charts):
+        chart["id"] = chart_id
+        chart["symbol"] = fixed.get(chart_id, "")
+    return out
+
+
 def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
     """Create a scan and start it on the coordinator.
 
-    From a strategy of the user (its saved definition), or free: indicators
-    and conditions given in the request (``free_definition``).
+    Three sources, one reading. A template (rules without a market) is the
+    usual one; a strategy is scanned as the template it would make
+    (``strategy_template_service.sanitize``), keeping on their symbol the
+    charts that read another market; a free scan builds its own definition
+    from indicators and conditions (``free_definition``).
     """
+    from app.services import strategy_template_service
     from app.services.indicator_ref_service import inject_user_indicator_refs
     from app.services.strategy_service import (
         _normalize_strategy_indicator_field_references,
@@ -144,28 +215,47 @@ def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
     )
 
     strategy = get_strategy(session, payload.strategy_id, user_id) if payload.strategy_id is not None else None
-    connection_id = payload.connection_id if payload.is_free and payload.connection_id is not None else (
+    template = (
+        strategy_template_service.get_template(session, payload.template_id, user_id)
+        if payload.template_id is not None else None
+    )
+    connection_id = payload.connection_id if payload.connection_id is not None else (
         strategy.connection_id if strategy is not None else None
     )
     connection = session.get(Connection, connection_id) if connection_id else None
     if connection is None or connection.user_id != user_id:
-        if payload.connection_id is not None and payload.is_free:
+        if payload.connection_id is not None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="The strategy has no connection to read the market from",
         )
+    fixed: dict[str, str] = {}
     if payload.is_free:
         timeframe = str(payload.timeframe or "").strip()
         config = _normalize_strategy_indicator_field_references(free_definition(payload, timeframe))
     else:
-        config = _strip_rule_chat_ids(_normalize_strategy_indicator_field_references(strategy.definition))
-        timeframe = str(payload.timeframe or "").strip() or _primary_timeframe(config)
+        if template is not None:
+            base = template.definition
+        else:
+            base, _meta, _warnings = strategy_template_service.sanitize(strategy.definition)
+            fixed = _own_market_charts(strategy.definition)
+        for chart_id, symbol in (payload.charts or {}).items():
+            if symbol and str(symbol).strip():
+                fixed[str(chart_id)] = str(symbol).strip().upper()
+            else:
+                fixed.pop(str(chart_id), None)
+        config = _strip_rule_chat_ids(_normalize_strategy_indicator_field_references(scan_definition(base, fixed)))
+        asked = str(payload.timeframe or "").strip()
+        if asked and len(_chart_ids(config)) > 1:
+            # The timeframes of a multi-chart strategy are part of what it means
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="These rules read more than one chart: their timeframes cannot be changed for a scan",
+            )
+        timeframe = asked or _primary_timeframe(config)
     overrides: dict[str, float] = {}
     if payload.params and not payload.is_free:
-        import copy
-
-        config = copy.deepcopy(config)  # the strategy's own definition is not to be touched
         overrides = _apply_params(config, payload.params)
     if payload.params and payload.is_free:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A free scan has no params")
@@ -183,6 +273,10 @@ def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
     }
     if overrides:
         request["params"] = overrides
+    if fixed:
+        request["charts"] = fixed
+    if template is not None:
+        request["template"] = {"id": template.id, "name": template.name}
     if payload.is_free:
         # Kept as asked, so the scan can be shown and launched again as it was
         request["free"] = {
@@ -193,9 +287,12 @@ def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
         }
     scan = Scan(
         user_id=user_id,
-        strategy_id=None if payload.is_free else strategy.id,
-        # A free scan has no strategy: its own title takes that place
-        strategy_name=((payload.name or "").strip() or None) if payload.is_free else strategy.name,
+        strategy_id=strategy.id if strategy is not None and not payload.is_free else None,
+        # Without a strategy, the template's name or the free scan's own title takes that place
+        strategy_name=(
+            ((payload.name or "").strip() or None) if payload.is_free
+            else template.name if template is not None else strategy.name
+        ),
         connection_id=connection.id,
         broker_type=connection.broker_type,
         timeframe=timeframe,
@@ -260,11 +357,20 @@ def list_scans(
         Scan.timeframe, Scan.mode, Scan.status, Scan.symbols_total, Scan.symbols_done, Scan.symbols_failed,
         Scan.error_message, Scan.created_at, Scan.started_at, Scan.completed_at,
         Scan.request.op("?")("free").label("free"),
+        Scan.request["template"].label("template"),
     ]
     rows = session.exec(
         select(*summary_columns).where(*where).order_by(Scan.id.desc()).limit(limit).offset(offset)
     ).mappings().all()
-    return [dict(r) for r in rows], int(total)  # type: ignore[return-value]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        template = item.pop("template", None)
+        template_id = template.get("id") if isinstance(template, dict) else None
+        item["template_id"] = template_id
+        item["source"] = "free" if item.get("free") else "template" if template_id is not None else "strategy"
+        out.append(item)
+    return out, int(total)  # type: ignore[return-value]
 
 
 def delete_scan(session: Session, scan_id: int, user_id: int) -> None:

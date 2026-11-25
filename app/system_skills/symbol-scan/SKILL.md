@@ -1,15 +1,18 @@
 ---
 name: symbol-scan
-description: Scansiona il mercato della connessione con le condizioni della strategia corrente, oppure con un filtro libero su indicatori classici: su quali simboli sono vere adesso o lo sono state nelle ultime barre chiuse.
+description: Scansiona il mercato di una connessione con le rule di un template di strategia, con un filtro libero su indicatori classici, oppure con le rule della strategia corrente: su quali simboli sono vere adesso o lo sono state nelle ultime barre chiuse.
 ---
 
 # Scansionare i simboli
 
-Usa questa procedura quando il trader chiede su quali altri simboli si presentano le condizioni della strategia, dove ha senso applicarla, oppure uno screening su indicatori classici (RSI, medie, volume). Una scansione legge gli indicatori del chart principale e le condizioni delle rule sulle ultime barre chiuse di molti simboli del mercato della connessione: produce una tabella, una riga per simbolo. I valori sono dell'ultima barra chiusa; per ogni rule e condizione la riga dice anche quando è stata vera nella finestra guardata, così compare anche una condizione scattata e subito rientrata (un incrocio). Non classifica i simboli e non lancia ordini.
+Usa questa procedura quando il trader cerca un mercato: su quali simboli si presentano le condizioni di un template, uno screening su indicatori classici (RSI, medie, volume), oppure dove altro si presentano le condizioni della strategia corrente. Lo scanner sta a monte della strategia: dal simbolo scelto si crea poi la strategia dal template. Una scansione legge gli indicatori del chart principale e le condizioni delle rule sulle ultime barre chiuse di molti simboli del mercato della connessione: produce una tabella, una riga per simbolo. I valori sono dell'ultima barra chiusa; per ogni rule e condizione la riga dice anche quando è stata vera nella finestra guardata, così compare anche una condizione scattata e subito rientrata (un incrocio). Non classifica i simboli e non lancia ordini.
 
 ## Input
 
-- timeframe (testo; facoltativo): timeframe delle barre, per esempio 1h; vuoto = quello del chart principale
+- template (testo; facoltativo): nome o id del template di strategia da scansionare; vuoto = filtro libero, oppure le rule della strategia corrente se la chat ne ha una
+- connessione (testo; facoltativo): la connessione di cui leggere il mercato; vuoto = quella della strategia corrente, altrimenti chiedila
+- mercati_fissi (testo; facoltativo): per template o strategie con più chart, slot da leggere su un simbolo fisso, per esempio "mkt=BTC-USDT-SWAP"; gli altri seguono il simbolo della riga
+- timeframe (testo; facoltativo): solo per il filtro libero, per esempio 1h; i timeframe di template e strategie non si cambiano
 - simboli (testo; facoltativo): simboli separati da virgola; vuoto = il mercato della connessione
 - controvalore_minimo (numero; facoltativo): soglia di controvalore scambiato nelle 24 ore, in valuta di quotazione
 - massimo_simboli (numero; default 100): quanti simboli al massimo, i più scambiati per primi
@@ -22,13 +25,13 @@ Usa questa procedura quando il trader chiede su quali altri simboli si presentan
 ## Procedura
 
 1. Se è indicata una scansione già fatta, salta al punto 4 con quell'id.
-2. La scansione usa la definizione SALVATA della strategia. Se in questo turno hai modificato la strategia senza salvarla, dillo prima di lanciare.
-3. Lancia `run_scan` con gli input dati (i simboli come lista, barre_indietro come `lookback`, parametri come oggetto `params` nome → numero; la strategia non viene modificata). Se è dato un filtro libero, traducilo in `indicators` e `conditions` di `run_scan` (tipo e parametri degli indicatori da `list_indicators`; campi `price.*` e `indicators.<nome>`): la scansione allora ignora le rule della strategia, che presta solo la connessione, e il timeframe va indicato (se manca usa quello del chart principale e dillo). Riporta in una riga come hai tradotto il filtro. Una sola scansione: non rilanciarla per cambiare ordinamento o filtro, quelli si chiedono a `get_scan`. Se dopo l'attesa non è conclusa, riferisci id e link e fermati: la leggerai quando il trader lo chiede. Se è fallita, riporta l'errore così com'è.
+2. Scegli la sorgente, una sola. Template: trova l'id con `list_strategy_templates` e passa `template_id` e `connection_id` (se la connessione non è chiara, chiedila). Filtro libero: vedi il punto 3. Strategia corrente: nessun template e nessun filtro; la scansione usa la definizione SALVATA, letta come template (il simbolo della strategia non conta): se in questo turno hai modificato la strategia senza salvarla, dillo prima di lanciare.
+3. Lancia `run_scan` con gli input dati (i simboli come lista, barre_indietro come `lookback`, parametri come oggetto `params` nome → numero; la strategia non viene modificata). Se è dato un filtro libero, traducilo in `indicators` e `conditions` di `run_scan` (tipo e parametri degli indicatori da `list_indicators`; campi `price.*` e `indicators.<nome>`): la scansione allora non usa né template né rule della strategia, e il timeframe va indicato (se manca chiedilo, oppure nella chat di una strategia usa quello del suo chart principale e dillo). Riporta in una riga come hai tradotto il filtro. Una sola scansione: non rilanciarla per cambiare ordinamento o filtro, quelli si chiedono a `get_scan`. Se dopo l'attesa non è conclusa, riferisci id e link e fermati: la leggerai quando il trader lo chiede. Se è fallita, riporta l'errore così com'è.
 4. Leggi con `get_scan`. Prima la vista d'insieme: per ogni rule, su quanti simboli è vera, falsa, non valutabile. Poi, per la rule indicata (o per ciascuna rule vera su almeno un simbolo nella finestra), una pagina di righe filtrata con `rule`, `within` uguale alle barre guardate e `sort` `last_true`: così leggi anche i simboli su cui è scattata ed è rientrata. Non leggere la tabella intera: filtra e pagina.
 5. Le condizioni che leggono `position.*`, `vars.*`, `studio.*` non sono valutabili in una scansione: dillo una volta, indicando quali, e non trattarle come false. Gli altri chart della strategia (altri timeframe, simboli di contesto) vengono letti: se su un simbolo mancano le barre di un chart, le sue condizioni risultano non valutabili su quella riga.
 6. Rispetta il ruolo delle rule (`role`). Le rule di ingresso (buy, sell), quelle che chiamano l'agente e il filtro libero sono ciò che la scansione cerca. Le rule di uscita (close) no: in una scansione non c'è una posizione aperta, quindi non possono scattare. Riportale a parte, e solo come informazione ("su questi simboli la condizione di uscita è già vera").
 7. Se una rule non è vera su nessun simbolo, mostra quale condizione la blocca più spesso e di quanto: i due numeri confrontati sono nella riga.
-8. Chiudi con cosa può fare il trader: aprire la tabella dal link per ordinarla e filtrarla, oppure copiare la strategia su uno dei simboli e lanciare un backtest massivo per vedere come si è comportata lì. Quali simboli provare lo decide lui.
+8. Chiudi con cosa può fare il trader: aprire la tabella dal link per ordinarla e filtrarla, oppure creare la strategia dal template su uno dei simboli (`create_strategy_from_template`, dopo aver chiesto il conto) e lanciare un backtest massivo per vedere come si è comportata lì. Quali simboli provare lo decide lui.
 
 ## Forma della risposta
 

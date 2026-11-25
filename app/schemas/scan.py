@@ -41,11 +41,24 @@ class ScanCreate(BaseModel):
     #: the saved ones (only names the strategy defines)
     params: Optional[dict[str, float]] = Field(default=None, max_length=64)
 
+    #: scan the rules of a strategy template (the usual source): needs a
+    #: ``connection_id``; its primary chart slot is each scanned symbol
+    template_id: Optional[int] = None
+    #: template or strategy scans: other chart slots read on a symbol of their
+    #: own (``{"mkt": "BTC-USDT-SWAP"}``); a slot left out follows the scanned symbol
+    charts: Optional[dict[str, Optional[str]]] = Field(default=None, max_length=16)
+
     @model_validator(mode="after")
     def _one_source(self) -> "ScanCreate":
         free = self.indicators is not None or self.conditions is not None
+        if self.template_id is not None and (free or self.strategy_id is not None):
+            raise ValueError("Give one source: a template_id, a strategy_id, or indicators for a free scan")
+        if self.template_id is not None:
+            if self.connection_id is None:
+                raise ValueError("A template scan needs the connection_id of the market to read")
+            return self
         if not free and self.strategy_id is None:
-            raise ValueError("Give a strategy_id, or indicators for a free scan")
+            raise ValueError("Give a template_id, a strategy_id, or indicators for a free scan")
         if free:
             if not self.indicators and not self.conditions:
                 raise ValueError("A free scan needs at least one indicator or one condition")
@@ -53,6 +66,8 @@ class ScanCreate(BaseModel):
                 raise ValueError("A free scan needs the connection_id of the market to read")
             if not str(self.timeframe or "").strip():
                 raise ValueError("A free scan needs a timeframe")
+            if self.charts:
+                raise ValueError("A free scan has one chart: charts does not apply")
         return self
 
     @property
@@ -82,6 +97,10 @@ class ScanSummary(BaseModel):
     completed_at: Optional[datetime] = None
     #: True when the scan reads free indicators and conditions, not a strategy's
     free: bool = False
+    #: where the rules come from: free | template | strategy
+    source: str = "strategy"
+    #: the template scanned (``strategy_name`` then holds its name)
+    template_id: Optional[int] = None
 
 
 class ScanRead(ScanSummary):

@@ -424,3 +424,95 @@ def test_an_exit_rule_does_not_make_a_row_recent(session, tenant, started):
     session.commit()
     assert list_scan_rows(session, scan.id, user.id, matched_only=True, within=20)[1] == []
     assert [r.symbol for r in list_scan_rows(session, scan.id, user.id, rule="out", within=20)[1]] == ["OUT"], "asked by name, it is read"
+
+
+# ---------------------------------------------------------------------------
+# Templates as the source; a strategy scanned as the template it would make
+# ---------------------------------------------------------------------------
+
+def _multi_chart_definition(*, own="BTC-USDT-SWAP", market="ETH-USDT-SWAP"):
+    ema = {"name": "ema20", "type": "ema", "params": {"timeperiod": 20}}
+    chart = lambda cid, symbol, tf: {"id": cid, "symbol": symbol, "asset": "crypto_futures", "timeframe": tf, "indicators": [ema]}  # noqa: E731
+    return {"strategy": {
+        "name": "mtf", "symbol": own, "asset": "crypto_futures", "timeframe": "15m", "timezone": "UTC",
+        "indicators": [ema], "params": {"k": 2},
+        "charts": [chart("main", own, "15m"), chart("htf", own, "1h"), chart("mkt", market, "1h")],
+        "rules": [{"name": "in", "action": "buy", "conditions": [
+            {"field": "price.close", "op": ">", "value": "htf.indicators.ema20"},
+            {"field": "mkt.price.close", "op": ">", "value": "mkt.indicators.ema20"},
+        ]}],
+    }}
+
+
+def _template(session, user_id, definition, name="tpl scan"):
+    from app.models.strategy_template import StrategyTemplate
+    from app.services.strategy_template_service import sanitize
+
+    clean, meta, _ = sanitize(definition)
+    row = StrategyTemplate(user_id=user_id, name=name, definition=clean, charts_meta=[m.model_dump() for m in meta])
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def test_a_template_is_scanned_on_a_connection_with_its_slots(session, tenant, stranger, started):
+    from fastapi import HTTPException
+    from pydantic import ValidationError
+
+    from app.api.scans import _read
+    from app.schemas.scan import ScanCreate
+    from app.services.scan_service import create_scan, list_scans
+
+    user, conn, _ = tenant
+    template = _template(session, user.id, _multi_chart_definition())
+
+    scan = create_scan(session, ScanCreate(template_id=template.id, connection_id=conn.id, charts={"mkt": "btc-usdt-swap"}, params={"k": 3}), user.id)
+    charts = {c["id"]: c for c in scan.config["strategy"]["charts"]}
+    assert scan.strategy_id is None and scan.strategy_name == "tpl scan" and scan.timeframe == "15m"
+    assert charts["main"]["symbol"] == "" and charts["htf"]["symbol"] == "", "they follow the scanned symbol"
+    assert charts["mkt"]["symbol"] == "BTC-USDT-SWAP", "a slot put on a market of its own"
+    assert scan.request["template"] == {"id": template.id, "name": "tpl scan"}
+    assert scan.request["charts"] == {"mkt": "BTC-USDT-SWAP"} and scan.request["params"] == {"k": 3.0}
+    read = _read(scan)
+    assert (read.source, read.template_id, read.free) == ("template", template.id, False)
+    listed = {row["id"]: row for row in list_scans(session, user.id)[0]}
+    assert listed[scan.id]["source"] == "template" and listed[scan.id]["template_id"] == template.id
+
+    every_slot_follows = create_scan(session, ScanCreate(template_id=template.id, connection_id=conn.id), user.id)
+    assert all(c["symbol"] == "" for c in every_slot_follows.config["strategy"]["charts"])
+
+    with pytest.raises(ValidationError):
+        ScanCreate(template_id=template.id)  # no connection
+    with pytest.raises(ValidationError):
+        ScanCreate(template_id=template.id, connection_id=conn.id, strategy_id=1)
+    for bad in ({"charts": {"main": "ETH-USDT-SWAP"}}, {"charts": {"nope": "X"}}, {"timeframe": "4h"}):
+        with pytest.raises(HTTPException) as refused:
+            create_scan(session, ScanCreate(template_id=template.id, connection_id=conn.id, **bad), user.id)
+        assert refused.value.status_code == 422
+    with pytest.raises(HTTPException) as foreign:
+        create_scan(session, ScanCreate(template_id=template.id, connection_id=conn.id), stranger.id)
+    assert foreign.value.status_code == 404
+
+
+def test_a_strategy_is_scanned_as_the_template_it_would_make(session, tenant, started):
+    from app.api.scans import _read
+    from app.schemas.scan import ScanCreate
+    from app.schemas.strategy import StrategyCreate
+    from app.services.scan_service import create_scan
+    from app.services.strategy_service import create_strategy, get_strategy
+
+    user, conn, acc = tenant
+    strategy = create_strategy(session, StrategyCreate(name="mtf strategy", definition=_multi_chart_definition(), account_id=acc.id), user.id)
+    scan = create_scan(session, ScanCreate(strategy_id=strategy.id), user.id)
+    charts = {c["id"]: c for c in scan.config["strategy"]["charts"]}
+    assert charts["main"]["symbol"] == "" and charts["htf"]["symbol"] == ""
+    assert charts["mkt"]["symbol"] == "ETH-USDT-SWAP", "a chart on another market stays on it"
+    assert scan.strategy_id == strategy.id and scan.connection_id == conn.id and scan.request["charts"] == {"mkt": "ETH-USDT-SWAP"}
+    assert _read(scan).source == "strategy" and _read(scan).params == {"k": 2.0}
+    session.expire_all()
+    kept = get_strategy(session, strategy.id, user.id).definition["strategy"]["charts"]
+    assert [c["symbol"] for c in kept] == ["BTC-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP"], "the strategy is not touched"
+
+    follows = create_scan(session, ScanCreate(strategy_id=strategy.id, charts={"mkt": None}), user.id)
+    assert {c["id"]: c["symbol"] for c in follows.config["strategy"]["charts"]}["mkt"] == ""
