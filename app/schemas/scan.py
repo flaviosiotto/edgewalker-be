@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, computed_field
 
 
 class ScanCreate(BaseModel):
@@ -34,6 +34,9 @@ class ScanCreate(BaseModel):
     min_turnover_24h: Optional[float] = Field(default=None, ge=0)
     #: how many symbols at most, largest turnover first
     max_symbols: int = Field(default=300, ge=1, le=1000)
+    #: closed bars the conditions are evaluated on, the last one included:
+    #: a row says when each rule was true in that window, not only whether it is now
+    lookback: int = Field(default=20, ge=1, le=200)
 
     @model_validator(mode="after")
     def _one_source(self) -> "ScanCreate":
@@ -106,6 +109,15 @@ class ScanRowRead(BaseModel):
     conditions_true: int = 0
     conditions_total: int = 0
     error: Optional[str] = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def lookback(self) -> Optional[int]:
+        """Closed bars evaluated for this symbol (None: a scan of the last bar only)."""
+        for outcome in self.rules if isinstance(self.rules, list) else []:
+            if isinstance(outcome, dict) and isinstance(outcome.get("lookback"), int):
+                return outcome["lookback"]
+        return None
 
 
 class ScanRowsPage(BaseModel):

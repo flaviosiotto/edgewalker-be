@@ -66,10 +66,11 @@ def get_scan_endpoint(
 @router.get("/{scan_id}/rows", response_model=ScanRowsPage)
 def list_scan_rows_endpoint(
     scan_id: int,
-    sort: str = Query(default="symbol", max_length=128, description="symbol, matched_rules, conditions_true, bar_ts, market.<field> or a values key (indicators.rsi14, price.close)"),
+    sort: str = Query(default="symbol", max_length=128, description="symbol, matched_rules, conditions_true, last_true, bar_ts, market.<field> or a values key (indicators.rsi14, price.close)"),
     descending: bool = False,
     rule: str | None = Query(default=None, max_length=255, description="Keep the rows where this rule is true"),
     matched_only: bool = Query(default=False, description="Keep the rows where at least one rule is true"),
+    within: int | None = Query(default=None, ge=1, le=200, description="With rule or matched_only: true on one of the last N closed bars instead of on the last one"),
     symbol: str | None = Query(default=None, max_length=64),
     limit: int = Query(default=1000, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
@@ -78,7 +79,7 @@ def list_scan_rows_endpoint(
 ):
     scan, rows, total = scan_service.list_scan_rows(
         session, scan_id, current_user.id, sort=sort, descending=descending, rule=rule,
-        matched_only=matched_only, symbol=symbol, limit=limit, offset=offset,
+        matched_only=matched_only, within=within, symbol=symbol, limit=limit, offset=offset,
     )
     return ScanRowsPage(
         items=[ScanRowRead.model_validate(r, from_attributes=True) for r in rows],

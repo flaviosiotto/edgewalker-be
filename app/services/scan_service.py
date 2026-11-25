@@ -138,6 +138,7 @@ def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
         "symbols": symbols,
         "min_turnover_24h": payload.min_turnover_24h,
         "max_symbols": payload.max_symbols,
+        "lookback": payload.lookback,
     }
     if payload.is_free:
         # Kept as asked, so the scan can be shown and launched again as it was
@@ -180,7 +181,7 @@ def _start_on_coordinator(scan: Scan) -> None:
         "connection_id": scan.connection_id,
         "broker_type": scan.broker_type or "",
         "timeframe": scan.timeframe,
-        **{k: v for k, v in (scan.request or {}).items() if k in ("symbols", "min_turnover_24h", "max_symbols")},
+        **{k: v for k, v in (scan.request or {}).items() if k in ("symbols", "min_turnover_24h", "max_symbols", "lookback")},
     }
     try:
         with httpx.Client(timeout=15.0) as client:
@@ -240,7 +241,23 @@ def value_keys(session: Session, scan_id: int) -> list[str]:
     return sorted(keys)
 
 
-def _sort_value(row: ScanRow, key: str) -> Any:
+def _last_true(row: ScanRow, rule: str | None = None) -> int | None:
+    """Bars ago a rule was last true (0 = the last closed bar): of ``rule``, or the most recent of all."""
+    found: list[int] = []
+    for outcome in row.rules or []:
+        if not isinstance(outcome, dict) or (rule and outcome.get("name") != rule):
+            continue
+        ago = outcome.get("last_true")
+        if ago is None and "last_true" not in outcome and outcome.get("matched") is True:
+            ago = 0  # a scan of the last bar only
+        if isinstance(ago, int):
+            found.append(ago)
+    return min(found) if found else None
+
+
+def _sort_value(row: ScanRow, key: str, rule: str | None = None) -> Any:
+    if key == "last_true":
+        return _last_true(row, rule)
     if key in _ROW_SORT_KEYS:
         return getattr(row, key)
     if key.startswith("market."):
@@ -268,6 +285,7 @@ def list_scan_rows(
     descending: bool = False,
     rule: str | None = None,
     matched_only: bool = False,
+    within: int | None = None,
     symbol: str | None = None,
     limit: int = 1000,
     offset: int = 0,
@@ -275,16 +293,23 @@ def list_scan_rows(
     """A page of the scan's table.
 
     ``rule`` keeps the rows where that rule is true; ``matched_only`` the rows
-    where at least one rule is. Rows without the sort value come last in both
+    where at least one rule is. ``within`` widens both from "true on the last
+    closed bar" to "true on one of the last ``within`` bars" (1 = the last bar),
+    which is how a rule that fired and went off again is found; ``sort=last_true``
+    orders by how many bars ago that was. Rows without the sort value come last in both
     directions, ties are broken by symbol. A scan has at most a thousand rows:
     they are filtered and ordered here rather than in SQL over JSONB.
     """
     scan = get_scan(session, scan_id, user_id)
     rows = list(session.exec(select(ScanRow).where(ScanRow.scan_id == scan_id)).all())
-    if rule:
-        rows = [r for r in rows if _rule_matched(r, rule)]
-    if matched_only:
-        rows = [r for r in rows if (r.matched_rules or 0) > 0]
+    if within:
+        if rule or matched_only:
+            rows = [r for r in rows if (ago := _last_true(r, rule)) is not None and ago < within]
+    else:
+        if rule:
+            rows = [r for r in rows if _rule_matched(r, rule)]
+        if matched_only:
+            rows = [r for r in rows if (r.matched_rules or 0) > 0]
     if symbol:
         needle = symbol.strip().upper()
         rows = [r for r in rows if needle in r.symbol.upper() or needle in str(r.name or "").upper()]
@@ -292,12 +317,12 @@ def list_scan_rows(
     key = (sort or "symbol").strip()
     rows.sort(key=lambda r: r.symbol)
     if key != "symbol" or descending:
-        present = [r for r in rows if not _is_missing(_sort_value(r, key))]
-        missing = [r for r in rows if _is_missing(_sort_value(r, key))]
+        present = [r for r in rows if not _is_missing(_sort_value(r, key, rule))]
+        missing = [r for r in rows if _is_missing(_sort_value(r, key, rule))]
         try:
-            present.sort(key=lambda r: _sort_value(r, key), reverse=descending)
+            present.sort(key=lambda r: _sort_value(r, key, rule), reverse=descending)
         except TypeError:
-            present.sort(key=lambda r: str(_sort_value(r, key)), reverse=descending)
+            present.sort(key=lambda r: str(_sort_value(r, key, rule)), reverse=descending)
         rows = present + missing
     total = len(rows)
     return scan, rows[offset:offset + limit], total

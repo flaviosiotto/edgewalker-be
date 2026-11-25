@@ -134,7 +134,7 @@ def test_create_snapshots_the_strategy_and_starts_the_coordinator(session, tenan
     assert scan.status == "pending" and scan.mode == "on_demand"
     assert scan.timeframe == "1h", "the primary chart's timeframe when none is given"
     assert scan.connection_id == conn.id and scan.broker_type == "okx" and scan.strategy_name == "scan strategy"
-    assert scan.request == {"symbols": ["BTC-USDT-SWAP"], "min_turnover_24h": 1e6, "max_symbols": 300}
+    assert scan.request == {"symbols": ["BTC-USDT-SWAP"], "min_turnover_24h": 1e6, "max_symbols": 300, "lookback": 20}
     assert scan.config["strategy"]["rules"][0]["name"] == "above"
     assert started == [{"id": scan.id, "config": scan.config, "timeframe": "1h", "request": scan.request}]
 
@@ -289,7 +289,8 @@ def test_the_coordinator_gets_only_the_fields_it_knows(session, tenant, monkeypa
     monkeypatch.setattr("app.services.indicator_ref_service.inject_user_indicator_refs", lambda definition, user_id: definition)
     scan = scan_service.create_scan(session, ScanCreate(connection_id=conn.id, timeframe="1h", indicators=[RSI], symbols=["aaa"]), user.id)
     assert sent[0]["url"].endswith(f"/scans/{scan.id}/run")
-    assert set(sent[0]) == {"url", "strategy_config", "connection_id", "broker_type", "timeframe", "symbols", "min_turnover_24h", "max_symbols"}
+    assert set(sent[0]) == {"url", "strategy_config", "connection_id", "broker_type", "timeframe", "symbols", "min_turnover_24h", "max_symbols", "lookback"}
+    assert sent[0]["lookback"] == 20
     assert sent[0]["symbols"] == ["AAA"] and sent[0]["broker_type"] == "okx"
 
 
@@ -325,3 +326,48 @@ def test_free_scans_are_refused_when_they_cannot_be_read(session, tenant, strang
     with pytest.raises(HTTPException) as err:
         create_scan(session, ScanCreate(connection_id=conn.id, timeframe="1h", indicators=[RSI]), stranger.id)
     assert err.value.status_code == 404
+
+
+def test_a_rule_that_fired_and_went_off_is_found_by_how_long_ago(session, tenant, started):
+    from pydantic import ValidationError
+
+    from app.models.scan import ScanRow
+    from app.schemas.scan import ScanCreate, ScanRowRead
+    from app.services.scan_service import create_scan, list_scan_rows
+
+    user, _, acc = tenant
+    strategy = _strategy(session, user, acc)
+    scan = create_scan(session, ScanCreate(strategy_id=strategy.id, lookback=10), user.id)
+    assert scan.request["lookback"] == 10 and started[-1]["request"]["lookback"] == 10
+    with pytest.raises(ValidationError):
+        ScanCreate(strategy_id=strategy.id, lookback=0)
+
+    def rule(name, last_true, true_for):
+        return {"name": name, "matched": last_true == 0, "last_true": last_true, "true_for": true_for,
+                "true_bars": 1 if last_true is not None else 0, "lookback": 10, "conditions": []}
+
+    for symbol, rules in [
+        ("NOW", [rule("cross", 0, 1), rule("state", None, 0)]),
+        ("AGO3", [rule("cross", 3, 0), rule("state", 7, 0)]),
+        ("AGO8", [rule("cross", 8, 0), rule("state", 0, 4)]),
+        ("NEVER", [rule("cross", None, 0), rule("state", None, 0)]),
+        ("OLD", [{"name": "cross", "matched": True, "conditions": []}]),  # a scan of the last bar only
+    ]:
+        matched = sum(1 for r in rules if r["matched"])
+        session.add(ScanRow(scan_id=scan.id, symbol=symbol, rules=rules, matched_rules=matched))
+    session.commit()
+
+    def symbols(**kwargs):
+        return [r.symbol for r in list_scan_rows(session, scan.id, user.id, **kwargs)[1]]
+
+    assert symbols(rule="cross") == ["NOW", "OLD"], "without a window: true on the last bar"
+    assert symbols(rule="cross", within=5, sort="last_true") == ["NOW", "OLD", "AGO3"]
+    assert symbols(rule="cross", within=10, sort="last_true") == ["NOW", "OLD", "AGO3", "AGO8"]
+    assert symbols(rule="cross", within=1) == ["NOW", "OLD"]
+    assert symbols(matched_only=True, within=5, sort="last_true") == ["AGO8", "NOW", "OLD", "AGO3"], "any rule, most recent"
+    assert symbols(sort="last_true")[-1] == "NEVER", "never true comes last"
+    assert symbols(within=3) == ["AGO3", "AGO8", "NEVER", "NOW", "OLD"], "a window alone filters nothing"
+
+    rows = list_scan_rows(session, scan.id, user.id)[1]
+    read = {r.symbol: ScanRowRead.model_validate(r, from_attributes=True).lookback for r in rows}
+    assert read["NOW"] == 10 and read["OLD"] is None
