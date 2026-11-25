@@ -371,3 +371,56 @@ def test_a_rule_that_fired_and_went_off_is_found_by_how_long_ago(session, tenant
     rows = list_scan_rows(session, scan.id, user.id)[1]
     read = {r.symbol: ScanRowRead.model_validate(r, from_attributes=True).lookback for r in rows}
     assert read["NOW"] == 10 and read["OLD"] is None
+
+
+def test_params_can_be_changed_for_one_scan_without_touching_the_strategy(session, tenant, started):
+    from fastapi import HTTPException
+
+    from app.api.scans import _read
+    from app.schemas.scan import ScanCreate
+    from app.schemas.strategy import StrategyCreate
+    from app.services.scan_service import create_scan
+    from app.services.strategy_service import create_strategy, get_strategy
+
+    user, conn, acc = tenant
+    ema = {"name": "ema20", "type": "ema", "params": {"timeperiod": 20}}
+    definition = {"strategy": {
+        "name": "p", "symbol": "BTC-USDT-SWAP", "asset": "crypto_futures", "timeframe": "1h", "timezone": "UTC",
+        "indicators": [ema], "params": {"rsi_entry": 30, "max_bars": 12},
+        "charts": [{"id": "main", "symbol": "BTC-USDT-SWAP", "asset": "crypto_futures", "timeframe": "1h", "indicators": [ema]}],
+        "rules": [{"name": "in", "action": "buy", "conditions": [{"field": "price.close", "op": ">", "value": "params.rsi_entry"}]}],
+    }}
+    strategy = create_strategy(session, StrategyCreate(name="with params", definition=definition, account_id=acc.id), user.id)
+
+    plain = create_scan(session, ScanCreate(strategy_id=strategy.id), user.id)
+    assert _read(plain).params == {"rsi_entry": 30.0, "max_bars": 12.0} and "params" not in plain.request
+
+    scan = create_scan(session, ScanCreate(strategy_id=strategy.id, params={"rsi_entry": 25, "max_bars": 12}), user.id)
+    assert scan.request["params"] == {"rsi_entry": 25.0}, "only what differs from the strategy"
+    assert _read(scan).params == {"rsi_entry": 25.0, "max_bars": 12.0}
+    assert started[-1]["config"]["strategy"]["params"]["rsi_entry"] == 25.0, "the coordinator reads the scan's snapshot"
+    session.expire_all()
+    assert get_strategy(session, strategy.id, user.id).definition["strategy"]["params"]["rsi_entry"] == 30
+
+    with pytest.raises(HTTPException) as unknown:
+        create_scan(session, ScanCreate(strategy_id=strategy.id, params={"nope": 1}), user.id)
+    assert unknown.value.status_code == 422 and "rsi_entry" in unknown.value.detail
+    with pytest.raises(HTTPException) as free:
+        create_scan(session, ScanCreate(connection_id=conn.id, timeframe="1h", indicators=[RSI], params={"x": 1}), user.id)
+    assert free.value.status_code == 422
+
+
+def test_an_exit_rule_does_not_make_a_row_recent(session, tenant, started):
+    from app.models.scan import ScanRow
+    from app.schemas.scan import ScanCreate
+    from app.services.scan_service import create_scan, list_scan_rows
+
+    user, _, acc = tenant
+    scan = create_scan(session, ScanCreate(strategy_id=_strategy(session, user, acc).id), user.id)
+    session.add(ScanRow(scan_id=scan.id, symbol="OUT", matched_rules=0, rules=[
+        {"name": "in", "role": "entry", "matched": False, "last_true": None},
+        {"name": "out", "role": "exit", "matched": True, "last_true": 0},
+    ]))
+    session.commit()
+    assert list_scan_rows(session, scan.id, user.id, matched_only=True, within=20)[1] == []
+    assert [r.symbol for r in list_scan_rows(session, scan.id, user.id, rule="out", within=20)[1]] == ["OUT"], "asked by name, it is read"

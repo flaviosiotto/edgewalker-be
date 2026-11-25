@@ -37,6 +37,9 @@ class ScanCreate(BaseModel):
     #: closed bars the conditions are evaluated on, the last one included:
     #: a row says when each rule was true in that window, not only whether it is now
     lookback: int = Field(default=20, ge=1, le=200)
+    #: scan from a strategy: values of ``strategy.params`` to use instead of
+    #: the saved ones (only names the strategy defines)
+    params: Optional[dict[str, float]] = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _one_source(self) -> "ScanCreate":
@@ -87,6 +90,9 @@ class ScanRead(ScanSummary):
     plan: Any = None
     #: field paths present in the rows' ``values``, for column pickers
     value_keys: list[str] = []
+    #: the ``params.<name>`` values the scan's conditions read (all of them;
+    #: ``request.params`` holds the ones changed at launch)
+    params: dict[str, float] = {}
 
 
 class ScanListPage(BaseModel):

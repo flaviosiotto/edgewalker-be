@@ -97,6 +97,39 @@ def free_definition(payload: ScanCreate, timeframe: str) -> dict[str, Any]:
     return definition
 
 
+def scan_params(config: Any) -> dict[str, float]:
+    """The ``params.<name>`` values a scan's definition snapshot carries."""
+    from edgewalker_platform.rules_dsl import strategy_params
+
+    return strategy_params(config) if isinstance(config, dict) else {}
+
+
+def _apply_params(config: dict[str, Any], given: dict[str, float]) -> dict[str, float]:
+    """Write the launch values over the snapshot's params; returns the ones that changed.
+
+    Only the scan's own snapshot is touched: the strategy keeps its values.
+    """
+    import copy
+
+    current = scan_params(config)
+    unknown = sorted(name for name in given if name not in current)
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"The strategy has no param named: {', '.join(unknown)}. It defines: {', '.join(sorted(current)) or 'none'}",
+        )
+    bad = sorted(name for name, value in given.items() if not math.isfinite(float(value)))
+    if bad:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Not a finite number: {', '.join(bad)}")
+    changed = {name: float(value) for name, value in given.items() if float(value) != current[name]}
+    if not changed:
+        return {}
+    strategy = config.get("strategy") if isinstance(config.get("strategy"), dict) else None
+    holder = strategy if strategy is not None and strategy.get("params") else config
+    holder["params"] = {**copy.deepcopy(holder.get("params") or {}), **changed}
+    return changed
+
+
 def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
     """Create a scan and start it on the coordinator.
 
@@ -128,6 +161,14 @@ def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
     else:
         config = _strip_rule_chat_ids(_normalize_strategy_indicator_field_references(strategy.definition))
         timeframe = str(payload.timeframe or "").strip() or _primary_timeframe(config)
+    overrides: dict[str, float] = {}
+    if payload.params and not payload.is_free:
+        import copy
+
+        config = copy.deepcopy(config)  # the strategy's own definition is not to be touched
+        overrides = _apply_params(config, payload.params)
+    if payload.params and payload.is_free:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A free scan has no params")
     # Pin user-defined indicators to their current version, as a backtest does
     config = inject_user_indicator_refs(config, user_id)
     if not timeframe:
@@ -140,6 +181,8 @@ def create_scan(session: Session, payload: ScanCreate, user_id: int) -> Scan:
         "max_symbols": payload.max_symbols,
         "lookback": payload.lookback,
     }
+    if overrides:
+        request["params"] = overrides
     if payload.is_free:
         # Kept as asked, so the scan can be shown and launched again as it was
         request["free"] = {
@@ -247,6 +290,8 @@ def _last_true(row: ScanRow, rule: str | None = None) -> int | None:
     for outcome in row.rules or []:
         if not isinstance(outcome, dict) or (rule and outcome.get("name") != rule):
             continue
+        if not rule and outcome.get("role") == "exit":
+            continue  # no position in a scan: an exit is read, not counted
         ago = outcome.get("last_true")
         if ago is None and "last_true" not in outcome and outcome.get("matched") is True:
             ago = 0  # a scan of the last bar only

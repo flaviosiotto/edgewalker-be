@@ -23,6 +23,7 @@ router = APIRouter(prefix="/scans", tags=["Scans"])
 def _read(scan) -> ScanRead:
     read = ScanRead.model_validate(scan, from_attributes=True)
     read.free = isinstance(scan.request, dict) and isinstance(scan.request.get("free"), dict)
+    read.params = scan_service.scan_params(scan.config)
     return read
 
 
