@@ -28,6 +28,7 @@ from app.api.chats import runner_router as chats_runner_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_templates import router as strategy_templates_router
 from app.api.backtests import router as backtests_router
+from app.api.scans import router as scans_router
 from app.api.marketdata import router as marketdata_router
 from app.api.live import router as live_router
 from app.api.runners import router as runners_router
@@ -257,6 +258,7 @@ app.include_router(strategy_templates_router)
 # consultative token besides user JWT/PAT (a router-level
 # get_current_active_user would reject it).
 app.include_router(backtests_router)
+app.include_router(scans_router)
 app.include_router(marketdata_router, dependencies=[Depends(get_current_active_user)])
 app.include_router(live_router)
 app.include_router(runners_router)
