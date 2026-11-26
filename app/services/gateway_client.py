@@ -138,7 +138,8 @@ class GatewayClient:
     async def _command(self, call: Any) -> dict:
         """Run a trading command and surface the gateway's reason as a typed error.
 
-        Only the order/position commands and the options reads go through
+        The order/position commands, the options reads and the broker
+        snapshot read before a live start (open orders, positions) go through
         here: the other read paths keep raising ``httpx`` errors, which their
         callers already handle.
         """
@@ -319,7 +320,7 @@ class GatewayClient:
 
     async def list_open_orders(self) -> list[dict]:
         """List open orders from the gateway (for reconciliation)."""
-        resp = await self._get("/orders")
+        resp = await self._command(lambda: self._get("/orders"))
         return resp.get("orders", [])
 
     async def reread_orders(
@@ -355,7 +356,7 @@ class GatewayClient:
     async def list_positions(self, account: str | None = None) -> list[dict]:
         """List current positions from the gateway (for reconciliation)."""
         params = {"account": account} if account else None
-        resp = await self._get("/positions", params=params)
+        resp = await self._command(lambda: self._get("/positions", params=params))
         return resp.get("positions", [])
 
     async def place_order(

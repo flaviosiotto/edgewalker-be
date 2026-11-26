@@ -103,6 +103,9 @@ class StrategyRead(BaseModel):
     account_id: int
     account_display: Optional[str] = None
     connection_name: Optional[str] = None
+    # The gateway no longer lists the account (accounts.archived_at): the
+    # strategy keeps its history but cannot start a live.
+    account_archived: bool = False
 
     # Datafeed connection (derived from the account)
     connection_id: int

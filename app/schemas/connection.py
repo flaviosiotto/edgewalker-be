@@ -78,6 +78,7 @@ class AccountRead(BaseModel):
     init_margin: float | None = None
     snapshot_at: datetime | None = None
     extra: dict[str, Any] | None = None
+    archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

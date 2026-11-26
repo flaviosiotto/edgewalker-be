@@ -749,9 +749,13 @@ def validate_account_for_live(
     if user_id is not None and connection.user_id != user_id:
         raise ValueError(f"Account {account_id} not found")
 
-    from app.services.onboarding_state import require_configured_account
+    from app.services.onboarding_state import archived_account_message, require_configured_account
 
     require_configured_account(account)
+    if account.archived_at is not None:
+        # Before anything is asked to the gateway, which would only answer
+        # with the broker's internal account id.
+        raise ValueError(archived_account_message(account, connection.name))
     if account.account_type == "data_only" or (
         isinstance(connection.config, dict) and (connection.config.get("read_only") or connection.config.get("data_only"))
     ):

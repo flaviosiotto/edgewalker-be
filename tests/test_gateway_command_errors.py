@@ -118,3 +118,26 @@ def test_place_account_order_lets_the_typed_error_through(monkeypatch):
         ))
     assert str(info.value) == "Insufficient USDT margin (code 51008)"
     assert isinstance(info.value, GatewayError)
+
+
+def test_snapshot_read_before_a_live_start_carries_the_gateway_reason(monkeypatch):
+    """The read that stopped a live start with "Client error '400 Bad Request'
+    for url ...": the gateway had said why, the client dropped it."""
+    reason = "cTrader account 47494755 is not the account of this connection (connected on 17258923, id 49713817)"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/positions":
+            return httpx.Response(400, json={"detail": reason})
+        return httpx.Response(200, json={"orders": []})
+
+    client = _client_with(handler, monkeypatch)
+    assert asyncio.run(client.list_open_orders()) == []
+    with pytest.raises(GatewayRejectedError) as info:
+        asyncio.run(client.list_positions(account="47494755"))
+    assert str(info.value) == reason
+
+    from app.api.live import _gateway_start_error
+
+    answer = _gateway_start_error(info.value)
+    assert answer.status_code == 400 and reason in answer.detail
+    assert _gateway_start_error(GatewayUnavailableError("Gateway http://gw-11:8080 unreachable")).status_code == 424

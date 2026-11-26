@@ -226,6 +226,13 @@ class Account(SQLModel, table=True):
         sa_column=Column(JSONB, nullable=True),
     )
 
+    # Set when the gateway stops listing the account (migration 078). The
+    # row stays: lives, trades and performance point at it.
+    archived_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
     # Timestamps
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),

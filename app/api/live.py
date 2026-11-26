@@ -82,7 +82,7 @@ from app.services.live_alert_service import (
     list_live_alerts,
     update_live_alert,
 )
-from app.services.gateway_client import GatewayClient
+from app.services.gateway_client import GatewayClient, GatewayError, GatewayRejectedError
 from app.services import playbook_service
 from app.services.strategy_service import get_strategy
 from app.services.strategy_service import (
@@ -684,6 +684,18 @@ def _stop_live_instance_internal(
     return result
 
 
+def _gateway_start_error(exc: GatewayError) -> HTTPException:
+    """The broker's own reason, as the gateway gave it. Same statuses as the
+    trading commands: 400 for a refusal, 424 when the gateway is down (a 502
+    would be replaced by the edge proxy's own page)."""
+    if isinstance(exc, GatewayRejectedError):
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"The broker refused the live start: {exc}")
+    return HTTPException(
+        status_code=status.HTTP_424_FAILED_DEPENDENCY,
+        detail=f"The broker gateway did not answer: {exc}",
+    )
+
+
 async def _fetch_broker_snapshot(
     *,
     connection_id: int,
@@ -803,6 +815,10 @@ async def create_live_instance(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except HTTPException:
         raise
+    except GatewayError as exc:
+        logger.warning("Live start of strategy %s stopped by the gateway: %s", payload.strategy_id, exc)
+        _mark_latest_starting_live_error(session, payload.strategy_id, current_user.id, str(exc))
+        raise _gateway_start_error(exc) from exc
     except Exception as exc:
         logger.exception("Failed to create live instance for strategy %s", payload.strategy_id)
         # The row was created as `starting` before the broker snapshot and the
@@ -997,6 +1013,9 @@ async def start_live_strategy(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except HTTPException:
         raise
+    except GatewayError as exc:
+        logger.warning("Live start of strategy %s stopped by the gateway: %s", strategy_id, exc)
+        raise _gateway_start_error(exc) from exc
     except Exception as exc:
         logger.exception("Failed to start legacy live strategy %s", strategy_id)
         raise HTTPException(

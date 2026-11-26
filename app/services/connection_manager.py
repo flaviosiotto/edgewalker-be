@@ -40,6 +40,7 @@ from app.services.tws_launch_service import (
     create_tws_launch_url,
 )
 from app.services.gateway_client import GatewayClient
+from app.services.onboarding_state import is_provisional_account
 
 logger = logging.getLogger(__name__)
 
@@ -777,7 +778,7 @@ def _append_account_history(
 
 
 def _sync_accounts(session: Session, connection_id: int, discovered: list[DiscoveredAccount]) -> None:
-    """Upsert the accounts discovered on the gateway."""
+    """Upsert the accounts the gateway lists and archive the ones it no longer does."""
     now = datetime.now(timezone.utc)
 
     existing_stmt = select(Account).where(Account.connection_id == connection_id)
@@ -794,7 +795,27 @@ def _sync_accounts(session: Session, connection_id: int, discovered: list[Discov
             d,
             now=now,
         )
+        acct.archived_at = None
         existing_map[d.account_id] = acct
+
+    # An account the gateway no longer lists cannot be traded through this
+    # connection. Callers only get here with a non-empty list, so a failed
+    # read never archives everything.
+    if discovered_ids:
+        for acct in existing:
+            if acct.account_id in discovered_ids or acct.archived_at is not None:
+                continue
+            if is_provisional_account(acct):
+                # Placeholder created by the onboarding, never listed by a gateway.
+                continue
+            acct.archived_at = now
+            acct.updated_at = now
+            session.add(acct)
+            logger.info(
+                "Archived account %s of connection %s: no longer listed by the gateway",
+                acct.account_id,
+                connection_id,
+            )
 
     session.commit()
 

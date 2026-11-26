@@ -53,7 +53,7 @@ from app.services.entitlement_service import (
     get_effective_limits,
 )
 from app.services.limits import LimitKey
-from app.services.onboarding_state import require_configured_account
+from app.services.onboarding_state import require_active_account, require_configured_account
 from app.services.agent_webhook import agent_webhook_url
 from app.services.n8n_auth import (
     build_n8n_api_auth_metadata,
@@ -427,6 +427,7 @@ def create_strategy(session: Session, payload: StrategyCreate, user_id: int) -> 
 
     account = _get_owned_account(session, payload.account_id, user_id)
     require_configured_account(account)
+    require_active_account(account)
 
     name = (payload.name or "").strip()
     if not name:
@@ -642,6 +643,7 @@ def copy_strategy(
     account = _get_owned_account(session, target_account_id, user_id)
     require_configured_account(account)
     connection = _get_owned_connection(session, account.connection_id, user_id)
+    require_active_account(account, connection.name)
 
     assert_within(session, user_id, LimitKey.STRATEGIES_MAX)
 

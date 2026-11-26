@@ -104,6 +104,7 @@ def _serialize_strategy_with_live(session: Session, strategy) -> StrategyRead:
     if account is not None:
         payload.account_display = account.display_name or account.account_id
         payload.connection_name = account.connection.name if account.connection else None
+        payload.account_archived = account.archived_at is not None
     sl = strategy.live
     if sl is not None:
         payload.live_summary = build_live_summary(session, sl)
