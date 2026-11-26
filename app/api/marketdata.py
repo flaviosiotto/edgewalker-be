@@ -15,6 +15,7 @@ from app.schemas.marketdata import (
     IndicatorInfo,
     AssetType,
 )
+from app.schemas.watchlist import SymbolCatalogResponse
 from app.schemas.options import OptionPayoffRequest, OptionPayoffResponse
 from app.services.indicator_registry import (
     get_all_indicators,
@@ -121,6 +122,76 @@ def search_symbols_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to search symbols: {str(e)}",
         )
+
+
+# ── Symbol catalogue (cached) ──────────────────────────────────────────────
+# Browsing symbols costs no gateway request per keystroke: the whole list of a
+# connection is read once, kept in Redis and filtered by the client. See
+# ``app.services.symbol_catalog_service`` for the cache rules.
+
+
+def _owned_connection(connection_id: int, user_id: int):
+    """(connection_id, broker_type) of a connection of the caller, or 404."""
+    from app.db.database import get_session_context
+    from app.services.watchlist_service import owned_connection
+
+    with get_session_context() as session:
+        connection = owned_connection(session, connection_id, user_id)
+        return connection.id, connection.broker_type
+
+
+@router.get("/catalog", response_model=SymbolCatalogResponse)
+def symbol_catalog_endpoint(
+    connection_id: int = Query(..., description="Connection whose instruments are listed"),
+    refresh: bool = Query(False, description="Read the gateway again even if the cached copy is fresh"),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Every instrument the connection trades, with last / 24 h change / volume
+    where the venue has a bulk ticker (``has_prices``).
+
+    ``supported: false`` (empty ``rows``) when the broker has no catalogue: use
+    ``/marketdata/symbols`` to search it. ``stale: true`` when the gateway did
+    not answer and the rows are the last copy read (``as_of``). 424 when the
+    gateway does not answer and nothing is cached.
+    """
+    from app.services import symbol_catalog_service as catalog
+
+    _, broker_type = _owned_connection(connection_id, current_user.id)
+    if not has_gateway(broker_type):
+        return SymbolCatalogResponse(
+            connection_id=connection_id, broker_type=broker_type, supported=False, has_prices=False, count=0, rows=[]
+        )
+    try:
+        return catalog.get_catalog(connection_id, broker_type, refresh=refresh)
+    except catalog.CatalogUnavailableError as exc:
+        logger.info("Symbol catalogue unavailable on connection %s: %s", connection_id, exc)
+        raise HTTPException(status_code=status.HTTP_424_FAILED_DEPENDENCY, detail=str(exc)) from exc
+
+
+@router.get("/symbol-info")
+def symbol_info_endpoint(
+    connection_id: int = Query(..., description="Connection the symbol belongs to"),
+    symbol: str = Query(..., min_length=1, max_length=64, description="Symbol as the broker spells it"),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The broker's description of one symbol, in the shape ``/marketdata/symbols``
+    returns (contract fields under ``extra_data``), plus ``market``: its
+    catalogue row with prices, or null. 404 when the broker does not know the
+    symbol, 424 when the gateway does not answer.
+    """
+    from app.services import symbol_catalog_service as catalog
+
+    _, broker_type = _owned_connection(connection_id, current_user.id)
+    if not has_gateway(broker_type):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Symbol not found")
+    try:
+        info = catalog.get_symbol_info(connection_id, broker_type, symbol)
+    except catalog.CatalogUnavailableError as exc:
+        logger.info("Symbol info unavailable on connection %s: %s", connection_id, exc)
+        raise HTTPException(status_code=status.HTTP_424_FAILED_DEPENDENCY, detail=str(exc)) from exc
+    if info is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Symbol not found")
+    return info
 
 
 # ── Options (proxied to the connection's gateway) ──────────────────────────

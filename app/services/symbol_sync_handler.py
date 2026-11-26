@@ -133,12 +133,21 @@ def search_gateway_symbols_by_id(
         if asset_type:
             params["asset_type"] = asset_type
 
+        # Same query on the same connection within a few minutes: the broker's
+        # answer does not change, and the picker asks it again at every reopen.
+        from app.services.symbol_catalog_service import SEARCH_TTL_S, _cache_get, _cache_set
+
+        result_key = f"symbols:picker-search:{connection_id}:{(asset_type or '').lower()}:{query.strip().upper()}"
+        remembered = _cache_get(result_key)
+        if isinstance(remembered, list):
+            return remembered[:limit]
+
         try:
             resp = httpx.get(url, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
-            symbols = data.get("symbols", [])[:limit]
-            return [
+            symbols = data.get("symbols", [])
+            results = [
                 {
                     "symbol": s.get("symbol", ""),
                     "name": s.get("name"),
@@ -154,6 +163,9 @@ def search_gateway_symbols_by_id(
                 }
                 for s in symbols
             ]
+            if results:
+                _cache_set(result_key, results, SEARCH_TTL_S)
+            return results[:limit]
         except Exception as e:
             raise RuntimeError(
                 f"Symbol search via gateway failed: {e}. "

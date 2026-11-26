@@ -48,6 +48,7 @@ def create_db_and_tables():
     from app.models.strategy import Strategy, BacktestResult, BacktestTrade, BacktestTrial  # noqa: F401
     from app.models.strategy_template import StrategyTemplate  # noqa: F401
     from app.models.scan import Scan, ScanRow  # noqa: F401
+    from app.models.watchlist import WatchlistItem  # noqa: F401
     from app.models.connection import Connection, Account  # noqa: F401
     from app.models.live_trading import LiveOrder, LiveFill, LivePosition, LiveTrade  # noqa: F401
     from app.models.marketdata import SymbolCache, SymbolSyncLog  # noqa: F401
