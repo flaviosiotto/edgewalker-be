@@ -46,6 +46,9 @@ class SymbolCatalogResponse(BaseModel):
     supported: bool
     #: rows carry last / change / volume (the venue has a bulk ticker)
     has_prices: bool
+    #: false = the rows are a part of what the broker trades (public listings):
+    #: what is not there is still found by ``/marketdata/symbols``
+    complete: bool = True
     #: ms, when the gateway read the venue
     as_of: Optional[int] = None
     #: the gateway did not answer: this is the last copy read

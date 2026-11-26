@@ -166,11 +166,13 @@ def _has_prices(rows: list[dict[str, Any]]) -> bool:
 def _catalog_view(entry: dict[str, Any], connection_id: int, broker_type: str, *, stale: bool) -> dict[str, Any]:
     rows = entry.get("rows") or []
     return {
+        "complete": bool(entry.get("complete", True)),
         "connection_id": connection_id,
         "broker_type": entry.get("broker_type") or broker_type,
         "market_type": entry.get("market_type"),
         "supported": bool(entry.get("supported", True)),
         "has_prices": bool(entry.get("has_prices")),
+        "quotes": bool(entry.get("quotes", True)),
         "as_of": entry.get("as_of"),
         "stale": stale,
         "count": len(rows),
@@ -186,6 +188,37 @@ def _is_fresh(entry: dict[str, Any]) -> bool:
     return age < (CATALOG_FRESH_PRICED_S if entry.get("has_prices") else CATALOG_FRESH_STATIC_S)
 
 
+# Brokers whose API lists no market: their catalogue is assembled from public
+# listings (``app.services.symbol_listings``) and is a part of what they trade.
+LISTING_BROKERS = frozenset({"ibkr"})
+
+
+def _listing_entry(connection_id: int, broker_type: str) -> dict[str, Any]:
+    from app.services import symbol_listings as listings
+
+    futures = listings.ibkr_futures_rows(
+        connection_id,
+        lambda root: search_symbols_cached(connection_id, broker_type, root, "futures"),
+        _cache_get,
+        _cache_set,
+    )
+    # A futures row is what the gateway's search returned (contract under
+    # ``extra_data``): the picker selects it as it is.
+    rows = futures + listings.us_listed_rows(_cache_get, _cache_set)
+    return {
+        "supported": bool(rows),
+        "complete": False,
+        "fetched_at": time.time(),
+        "as_of": int(time.time() * 1000),
+        "broker_type": broker_type,
+        "market_type": None,
+        "has_prices": False,
+        # No bulk ticker and no recent-bars read on these brokers.
+        "quotes": False,
+        "rows": rows,
+    }
+
+
 def get_catalog(connection_id: int, broker_type: str, *, refresh: bool = False) -> dict[str, Any]:
     """Every instrument of the connection. ``refresh`` skips the fresh copy
     (the stale fallback still applies)."""
@@ -199,6 +232,10 @@ def get_catalog(connection_id: int, broker_type: str, *, refresh: bool = False) 
         cached = _cache_get(key) or cached
         if cached and not refresh and _is_fresh(cached):
             return _catalog_view(cached, connection_id, broker_type, stale=False)
+        if broker_type in LISTING_BROKERS:
+            entry = _listing_entry(connection_id, broker_type)
+            _cache_set(key, entry, CATALOG_KEEP_S if entry["rows"] else UNSUPPORTED_TTL_S)
+            return _catalog_view(entry, connection_id, broker_type, stale=False)
         try:
             payload = _gateway_request(
                 connection_id, broker_type, "GET", "/universe/snapshot", timeout=_SNAPSHOT_TIMEOUT_S
@@ -280,24 +317,52 @@ def get_symbol_info(connection_id: int, broker_type: str, symbol: str) -> dict[s
     wanted = str(symbol or "").strip()
     if not wanted:
         return None
+    row = None
+    try:
+        catalog = get_catalog(connection_id, broker_type)
+        row = next((r for r in catalog["rows"] if str(r.get("symbol", "")).upper() == wanted.upper()), None)
+    except CatalogUnavailableError:
+        pass  # the description stands on its own
+
     key = f"symbols:info:{connection_id}:{wanted.upper()}"
     info = _cache_get(key)
     if not isinstance(info, dict):
-        matches = search_symbols_cached(connection_id, broker_type, wanted)
-        info = next((m for m in matches if str(m.get("symbol", "")).upper() == wanted.upper()), None)
+        if row is not None and row.get("extra_data"):
+            # The catalogue row already is the broker's description (futures contracts).
+            info = {k: row.get(k) for k in (*_SYMBOL_CORE_FIELDS, "extra_data")}
+            info["broker_type"] = broker_type
+        else:
+            matches = [
+                m for m in search_symbols_cached(connection_id, broker_type, wanted)
+                if str(m.get("symbol", "")).upper() == wanted.upper()
+            ]
+            info = _best_match(matches, row)
         if info is None:
             return None
         _cache_set(key, info, INFO_TTL_S)
 
-    market = None
-    try:
-        catalog = get_catalog(connection_id, broker_type)
-        market = next(
-            (row for row in catalog["rows"] if str(row.get("symbol", "")).upper() == wanted.upper()), None
-        )
-    except CatalogUnavailableError:
-        pass  # the description stands on its own
+    market = row if row is not None and row.get("last") is not None else None
     return {**info, "market": market}
+
+
+def _best_match(matches: list[dict[str, Any]], row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Among the broker's exact matches, the one that agrees with the
+    catalogue row. A ticker exists on several venues (``AAPL`` in USD on
+    Nasdaq, and again in other currencies): currency first, then the type."""
+    if not matches:
+        return None
+    if row is None:
+        return matches[0]
+
+    def agreement(match: dict[str, Any]) -> int:
+        score = 0
+        if row.get("currency") and match.get("currency") == row.get("currency"):
+            score += 2
+        if row.get("asset_type") and match.get("asset_type") == row.get("asset_type"):
+            score += 1
+        return score
+
+    return max(matches, key=agreement)  # ties keep the broker's order
 
 
 # ── quotes ───────────────────────────────────────────────────────────────────
@@ -340,7 +405,7 @@ def get_quotes(connection_id: int, broker_type: str, symbols: list[str]) -> dict
         return {**empty, "supported": True}
 
     catalog = get_catalog(connection_id, broker_type)
-    if not catalog["supported"]:
+    if not catalog["supported"] or not catalog["quotes"]:
         return empty
     if catalog["has_prices"]:
         by_symbol = {str(row.get("symbol", "")).upper(): row for row in catalog["rows"]}

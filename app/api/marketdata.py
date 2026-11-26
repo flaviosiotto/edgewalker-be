@@ -150,7 +150,9 @@ def symbol_catalog_endpoint(
     where the venue has a bulk ticker (``has_prices``).
 
     ``supported: false`` (empty ``rows``) when the broker has no catalogue: use
-    ``/marketdata/symbols`` to search it. ``stale: true`` when the gateway did
+    ``/marketdata/symbols`` to search it. ``complete: false`` when the rows
+    come from public listings (IBKR: US stocks and ETFs, known futures): what
+    is not listed is still found by ``/marketdata/symbols``. ``stale: true`` when the gateway did
     not answer and the rows are the last copy read (``as_of``). 424 when the
     gateway does not answer and nothing is cached.
     """
