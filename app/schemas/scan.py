@@ -137,6 +137,8 @@ class ScanRowRead(BaseModel):
     conditions_true: int = 0
     conditions_total: int = 0
     error: Optional[str] = None
+    #: bars behind the row's miniature; only with ``with_chart=true``
+    chart: Any = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

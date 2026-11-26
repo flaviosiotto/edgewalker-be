@@ -105,7 +105,9 @@ def _rows(session, scan_id):
 
 
 def test_migration_077_is_valid_sql_and_idempotent(app_engine):
-    sql = (Path(__file__).resolve().parents[1] / "migrations" / "077_scans.sql").read_text()
+    migrations = Path(__file__).resolve().parents[1] / "migrations"
+    # 080 adds scan_rows.chart: together they must give the tables the models map
+    sql = (migrations / "077_scans.sql").read_text() + (migrations / "080_scan_row_chart.sql").read_text()
     for _ in range(2):
         with app_engine.connect() as conn:
             conn.exec_driver_sql(sql)
@@ -521,3 +523,35 @@ def test_a_strategy_is_scanned_as_the_template_it_would_make(session, tenant, st
 
     follows = create_scan(session, ScanCreate(strategy_id=strategy.id, charts={"mkt": None}), user.id)
     assert {c["id"]: c["symbol"] for c in follows.config["strategy"]["charts"]}["mkt"] == ""
+
+
+def test_the_miniature_bars_come_only_when_asked(session, tenant, started):
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.api.scans import list_scan_rows_endpoint
+    from app.models.scan import ScanRow
+    from app.schemas.scan import ScanCreate
+    from app.services import scan_service
+
+    user, conn, acc = tenant
+    strategy = _strategy(session, user, acc)
+    scan = scan_service.create_scan(session, ScanCreate(strategy_id=strategy.id), user.id)
+    _rows(session, scan.id)
+    row = session.exec(select(ScanRow).where(ScanRow.scan_id == scan.id, ScanRow.symbol == "AAA")).one()
+    row.chart = {"ts": [1, 2], "o": [1.0, 2.0], "h": [2.0, 3.0], "l": [0.5, 1.5], "c": [1.5, 2.5], "series": {"rsi": [None, 55.0]}}
+    session.add(row)
+    session.commit()
+    session.expire_all()
+
+    _, rows, _ = scan_service.list_scan_rows(session, scan.id, user.id)
+    assert all("chart" in sa_inspect(r).unloaded for r in rows), "a listing does not load the bars"
+
+    def page(**kw):
+        defaults = dict(sort="symbol", descending=False, rule=None, matched_only=False, within=None, symbol=None, symbols=None, limit=1000, offset=0)
+        return list_scan_rows_endpoint(scan.id, **{**defaults, **kw}, session=session, current_user=user)
+
+    assert all(item.chart is None for item in page(with_chart=False).items)
+    charts = {item.symbol: item.chart for item in page(with_chart=True).items}
+    assert charts["AAA"]["c"] == [1.5, 2.5] and charts["BBB"] is None
+    exact = page(with_chart=True, symbols=["AAA", "CCC", "nope"])
+    assert [item.symbol for item in exact.items] == ["AAA", "CCC"] and exact.items[0].chart["ts"] == [1, 2]

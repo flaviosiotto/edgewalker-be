@@ -88,6 +88,10 @@ class ScanRow(SQLModel, table=True):
     values: Optional[Any] = Field(default=None, sa_column=Column("values", JSONB, nullable=True))
     #: per rule: {"name", "matched", "conditions": [{"passed", "actual", ...}]}; null = not evaluable
     rules: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    #: last closed bars read, for the row's miniature: aligned arrays ts/o/h/l/c
+    #: and indicator ``series`` by key, oldest first. Megabytes over a scan: read
+    #: queries leave it out (``defer``) and it is fetched for the page asked.
+    chart: Optional[Any] = Field(default=None, sa_column=Column(JSONB, nullable=True))
     matched_rules: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
     conditions_true: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))
     conditions_total: int = Field(default=0, sa_column=Column(Integer, nullable=False, default=0))

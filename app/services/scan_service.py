@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 from fastapi import HTTPException, status
 from sqlalchemy import func
+from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
 from app.models.connection import Connection
@@ -441,6 +442,7 @@ def list_scan_rows(
     matched_only: bool = False,
     within: int | None = None,
     symbol: str | None = None,
+    symbols: list[str] | None = None,
     limit: int = 1000,
     offset: int = 0,
 ) -> tuple[Scan, list[ScanRow], int]:
@@ -455,7 +457,8 @@ def list_scan_rows(
     they are filtered and ordered here rather than in SQL over JSONB.
     """
     scan = get_scan(session, scan_id, user_id)
-    rows = list(session.exec(select(ScanRow).where(ScanRow.scan_id == scan_id)).all())
+    # Without the miniature bars: see row_charts
+    rows = list(session.exec(select(ScanRow).where(ScanRow.scan_id == scan_id).options(defer(ScanRow.chart))).all())  # type: ignore[arg-type]
     if within:
         if rule or matched_only:
             rows = [r for r in rows if (ago := _last_true(r, rule)) is not None and ago < within]
@@ -464,6 +467,10 @@ def list_scan_rows(
             rows = [r for r in rows if _rule_matched(r, rule)]
         if matched_only:
             rows = [r for r in rows if (r.matched_rules or 0) > 0]
+    if symbols:
+        # Exactly these rows (the cards shown), whatever the other filters say
+        exact = {str(x) for x in symbols}
+        rows = [r for r in rows if r.symbol in exact]
     if symbol:
         needle = symbol.strip().upper()
         rows = [r for r in rows if needle in r.symbol.upper() or needle in str(r.name or "").upper()]
@@ -480,3 +487,13 @@ def list_scan_rows(
         rows = present + missing
     total = len(rows)
     return scan, rows[offset:offset + limit], total
+
+
+def row_charts(session: Session, rows: list[ScanRow]) -> dict[int, Any]:
+    """The miniature bars of these rows, by row id. The column is not loaded
+    with the rows (a whole scan of them is megabytes): one query for a page."""
+    ids = [r.id for r in rows if r.id is not None]
+    if not ids:
+        return {}
+    found = session.exec(select(ScanRow.id, ScanRow.chart).where(ScanRow.id.in_(ids))).all()  # type: ignore[union-attr]
+    return {row_id: chart for row_id, chart in found if chart is not None}

@@ -74,6 +74,8 @@ def list_scan_rows_endpoint(
     matched_only: bool = Query(default=False, description="Keep the rows where at least one rule is true"),
     within: int | None = Query(default=None, ge=1, le=200, description="With rule or matched_only: true on one of the last N closed bars instead of on the last one"),
     symbol: str | None = Query(default=None, max_length=64),
+    symbols: list[str] | None = Query(default=None, max_length=100, description="Exactly these symbols (repeat the parameter): the rows of the cards shown"),
+    with_chart: bool = Query(default=False, description="Add to each row the bars of its miniature (chart): ask it for the page shown, not for a whole scan"),
     limit: int = Query(default=1000, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
@@ -81,10 +83,19 @@ def list_scan_rows_endpoint(
 ):
     scan, rows, total = scan_service.list_scan_rows(
         session, scan_id, current_user.id, sort=sort, descending=descending, rule=rule,
-        matched_only=matched_only, within=within, symbol=symbol, limit=limit, offset=offset,
+        matched_only=matched_only, within=within, symbol=symbol, symbols=symbols, limit=limit, offset=offset,
     )
+    charts = scan_service.row_charts(session, rows) if with_chart else {}
     return ScanRowsPage(
-        items=[ScanRowRead.model_validate(r, from_attributes=True) for r in rows],
+        items=[
+            # Field by field: reading ``chart`` off the row would load it, one query per row
+            ScanRowRead(
+                symbol=r.symbol, name=r.name, bar_ts=r.bar_ts, market=r.market, values=r.values, rules=r.rules,
+                matched_rules=r.matched_rules, conditions_true=r.conditions_true,
+                conditions_total=r.conditions_total, error=r.error, chart=charts.get(r.id),
+            )
+            for r in rows
+        ],
         total=total, limit=limit, offset=offset,
         status=scan.status, symbols_total=scan.symbols_total, symbols_done=scan.symbols_done,
     )
