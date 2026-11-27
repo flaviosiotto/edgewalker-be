@@ -637,13 +637,46 @@ class BacktestRunnerService:
             raw_trades = []
         return {"trades": list(raw_trades)}
 
-    def get_backtest_ohlc_history(self, backtest_id: int, chart_id: str | None = None) -> dict[str, Any] | None:
+    def get_backtest_ledger(
+        self, backtest_id: int, trial: int | None = None, tables: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Ledger files of a finished bulk run, or of one trial of its
+        exploration: ``{summary, orders, fills, equity_snapshots, trades}``
+        (``tables`` restricts which of the four lists are read). Returns None
+        when the files are not there (404)."""
+        params: dict[str, Any] = {}
+        if trial:
+            params["trial"] = int(trial)
+        if tables is not None:
+            params["tables"] = ",".join(tables)
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/ledger", params=params or None)
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"Backtest service error {exc.response.status_code}: {exc.response.text[:200]}") from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Backtest service unreachable: {exc}") from exc
+        return data if isinstance(data, dict) else None
+
+    def get_backtest_ohlc_history(
+        self, backtest_id: int, chart_id: str | None = None, trial: int | None = None,
+    ) -> dict[str, Any] | None:
         """Persisted chart dataset of a finished run (parquet on the data volume).
 
-        Served by the coordinator in the ``/marketdata/ohlc-history`` shape.
-        Returns None when the run has no persisted dataset (404).
+        Served by the coordinator in the ``/marketdata/ohlc-history`` shape;
+        ``trial`` shows the chart with that trial's indicators. Returns None
+        when the run (or the trial) has no persisted dataset (404).
         """
-        params = {"chart_id": chart_id} if chart_id else None
+        params: dict[str, Any] = {}
+        if chart_id:
+            params["chart_id"] = chart_id
+        if trial:
+            params["trial"] = int(trial)
+        params = params or None  # type: ignore[assignment]
         try:
             with httpx.Client(timeout=60.0) as client:
                 resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/ohlc-history", params=params)

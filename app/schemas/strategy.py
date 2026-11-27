@@ -390,6 +390,11 @@ class BacktestRead(BaseModel):
     # Parameter exploration (migr. 076): {"request": {...}, "state": {...}};
     # "state" (progress, status, space) is written by the coordinator.
     exploration: Optional[dict[str, Any]] = None
+
+    # Set when the response describes ONE TRIAL of the exploration
+    # (``GET /backtests/{id}?trial=N``): {"index", "params", "is_reference"}.
+    # KPI, metrics and config are then the trial's; the id is the backtest's.
+    trial: Optional[dict[str, Any]] = None
     
     created_at: datetime
 
@@ -741,7 +746,9 @@ class TradeCreate(BaseModel):
 
 
 class TradeRead(BaseModel):
-    id: int
+    # None for the trades of an exploration trial: they are read from the
+    # trial's files, not from rows.
+    id: Optional[int] = None
     backtest_id: int
     strategy_id: int
     entry_time: datetime

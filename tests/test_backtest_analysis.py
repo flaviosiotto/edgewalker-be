@@ -98,3 +98,12 @@ def test_size_does_not_grow_with_the_run():
     small, large = size(200, 20), size(100_000, 5_000)
     assert large < small * 1.5
     assert large < 8_000
+
+
+def test_trades_as_dicts_count_like_rows():
+    from types import SimpleNamespace
+
+    row = {"pnl": 2.0, "entry_time": "2024-01-01T00:00:00Z", "exit_time": "2024-01-01T01:00:00Z", "direction": "long", "exit_reason": "tp"}
+    as_dict = analyze_backtest(None, [row])
+    as_row = analyze_backtest(None, [SimpleNamespace(**row)])
+    assert as_dict == as_row and as_dict["trades"]["trades"] == 1

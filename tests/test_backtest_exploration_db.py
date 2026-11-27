@@ -463,3 +463,117 @@ def test_retry_keeps_the_exploration_request(session, tenant, monkeypatch):
 
     clone = retry_backtest(session, bt.id, user.id)
     assert clone.exploration == {"request": bt.exploration["request"]}  # same request, no state
+
+
+# ── Ledger in files: the page of a trial, the page of a bulk run ─────────────
+
+
+def _ledger_coordinator(monkeypatch, bt_id: int, trial: int, *, present: bool = True):
+    """The coordinator serving the files of trial ``trial`` (and of the run)."""
+    equity = [
+        {"ts": 1_700_000_000_000 + i * 3_600_000, "equity": 5_000.0 + i * 10, "position_qty": i % 2, "positions": []}
+        for i in range(48)
+    ]
+    trades = [{
+        "id": None, "backtest_id": bt_id, "strategy_id": 1, "entry_time": "2024-01-01T00:00:00+00:00",
+        "exit_time": "2024-01-01T05:00:00+00:00", "direction": "long", "size": 1.0, "entry_price": 100.0,
+        "exit_price": 101.0, "pnl": 1.0, "pnl_pct": 1.0, "exit_reason": "tp", "extra": {"rule": "long"},
+    }]
+    summary = {
+        "trial_index": trial, "values": {"main.bb.timeperiod": 30, "params.sl_atr": 2.0},
+        "metrics": {"return_pct": 3.0, "total_trades": 1, "sharpe_ratio": 1.2, "mode": "bulk",
+                    "segments": {"in_sample": {"return_pct": 2.0}, "out_of_sample": {"return_pct": 1.0}},
+                    "bulk": {"entries": 1, "agent_hold_points": [{"ts": 1}]}, "positions_summary": {"x": 1}},
+        "definition": {"strategy": {"name": "trial", "params": {"sl_atr": 2.0}}},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not present:
+            return httpx.Response(404, json={"detail": "No persisted ledger"})
+        path, params = request.url.path, dict(request.url.params)
+        if path == f"/backtests/{bt_id}/ledger":
+            tables = params.get("tables", "orders,fills,equity,trades").split(",") if "tables" in params else ["orders", "fills", "equity", "trades"]
+            out = {"summary": summary}
+            if "orders" in tables:
+                out["orders"] = [{"id": "o1", "status": "filled"}, {"id": "o2", "status": "submitted"}]
+            if "equity" in tables:
+                out["equity_snapshots"] = equity
+            if "trades" in tables:
+                out["trades"] = trades
+            return httpx.Response(200, json=out)
+        if path == f"/backtests/{bt_id}/ohlc-history":
+            return httpx.Response(200, json={"candles": [], "indicators": {}, "trial": params.get("trial")})
+        return httpx.Response(404)
+
+    return _coordinator(monkeypatch, handler)
+
+
+def test_the_page_of_a_trial_reads_its_files(session, tenant, monkeypatch):
+    from app.api.backtests import (
+        get_backtest_endpoint,
+        get_backtest_ohlc_history_endpoint,
+        get_backtest_runtime_equity_endpoint,
+        get_backtest_runtime_orders_endpoint,
+        list_trades_endpoint,
+    )
+    from app.schemas.strategy import TradeRead
+
+    user, _conn, acc = tenant
+    _strategy_row, bt = _explored_with_trial(session, user, acc)
+    seen = _ledger_coordinator(monkeypatch, bt.id, 3)
+
+    read = get_backtest_endpoint(bt.id, trial=3, session=session, current_user=user)
+    assert read.id == bt.id and read.trial == {"index": 3, "params": {"main.bb.timeperiod": 30, "params.sl_atr": 2.0}, "is_reference": False}
+    assert read.return_pct == 3.0 and read.total_trades == 1 and read.sharpe_ratio == 1.2
+    assert read.metrics["segments"]["out_of_sample"] == {"return_pct": 1.0}
+    assert read.metrics["bulk"] == {"entries": 1}  # per-point holds stay out
+    assert "positions_summary" not in read.metrics
+    assert read.config == {"strategy": {"name": "trial", "params": {"sl_atr": 2.0}}}
+    assert read.exploration is None and read.analysis["trades"]["trades"] == 1 and read.analysis["drawdowns"] is not None
+
+    orders = get_backtest_runtime_orders_endpoint(bt.id, active_only=True, trial=3, session=session, current_user=user)
+    assert orders == {"orders": [{"id": "o2", "status": "submitted"}], "source": "ledger"}
+    equity = get_backtest_runtime_equity_endpoint(bt.id, trial=3, session=session, current_user=user)
+    assert len(equity["equity"]) == 48 and equity["source"] == "ledger"
+    trades = list_trades_endpoint(bt.id, trial=3, session=session, current_user=user)
+    assert [TradeRead.model_validate(t).pnl for t in trades] == [1.0]
+    chart = get_backtest_ohlc_history_endpoint(bt.id, chart_id=None, trial=3, session=session, current_user=user)
+    assert chart["trial"] == "3"
+    assert all(path.startswith(f"GET /backtests/{bt.id}/") for path in seen)
+
+    with pytest.raises(HTTPException) as exc:
+        get_backtest_endpoint(bt.id, trial=7, session=session, current_user=user)
+    assert exc.value.status_code == 404  # not a trial of this exploration
+    _ledger_coordinator(monkeypatch, bt.id, 3, present=False)
+    with pytest.raises(HTTPException) as exc:
+        get_backtest_endpoint(bt.id, trial=3, session=session, current_user=user)
+    assert exc.value.status_code == 404 and "prova 3" in exc.value.detail
+
+
+def test_a_bulk_run_with_its_ledger_in_files(session, tenant, monkeypatch):
+    from app.api.backtests import (
+        get_backtest_endpoint,
+        get_backtest_runtime_equity_endpoint,
+        get_backtest_runtime_orders_endpoint,
+    )
+
+    user, _conn, acc = tenant
+    _strategy_row, bt = _explored_with_trial(session, user, acc)
+    bt.metrics = {"return_pct": 1.5, "ledger_store": "file", "segments": {"in_sample": {}, "out_of_sample": {}}}
+    session.add(bt)
+    session.commit()
+    seen = _ledger_coordinator(monkeypatch, bt.id, 0)
+
+    read = get_backtest_endpoint(bt.id, trial=None, session=session, current_user=user)
+    assert read.trial is None and read.metrics["ledger_store"] == "file" and "segments" in read.metrics
+    assert read.analysis["drawdowns"] is not None  # equity statistics from the files
+    assert get_backtest_runtime_orders_endpoint(bt.id, active_only=False, trial=None, session=session, current_user=user)["orders"][0]["id"] == "o1"
+    assert len(get_backtest_runtime_equity_endpoint(bt.id, trial=None, session=session, current_user=user)["equity"]) == 48
+    assert f"GET /backtests/{bt.id}/ledger" in seen
+
+    # files removed: the page still opens, the ledger endpoints say so
+    _ledger_coordinator(monkeypatch, bt.id, 0, present=False)
+    assert get_backtest_endpoint(bt.id, trial=None, session=session, current_user=user).analysis is None
+    with pytest.raises(HTTPException) as exc:
+        get_backtest_runtime_equity_endpoint(bt.id, trial=None, session=session, current_user=user)
+    assert exc.value.status_code == 404

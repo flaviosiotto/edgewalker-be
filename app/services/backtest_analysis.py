@@ -22,11 +22,20 @@ MAX_EXIT_REASONS = 8
 
 
 def scalar_metrics(metrics: Any) -> dict[str, Any] | None:
-    """The scalar indicators of ``metrics``; nested sections (ledger,
-    positions, runner snapshots) grow with the run and are left out."""
+    """The scalar indicators of ``metrics``; nested sections that grow with
+    the run (ledger, positions, runner snapshots) are left out."""
     if not isinstance(metrics, dict):
         return None
-    return {k: v for k, v in metrics.items() if v is None or isinstance(v, (str, int, float, bool))}
+    out = {k: v for k, v in metrics.items() if v is None or isinstance(v, (str, int, float, bool))}
+    # Fixed-size sections of a bulk run the pages read: the in/out-of-sample
+    # measures and the engine's counters (without the per-point agent holds).
+    segments = metrics.get("segments")
+    if isinstance(segments, dict):
+        out["segments"] = segments
+    bulk = metrics.get("bulk")
+    if isinstance(bulk, dict):
+        out["bulk"] = {k: v for k, v in bulk.items() if k != "agent_hold_points"}
+    return out
 
 
 def _r(value: float | None, digits: int = 2) -> float | None:
@@ -63,18 +72,20 @@ def _iso(ts_ms: float | None) -> str | None:
 
 
 def _closed_trades(trades: Iterable[Any]) -> list[dict[str, Any]]:
+    """Trades as rows (ORM objects) or as dicts (a trial's files)."""
     out = []
     for t in trades:
-        pnl = getattr(t, "pnl", None)
+        field = t.get if isinstance(t, dict) else (lambda name, _t=t: getattr(_t, name, None))
+        pnl = field("pnl")
         if pnl is None:
             continue
         out.append(
             {
                 "pnl": float(pnl),
-                "entry_ms": _ms(getattr(t, "entry_time", None)),
-                "exit_ms": _ms(getattr(t, "exit_time", None)),
-                "direction": getattr(t, "direction", None) or "unknown",
-                "exit_reason": getattr(t, "exit_reason", None) or "unknown",
+                "entry_ms": _ms(field("entry_time")),
+                "exit_ms": _ms(field("exit_time")),
+                "direction": field("direction") or "unknown",
+                "exit_reason": field("exit_reason") or "unknown",
             }
         )
     return out

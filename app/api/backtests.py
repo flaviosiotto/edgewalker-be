@@ -75,6 +75,45 @@ def _ledger_from_metrics(backtest, key: str) -> list:
     return list(rows) if isinstance(rows, list) else []
 
 
+def _ledger_in_files(backtest) -> bool:
+    """A finished bulk run keeps its ledger in files next to its dataset
+    (coordinator ``ledger_store``): the metrics carry a reference instead."""
+    metrics = backtest.metrics if isinstance(backtest.metrics, dict) else {}
+    return metrics.get("ledger_store") == "file"
+
+
+_LEDGER_KEYS = {"orders": "orders", "fills": "fills", "equity": "equity_snapshots", "trades": "trades"}
+
+
+def _ledger_files(backtest_id: int, trial: int | None, table: str | None) -> dict:
+    """Ledger files of a run or of one trial, from the coordinator. Call it
+    with the DB session already closed. 404 when the files are not there."""
+    from app.services.backtest_runner_service import backtest_runner_service
+
+    try:
+        payload = backtest_runner_service.get_backtest_ledger(backtest_id, trial, [table] if table else [])
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Dati della prova {trial} non disponibili: l'esplorazione è precedente al salvataggio delle prove o i file sono stati rimossi"
+                if trial else "Dati del backtest non disponibili: i file sono stati rimossi"
+            ),
+        )
+    return payload
+
+
+def _trial_or_404(session: Session, backtest_id: int, trial: int, user_id: int | None):
+    from app.services.strategy_service import list_backtest_trials
+
+    row = next((t for t in list_backtest_trials(session, backtest_id, user_id) if t.trial_index == trial), None)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Trial {trial} not found")
+    return row
+
+
 @router.get("/", response_model=BacktestListPage)
 def list_all_backtests_endpoint(
     status_filter: str | None = Query(default=None, alias="status"),
@@ -143,6 +182,7 @@ def create_backtest_endpoint(
 @router.get("/{backtest_id}", response_model=BacktestRead)
 def get_backtest_endpoint(
     backtest_id: int,
+    trial: int | None = Query(default=None, ge=1, description="Describe this trial of the exploration instead of the backtest"),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
@@ -151,13 +191,50 @@ def get_backtest_endpoint(
     The response does not grow with the length of the run: ``metrics`` holds
     the scalar indicators and ``analysis`` the statistics derived from the
     ledger and the trades.
+
+    ``trial=N`` describes one trial of the backtest's exploration as a
+    backtest of its own: same inputs, the trial's KPI, metrics, analysis and
+    definition (``config``), no exploration; ``trial`` in the response says
+    which one. 404 when the trial's files are not there.
     """
+    from app.services.backtest_analysis import scalar_metrics
+
     backtest = get_backtest(session, backtest_id, current_user.id)
     read = BacktestRead.model_validate(backtest, from_attributes=True)
     strategy = get_strategy(session, backtest.strategy_id, current_user.id)
     read.connection_id = strategy.connection_id
+    bt_id, raw_metrics = backtest.id, backtest.metrics
+    if trial:
+        row = _trial_or_404(session, bt_id, trial, current_user.id)
+        trial_info = {"index": row.trial_index, "params": dict(row.params or {}), "is_reference": bool(row.is_reference)}
+        session.close()  # release the pooled DB connection before the blocking HTTP call
+        files = _ledger_files(bt_id, trial, None)
+        payload = _ledger_files(bt_id, trial, "equity")
+        trades = _ledger_files(bt_id, trial, "trades").get("trades") or []
+        summary = files.get("summary") or {}
+        metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
+        for name in ("return_pct", "sharpe_ratio", "max_drawdown_pct", "win_rate_pct", "profit_factor", "total_trades", "equity_final", "equity_peak"):
+            setattr(read, name, metrics.get(name))
+        read.metrics = scalar_metrics(metrics)
+        if isinstance(summary.get("definition"), dict):
+            read.config = summary["definition"]
+        read.analysis = analyze_backtest({"ledger": {"equity_snapshots": payload.get("equity_snapshots") or []}}, trades)
+        read.exploration = None
+        read.agent_evaluation = None
+        read.trial = trial_info
+        return read
     if backtest.status not in _ACTIVE_STATUSES:
-        read.analysis = analyze_backtest(backtest.metrics, list_trades(session, backtest_id, current_user.id))
+        trades = list_trades(session, backtest_id, current_user.id)
+        if _ledger_in_files(backtest):
+            for row in trades:
+                session.expunge(row)  # read after the session is closed
+            session.close()  # release the pooled DB connection before the blocking HTTP call
+            try:
+                equity = _ledger_files(bt_id, None, "equity").get("equity_snapshots") or []
+            except HTTPException:
+                equity = []  # files removed: the page still opens, without the equity statistics
+            raw_metrics = {"ledger": {"equity_snapshots": equity}}
+        read.analysis = analyze_backtest(raw_metrics, trades)
     return read
 
 
@@ -381,17 +458,28 @@ def get_backtest_runtime_status_endpoint(
 def get_backtest_runtime_orders_endpoint(
     backtest_id: int,
     active_only: bool = Query(default=False),
+    trial: int | None = Query(default=None, ge=1),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
-    """Simulated orders: live from the coordinator, persisted ledger once finished."""
+    """Simulated orders: live from the coordinator, persisted ledger once
+    finished (``trial``: the orders of that trial of the exploration)."""
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
     bt_id = backtest.id
     active = backtest.status in _ACTIVE_STATUSES
-    ledger_orders = [] if active else _ledger_from_metrics(backtest, "orders")
+    in_files = bool(trial) or (not active and _ledger_in_files(backtest))
+    ledger_orders = [] if active or in_files else _ledger_from_metrics(backtest, "orders")
     session.close()  # release the pooled DB connection before the blocking HTTP call
+    if in_files:
+        ledger_orders = _ledger_files(bt_id, trial, "orders").get("orders") or []
+        if active_only:
+            ledger_orders = [
+                o for o in ledger_orders
+                if str(o.get("status") or "") in {"pending", "submitted", "partially_filled"}
+            ]
+        return {"orders": ledger_orders, "source": "ledger"}
     if not active and ledger_orders:
         # Finished run: the coordinator has forgotten it, serve the persisted ledger.
         if active_only:
@@ -528,17 +616,22 @@ def get_backtest_runtime_trades_endpoint(
 @router.get("/{backtest_id}/runtime/equity")
 def get_backtest_runtime_equity_endpoint(
     backtest_id: int,
+    trial: int | None = Query(default=None, ge=1),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
-    """Equity curve: live from the coordinator, persisted ledger once finished."""
+    """Equity curve: live from the coordinator, persisted ledger once
+    finished (``trial``: the curve of that trial of the exploration)."""
     from app.services.backtest_runner_service import backtest_runner_service
 
     backtest = get_backtest(session, backtest_id, current_user.id)
     bt_id = backtest.id
     active = backtest.status in _ACTIVE_STATUSES
-    ledger_equity = [] if active else _ledger_from_metrics(backtest, "equity_snapshots")
+    in_files = bool(trial) or (not active and _ledger_in_files(backtest))
+    ledger_equity = [] if active or in_files else _ledger_from_metrics(backtest, "equity_snapshots")
     session.close()  # release the pooled DB connection before the blocking HTTP call
+    if in_files:
+        return {"equity": _ledger_files(bt_id, trial, "equity").get("equity_snapshots") or [], "source": "ledger"}
     if not active and ledger_equity:
         # Finished run: the coordinator has forgotten it, serve the persisted curve.
         return {"equity": ledger_equity, "source": "ledger"}
@@ -554,14 +647,16 @@ def get_backtest_runtime_equity_endpoint(
 def get_backtest_ohlc_history_endpoint(
     backtest_id: int,
     chart_id: str | None = Query(default=None),
+    trial: int | None = Query(default=None, ge=1),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
     """Chart dataset persisted by the coordinator at materialisation (parquet).
 
     Same JSON shape as ``/marketdata/ohlc-history`` (candles, indicators,
-    indicator_meta, frames); ``chart_id`` selects a secondary chart. 404 when
-    the run predates dataset persistence.
+    indicator_meta, frames); ``chart_id`` selects a secondary chart;
+    ``trial`` shows the chart with the indicators of that trial of the
+    exploration. 404 when the run predates dataset persistence.
     """
     from app.services.backtest_runner_service import backtest_runner_service
 
@@ -569,7 +664,7 @@ def get_backtest_ohlc_history_endpoint(
     bt_id = backtest.id
     session.close()  # release the pooled DB connection before the blocking HTTP call
     try:
-        payload = backtest_runner_service.get_backtest_ohlc_history(bt_id, chart_id)
+        payload = backtest_runner_service.get_backtest_ohlc_history(bt_id, chart_id, trial)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     if payload is None:
@@ -707,8 +802,15 @@ def update_backtest_chart_drawings_endpoint(
 @router.get("/{backtest_id}/trades", response_model=list[TradeRead])
 def list_trades_endpoint(
     backtest_id: int,
+    trial: int | None = Query(default=None, ge=1),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_or_consultative_user),
 ):
-    """List all trades for a backtest."""
+    """List all trades for a backtest (``trial``: the trades of that trial of
+    its exploration, read from the trial's files)."""
+    if trial:
+        backtest = get_backtest(session, backtest_id, current_user.id)
+        bt_id = backtest.id
+        session.close()  # release the pooled DB connection before the blocking HTTP call
+        return _ledger_files(bt_id, trial, "trades").get("trades") or []
     return list_trades(session, backtest_id, current_user.id)
