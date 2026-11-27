@@ -45,3 +45,22 @@ def test_anchor_table_matches_literal():
     from typing import get_args
     from app.schemas.strategy import DrawingType
     assert set(get_args(DrawingType)) == set(DRAWING_ANCHOR_COUNTS)
+
+
+@pytest.mark.parametrize("side,tp,sl", [("long_position", 120, 90), ("short_position", 80, 110)])
+def test_position_round_trip_and_invalid_levels(side, tp, sl):
+    anchors = [{"t": 100, "p": 100}, {"t": 200, "p": tp}, {"t": 200, "p": sl}]
+    drawing = ChartDrawing(id="position", type=side, anchors=anchors)
+    assert ChartDrawing.model_validate_json(drawing.model_dump_json()) == drawing
+    invalid = [
+        anchors[:2],
+        [anchors[0], anchors[2], anchors[1]],
+        [anchors[0], {"t": 200, "p": 100}, anchors[2]],
+        [anchors[0], anchors[1], {"t": 300, "p": sl}],
+        [{"t": 200, "p": 100}, anchors[1], anchors[2]],
+        [anchors[0], {"t": 200, "p": float("inf")}, anchors[2]],
+        [{"t": float("nan"), "p": 100}, anchors[1], anchors[2]],
+    ]
+    for points in invalid:
+        with pytest.raises(ValidationError):
+            ChartDrawing(id="position", type=side, anchors=points)

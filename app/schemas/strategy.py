@@ -623,6 +623,7 @@ DrawingType = Literal[
     "trend_line", "ray", "extended_line",
     "horizontal_line", "horizontal_ray", "vertical_line",
     "rectangle", "path", "polyline", "fib_retracement", "text", "callout",
+    "long_position", "short_position",
 ]
 
 #: type → (min anchors, max anchors | None)
@@ -637,6 +638,8 @@ DRAWING_ANCHOR_COUNTS: dict[str, tuple[int, int | None]] = {
     "path": (2, None),
     "polyline": (2, None),
     "fib_retracement": (2, 2),
+    "long_position": (3, 3),
+    "short_position": (3, 3),
     "text": (1, 1),
     "callout": (2, 2),
 }
@@ -694,6 +697,14 @@ class ChartDrawing(BaseModel):
             raise ValueError(
                 f"{self.type} needs {lo}{'+' if hi is None else '' if hi == lo else f'-{hi}'} anchors, got {n}"
             )
+        if self.type in ("long_position", "short_position"):
+            entry, tp, sl = self.anchors
+            direction = 1 if self.type == "long_position" else -1
+            if (not all(math.isfinite(a.t) and math.isfinite(a.p) for a in self.anchors)
+                    or entry.t == tp.t or tp.t != sl.t
+                    or direction * (tp.p - entry.p) <= 0
+                    or direction * (entry.p - sl.p) <= 0):
+                raise ValueError("Position requires [entry, TP, SL], a shared TP/SL end time, and SL < entry < TP (long) or TP < entry < SL (short)")
         text = self.props.get("text")
         if text is not None and (not isinstance(text, str) or len(text) > 500):
             raise ValueError("props.text must be a string of at most 500 characters")
