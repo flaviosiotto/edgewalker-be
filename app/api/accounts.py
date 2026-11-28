@@ -162,6 +162,40 @@ class AccountPlaceOrderRequest(BaseModel):
     extra: dict[str, Any] | None = None
 
 
+@router.get("/{account_id}/order-capacity")
+async def get_order_capacity_endpoint(
+    account_id: int, symbol: str, side: str,
+    quantity: float | None = Query(default=None, ge=0, allow_inf_nan=False),
+    percentage: float | None = Query(default=None, ge=0, le=100, allow_inf_nan=False),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    from app.services.gateway_client import GatewayClient, GatewayError
+
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(404, "Account not found")
+    connection = get_connection(session, account.connection_id, current_user.id)
+    if connection is None:
+        raise HTTPException(404, "Connection not found")
+    if connection.broker_type != "ctrader":
+        raise HTTPException(501, "Order capacity is currently available for cTrader accounts")
+    client = GatewayClient(connection.id, broker_type=connection.broker_type)
+    broker_account = str(account.account_id)
+    session.close()
+    try:
+        return await client.order_capacity(
+            symbol=symbol, side=side.lower(), account=broker_account,
+            quantity=quantity, percentage=percentage,
+        )
+    except GatewayRejectedError as exc:
+        logger.warning("Order capacity unavailable: %s", exc)
+        raise HTTPException(exc.status_code or 422, exc.detail) from exc
+    except GatewayError as exc:
+        logger.warning("Order capacity request failed: %s", exc)
+        raise HTTPException(503, str(exc)) from exc
+
+
 @router.post("/{account_id}/orders")
 async def place_account_order_endpoint(
     account_id: int,

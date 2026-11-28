@@ -235,6 +235,15 @@ class GatewayClient:
 
     # ── Options (chain, quotes snapshot, readiness) ───────────────────────
 
+    async def order_capacity(self, *, symbol: str, side: str, account: str,
+                             quantity: float | None = None, percentage: float | None = None) -> dict:
+        params: dict[str, Any] = {"symbol": symbol, "side": side, "account": account}
+        if quantity is not None:
+            params["quantity"] = quantity
+        if percentage is not None:
+            params["percentage"] = percentage
+        return await self._command(lambda: self._get("/order-capacity", params=params, timeout=60))
+
     async def get_options(self, path: str, params: dict | None = None) -> Any:
         """GET one of the gateway's ``/options/*`` reads, body untouched.
 

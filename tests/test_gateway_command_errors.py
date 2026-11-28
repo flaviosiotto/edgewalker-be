@@ -43,6 +43,39 @@ def test_format_gateway_detail_flattens_broker_and_validation_payloads():
     assert format_gateway_detail(None) == ""
 
 
+def test_capacity_endpoint_checks_ownership_and_releases_db_before_broker_read(monkeypatch):
+    from fastapi import HTTPException
+    from app.api import accounts
+
+    events = []
+    account = SimpleNamespace(account_id="broker-account", connection_id=21)
+
+    def owned_account(session, account_id, user_id):
+        assert account_id == 9
+        return account if user_id == 7 else None
+
+    def owned_connection(session, connection_id, user_id):
+        assert (connection_id, user_id) == (21, 7)
+        return SimpleNamespace(id=21, broker_type="ctrader")
+
+    async def capacity(self, **kwargs):
+        assert events == ["close"]
+        assert kwargs == dict(symbol="INSTRUMENT", side="buy", account="broker-account", quantity=None, percentage=25)
+        events.append("broker")
+        return {"quantity": 25}
+
+    monkeypatch.setattr(accounts, "get_account", owned_account)
+    monkeypatch.setattr(accounts, "get_connection", owned_connection)
+    monkeypatch.setattr(GatewayClient, "order_capacity", capacity)
+    session = SimpleNamespace(close=lambda: events.append("close"))
+    params = dict(account_id=9, symbol="INSTRUMENT", side="BUY", quantity=None, percentage=25, session=session)
+    assert asyncio.run(accounts.get_order_capacity_endpoint(**params, current_user=SimpleNamespace(id=7))) == {"quantity": 25}
+    with pytest.raises(HTTPException) as info:
+        asyncio.run(accounts.get_order_capacity_endpoint(**params, current_user=SimpleNamespace(id=8)))
+    assert info.value.status_code == 404
+    assert events == ["close", "broker"]
+
+
 def test_broker_rejection_is_a_rejected_error_carrying_the_reason(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/orders"
@@ -90,6 +123,23 @@ def test_read_paths_keep_raising_httpx_errors(monkeypatch):
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(client.get_status())
 
+
+def test_order_capacity_preserves_quantity_percentage_and_broker_errors(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and request.url.path == "/order-capacity"
+        assert request.url.params["account"] == "broker-account"
+        if "quantity" in request.url.params:
+            assert request.url.params["quantity"] == "25"
+            assert "percentage" not in request.url.params
+            return httpx.Response(200, json={"quantity": 25, "percentage": 40})
+        assert request.url.params["percentage"] == "100"
+        return httpx.Response(400, json={"detail": "Account margin is unavailable"})
+
+    client = _client_with(handler, monkeypatch)
+    result = asyncio.run(client.order_capacity(symbol="INSTRUMENT", side="buy", account="broker-account", quantity=25))
+    assert result == {"quantity": 25, "percentage": 40}
+    with pytest.raises(GatewayRejectedError, match="Account margin is unavailable"):
+        asyncio.run(client.order_capacity(symbol="INSTRUMENT", side="buy", account="broker-account", percentage=100))
 
 def test_place_account_order_lets_the_typed_error_through(monkeypatch):
     from app.services import order_command_service as svc
