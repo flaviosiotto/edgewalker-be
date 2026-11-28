@@ -520,9 +520,47 @@ def submit_backtest_runtime_order_endpoint(
         f"strategy-{strategy_id}:backtest-{backtest.id}:manual:{int(datetime.now(timezone.utc).timestamp() * 1000)}",
     )
     try:
+        from app.services.order_command_service import agent_sizing_policy
+        order_payload["sizing"], order_payload["extra"] = agent_sizing_policy(
+            session, payload.quantity, payload.sizing, extra,
+        )
         return backtest_runner_service.place_backtest_order(backtest.id, order_payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.get("/{backtest_id}/runtime/trading-context")
+def backtest_trading_context(
+    backtest_id: int, symbol: str, session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    from app.services.backtest_runner_service import backtest_runner_service
+    get_backtest(session, backtest_id, current_user.id)
+    try:
+        return backtest_runner_service.trading_context(backtest_id, symbol)
+    except RuntimeError as exc:
+        raise HTTPException(424, str(exc)) from exc
+
+
+@router.post("/{backtest_id}/runtime/orders/preview")
+def preview_backtest_order(
+    backtest_id: int, payload: BacktestRuntimeOrderRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    from app.services.backtest_runner_service import backtest_runner_service
+    get_backtest(session, backtest_id, current_user.id)
+    try:
+        from app.services.order_command_service import agent_sizing_policy
+        request = payload.model_dump(exclude_none=True)
+        request["sizing"], request["extra"] = agent_sizing_policy(session, payload.quantity, payload.sizing, payload.extra)
+        return backtest_runner_service.place_backtest_order(backtest_id, request, preview=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(424, str(exc)) from exc
 
 
 @router.delete("/{backtest_id}/runtime/orders/{order_id}")

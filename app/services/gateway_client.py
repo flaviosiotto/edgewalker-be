@@ -365,7 +365,8 @@ class GatewayClient:
         symbol: str,
         side: str,
         order_type: str = "market",
-        quantity: float,
+        quantity: float | None,
+        sizing: dict[str, Any] | None = None,
         limit_price: float | None = None,
         stop_price: float | None = None,
         take_profit_price: float | None = None,
@@ -379,8 +380,11 @@ class GatewayClient:
             "symbol": symbol,
             "side": side,
             "order_type": order_type,
-            "quantity": quantity,
         }
+        if quantity is not None:
+            payload["quantity"] = quantity
+        if sizing is not None:
+            payload["sizing"] = sizing
         for key, value in (
             ("limit_price", limit_price),
             ("stop_price", stop_price),
@@ -393,6 +397,12 @@ class GatewayClient:
             if value:
                 payload[key] = value
         return await self._command(lambda: self._post("/orders", json=payload))
+
+    async def trading_context(self, symbol: str, account: str) -> dict:
+        return await self._command(lambda: self._get("/trading-context", params={"symbol": symbol, "account": account}))
+
+    async def preview_order(self, payload: dict[str, Any]) -> dict:
+        return await self._command(lambda: self._post("/orders/preview", json=payload))
 
     async def cancel_order(self, order_id: str | int, *, symbol: str | None = None) -> dict:
         """Cancel a working order by its broker order id."""

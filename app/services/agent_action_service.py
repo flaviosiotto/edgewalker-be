@@ -72,6 +72,9 @@ def summarize(tool_name: str, args: dict[str, Any]) -> str:
             legs.append(f"SL {_fmt(a['stop_loss_price'])}")
         if legs:
             parts.append("(" + ", ".join(legs) + ")")
+        if a.get("sizing"):
+            sizing = a["sizing"]
+            parts.append(f"[{sizing.get('mode')}: {_fmt(sizing.get('value'))}; ricalcolato all'invio]")
         return "Ordine: " + " ".join(p for p in parts if p)
     if tool_name == "close_position":
         return f"Chiudi posizione #{_fmt(a.get('position_id'))} qty {_fmt(a.get('quantity'))} {_fmt(a.get('symbol'))}".rstrip()
@@ -400,12 +403,13 @@ async def _execute(session: Session, row: AgentActionRequest, agent: Agent | Non
                 side=str(args.get("side") or "").lower(),
                 order_type=str(args.get("order_type") or "market").lower(),
                 quantity=float(args.get("quantity") or 0),
+                sizing=args.get("sizing"),
                 limit_price=_opt_float(args.get("limit_price")),
                 stop_price=_opt_float(args.get("stop_price")),
                 take_profit_price=_opt_float(args.get("take_profit_price")),
                 stop_loss_price=_opt_float(args.get("stop_loss_price")),
                 strategy_live_id=row.strategy_live_id,
-                extra=extra,
+                extra={**extra, **({"risk_limit_percent": args["risk_limit_percent"]} if args.get("risk_limit_percent") is not None else {})},
             )
         elif row.tool_name == "cancel_order":
             from app.services.order_command_service import cancel_account_order

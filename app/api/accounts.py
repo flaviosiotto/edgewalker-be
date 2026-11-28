@@ -151,7 +151,9 @@ class AccountPlaceOrderRequest(BaseModel):
     symbol: str
     side: str
     order_type: str = "market"
-    quantity: float = Field(gt=0)
+    quantity: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    sizing: dict[str, Any] | None = None
+    reference_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     limit_price: float | None = Field(default=None, gt=0)
     stop_price: float | None = Field(default=None, gt=0)
     take_profit_price: float | None = Field(default=None, gt=0)
@@ -192,6 +194,7 @@ async def place_account_order_endpoint(
             side=payload.side,
             order_type=payload.order_type,
             quantity=payload.quantity,
+            sizing=payload.sizing,
             limit_price=payload.limit_price,
             stop_price=payload.stop_price,
             take_profit_price=payload.take_profit_price,
@@ -207,6 +210,49 @@ async def place_account_order_endpoint(
     except RuntimeError as exc:
         # Never 502: the edge proxy replaces 502/504 with its own page and
         # the reason would not reach the client.
+        raise HTTPException(status_code=424, detail=str(exc)) from exc
+
+
+@router.get("/{account_id}/trading-context")
+async def account_trading_context(
+    account_id: int, symbol: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    from app.services.order_command_service import account_order_context
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    try:
+        return await account_order_context(session, account, symbol=symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GatewayRejectedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=424, detail=str(exc)) from exc
+
+
+@router.post("/{account_id}/orders/preview")
+async def preview_account_order(
+    account_id: int, payload: AccountPlaceOrderRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_or_consultative_user),
+):
+    from app.services.order_command_service import account_order_context
+    account = get_account(session, account_id, current_user.id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    try:
+        return await account_order_context(
+            session, account, symbol=payload.symbol,
+            preview=payload.model_dump(exclude_none=True, exclude={"strategy_live_id"}),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GatewayRejectedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
         raise HTTPException(status_code=424, detail=str(exc)) from exc
 
 

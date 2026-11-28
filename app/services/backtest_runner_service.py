@@ -530,10 +530,20 @@ class BacktestRunnerService:
             orders = [order for order in orders if str(order.get("status") or "").lower() in active_statuses]
         return {"orders": orders}
 
-    def place_backtest_order(self, backtest_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    def trading_context(self, backtest_id: int, symbol: str) -> dict[str, Any]:
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/trading-context", params={"symbol": symbol})
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Backtest trading context unavailable: {exc}") from exc
+
+    def place_backtest_order(self, backtest_id: int, payload: dict[str, Any], *, preview: bool = False) -> dict[str, Any]:
         try:
             with httpx.Client(timeout=5.0) as client:
-                resp = client.post(f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/orders", json=payload)
+                path = f"{BACKTEST_SERVICE_URL}/backtests/{backtest_id}/orders" + ("/preview" if preview else "")
+                resp = client.post(path, json=payload)
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPStatusError as exc:
