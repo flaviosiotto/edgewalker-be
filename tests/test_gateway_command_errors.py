@@ -43,7 +43,9 @@ def test_format_gateway_detail_flattens_broker_and_validation_payloads():
     assert format_gateway_detail(None) == ""
 
 
-def test_capacity_endpoint_checks_ownership_and_releases_db_before_broker_read(monkeypatch):
+@pytest.mark.parametrize("broker_type", ["ctrader", "ibkr"])
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_capacity_endpoint_checks_ownership_and_releases_db_before_broker_read(monkeypatch, broker_type, unsupported):
     from fastapi import HTTPException
     from app.api import accounts
 
@@ -56,12 +58,14 @@ def test_capacity_endpoint_checks_ownership_and_releases_db_before_broker_read(m
 
     def owned_connection(session, connection_id, user_id):
         assert (connection_id, user_id) == (21, 7)
-        return SimpleNamespace(id=21, broker_type="ctrader")
+        return SimpleNamespace(id=21, broker_type=broker_type)
 
     async def capacity(self, **kwargs):
         assert events == ["close"]
         assert kwargs == dict(symbol="INSTRUMENT", side="buy", account="broker-account", quantity=None, percentage=25)
         events.append("broker")
+        if unsupported:
+            raise GatewayUnavailableError("Not supported", status_code=501, detail="Not supported")
         return {"quantity": 25}
 
     monkeypatch.setattr(accounts, "get_account", owned_account)
@@ -69,7 +73,12 @@ def test_capacity_endpoint_checks_ownership_and_releases_db_before_broker_read(m
     monkeypatch.setattr(GatewayClient, "order_capacity", capacity)
     session = SimpleNamespace(close=lambda: events.append("close"))
     params = dict(account_id=9, symbol="INSTRUMENT", side="BUY", quantity=None, percentage=25, session=session)
-    assert asyncio.run(accounts.get_order_capacity_endpoint(**params, current_user=SimpleNamespace(id=7))) == {"quantity": 25}
+    if unsupported:
+        with pytest.raises(HTTPException) as info:
+            asyncio.run(accounts.get_order_capacity_endpoint(**params, current_user=SimpleNamespace(id=7)))
+        assert info.value.status_code == 501 and info.value.detail == "Not supported"
+    else:
+        assert asyncio.run(accounts.get_order_capacity_endpoint(**params, current_user=SimpleNamespace(id=7))) == {"quantity": 25}
     with pytest.raises(HTTPException) as info:
         asyncio.run(accounts.get_order_capacity_endpoint(**params, current_user=SimpleNamespace(id=8)))
     assert info.value.status_code == 404

@@ -178,8 +178,6 @@ async def get_order_capacity_endpoint(
     connection = get_connection(session, account.connection_id, current_user.id)
     if connection is None:
         raise HTTPException(404, "Connection not found")
-    if connection.broker_type != "ctrader":
-        raise HTTPException(501, "Order capacity is currently available for cTrader accounts")
     client = GatewayClient(connection.id, broker_type=connection.broker_type)
     broker_account = str(account.account_id)
     session.close()
@@ -193,6 +191,8 @@ async def get_order_capacity_endpoint(
         raise HTTPException(exc.status_code or 422, exc.detail) from exc
     except GatewayError as exc:
         logger.warning("Order capacity request failed: %s", exc)
+        if exc.status_code == 501:
+            raise HTTPException(501, exc.detail or str(exc)) from exc
         raise HTTPException(503, str(exc)) from exc
 
 
