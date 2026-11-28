@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-import math
 from typing import Any
 
 from sqlmodel import Session, select
@@ -63,46 +62,21 @@ def _resolve_order_ref(session: Session, strategy_live_id: int | None) -> str | 
     return build_order_ref(live.strategy_id, live.id)
 
 
-def _validate(side: str, order_type: str, quantity: float | None, limit_price: float | None,
-              stop_price: float | None, sizing: dict[str, Any] | None = None) -> tuple[str, str]:
+def _validate(side: str, order_type: str, quantity: float, limit_price: float | None,
+              stop_price: float | None) -> tuple[str, str]:
     normalised_side = str(side or "").lower()
     normalised_type = str(order_type or "market").lower()
     if normalised_side not in VALID_SIDES:
         raise ValueError("side must be 'buy' or 'sell'")
     if normalised_type not in VALID_ORDER_TYPES:
         raise ValueError("order_type must be 'market', 'limit' or 'stop'")
-    if sizing is not None:
-        from edgewalker_platform.sizing import validate_sizing
-        validate_sizing(sizing)
-    elif quantity is None or not math.isfinite(quantity) or quantity <= 0:
+    if quantity <= 0:
         raise ValueError("quantity must be > 0")
     if normalised_type == "limit" and limit_price is None:
         raise ValueError("limit_price required for limit orders")
     if normalised_type == "stop" and stop_price is None:
         raise ValueError("stop_price required for stop orders")
     return normalised_side, normalised_type
-
-
-def agent_sizing_policy(
-    session: Session, quantity: float | None, sizing: dict[str, Any] | None,
-    extra: dict[str, Any] | None,
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    from app.core.actor import current_actor
-    from app.models.agent import Agent
-    from edgewalker_platform.sizing import number
-
-    command_extra = dict(extra or {})
-    actor = current_actor()
-    if actor is not None and actor.agent_id is not None:
-        agent = session.get(Agent, actor.agent_id)
-        if agent is None:
-            raise ValueError("Trading agent not found")
-        risk_limit = (agent.persona or {}).get("max_risk_per_trade_pct")
-        if risk_limit is not None:
-            command_extra["risk_limit_percent"] = float(number(risk_limit, "agent.max_risk_per_trade_pct"))
-            if sizing is None:
-                sizing = {"mode": "quantity", "value": quantity}
-    return sizing, command_extra
 
 
 async def place_account_order(
@@ -112,8 +86,7 @@ async def place_account_order(
     symbol: str,
     side: str,
     order_type: str = "market",
-    quantity: float | None,
-    sizing: dict[str, Any] | None = None,
+    quantity: float,
     limit_price: float | None = None,
     stop_price: float | None = None,
     take_profit_price: float | None = None,
@@ -123,7 +96,7 @@ async def place_account_order(
 ) -> dict[str, Any]:
     """Submit an order for an account through whoever is authoritative."""
     normalised_side, normalised_type = _validate(
-        side, order_type, quantity, limit_price, stop_price, sizing
+        side, order_type, quantity, limit_price, stop_price
     )
     for label, price in (
         ("take_profit_price", take_profit_price),
@@ -134,9 +107,7 @@ async def place_account_order(
         if price is not None and price <= 0:
             raise ValueError(f"{label} must be > 0")
 
-    sizing, command_extra = agent_sizing_policy(
-        session, quantity, sizing, {"source": "backend_account_api", **(extra or {})},
-    )
+    command_extra = {"source": "backend_account_api", **(extra or {})}
 
     connection = session.get(Connection, account.connection_id)
     if connection is None:
@@ -152,7 +123,6 @@ async def place_account_order(
             side=normalised_side,
             order_type=normalised_type,
             quantity=quantity,
-            sizing=sizing,
             limit_price=limit_price,
             stop_price=stop_price,
             take_profit_price=take_profit_price,
@@ -171,20 +141,6 @@ async def place_account_order(
         "order_ref": order_ref,
         "result": result,
     }
-
-
-async def account_order_context(
-    session: Session, account: Any, *, symbol: str, preview: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    connection = session.get(Connection, account.connection_id)
-    if connection is None:
-        raise ValueError("Account has no connection configured")
-    client = GatewayClient(connection.id, broker_type=connection.broker_type, timeout=COMMAND_TIMEOUT)
-    if preview is not None:
-        sizing, extra = agent_sizing_policy(session, preview.get("quantity"), preview.get("sizing"), preview.get("extra"))
-        preview = {**preview, "sizing": sizing, "extra": extra}
-        return await client.preview_order({**preview, "account": str(account.account_id)})
-    return await client.trading_context(symbol, str(account.account_id))
 
 
 def find_account_order(session: Session, account_id: int, order_id: str) -> LiveOrder | None:

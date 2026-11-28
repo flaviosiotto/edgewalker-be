@@ -141,17 +141,3 @@ def test_snapshot_read_before_a_live_start_carries_the_gateway_reason(monkeypatc
     answer = _gateway_start_error(info.value)
     assert answer.status_code == 400 and reason in answer.detail
     assert _gateway_start_error(GatewayUnavailableError("Gateway http://gw-11:8080 unreachable")).status_code == 424
-
-
-def test_agent_risk_policy_uses_current_actor_and_database_not_request_metadata():
-    from app.core.actor import Actor, reset_current_actor, set_current_actor
-    from app.services.order_command_service import agent_sizing_policy
-
-    session = SimpleNamespace(get=lambda model, key: SimpleNamespace(persona={"max_risk_per_trade_pct": 0.5}))
-    token = set_current_actor(Actor(via="agent", user_id=1, agent_id=2))
-    try:
-        sizing, extra = agent_sizing_policy(session, 10, None, {"risk_limit_percent": 99, "actor": {"agent_id": 999}})
-    finally:
-        reset_current_actor(token)
-    assert sizing == {"mode": "quantity", "value": 10}
-    assert extra["risk_limit_percent"] == 0.5

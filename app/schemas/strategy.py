@@ -490,9 +490,7 @@ class BacktestRuntimeOrderRequest(BaseModel):
     symbol: str
     side: Literal["buy", "sell"]
     order_type: Literal["market", "limit", "stop"] = "market"
-    quantity: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-    sizing: dict[str, Any] | None = None
-    reference_price: float | None = None
+    quantity: float = 1
     limit_price: Optional[float] = None
     stop_price: Optional[float] = None
     take_profit_price: Optional[float] = None

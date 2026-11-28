@@ -1,12 +1,5 @@
 # Copilot Instructions for EDGEWALKER-BE
 
-## Compact code and shared access points
-
-Before adding endpoints, services, models or helpers, trace the existing flow and reuse its contracts and access points.
-Generalize only to remove concrete duplication; keep one authoritative implementation of each calculation or validation.
-Avoid redundant preflights, state copies and parallel pipelines: for example, preview and submission should reuse the same calculator, not implement sizing twice.
-Keep changes scoped, remove superseded paths and test dependent callers; moving code into more files is not itself a simplification.
-
 ## Stack
 FastAPI + SQLModel + PostgreSQL (pgvector) + Pydantic v2
 
